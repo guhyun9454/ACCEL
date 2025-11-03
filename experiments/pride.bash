@@ -1,97 +1,58 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# experiments/pride.bash
+# Self-escalation routing for ARC(4지선다) + CSQA(5지선다)
+# - USE_PRIDE=true 로 두면 PriDe 라우팅(router_with_pride.py), false면 router_no_pride.py
+# - 필요시 MODELS를 공백구분 나열로 override 가능 (미지정 시 기본 리스트 사용)
 
+set -euo pipefail
 
-EVAL_NAMES=("arc,0,cyclic" "csqa,0,cyclic")
+# ====== 환경 설정 ======
+# source ~/.bashrc
+# conda activate tensorflow_gpu   # <-- 당신 환경에 맞게 변경
 
-# Map each task to its setting suffix (e.g., _cyclic) for result path alignment
-declare -A TASK_SUFFIX=()
-for eval in "${EVAL_NAMES[@]}"; do
-  IFS=',' read -r task shots setting <<< "$eval"
-  if [[ -n "$setting" ]]; then
-    TASK_SUFFIX["$task"]="_${setting}"
-  else
-    TASK_SUFFIX["$task"]=""
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+DATA_ROOT="data"
+OUTDIR="routes_out"
+LAMBDA="0.80"                 # 평균 top-1 confidence 임계치
+EXTRA_ARGS="--prompt_lang en" # 프롬프트 언어
+KO_FLAG="false"               # 한국어 데이터면 true로 변경
+USE_PRIDE="true"              # PriDe 라우팅 사용 여부
+PRIDE_CFG="method=paraphrase,k=3,seed=42"
+
+# 선택: 모델 리스트 override (공백 구분). 비우면 기본 리스트 사용
+# MODELS='Qwen/Qwen2.5-1.5B-Instruct meta-llama/Llama-3.2-3B-Instruct'
+MODELS="${MODELS:-}"
+
+# ====== 공통 함수 ======
+run_route () {
+  local EVAL_NAME="$1" NUM_SHIFTS="$2"
+
+  local SCRIPT="router_no_pride.py"
+  local PRIDE_OPT=()
+  if [[ "$USE_PRIDE" == "true" ]]; then
+    SCRIPT="router_with_pride.py"
+    PRIDE_OPT=(--pride "$PRIDE_CFG")
   fi
-done
 
-MODELS=(
-  "K-intelligence/Midm-2.0-Mini-Instruct"
-  "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct"
-  "skt/A.X-4.0-Light"
-  "kakaocorp/kanana-1.5-2.1b-instruct-2505"
-  "naver-hyperclovax/HyperCLOVAX-SEED-Text-Instruct-1.5B"
-  "Qwen/Qwen2.5-1.5B-Instruct"
-  "meta-llama/Llama-3.2-1B-Instruct"
-  "meta-llama/Llama-3.2-3B-Instruct"
-  "google/gemma-3-1b-it"
-)
-
-lang_flags() {
-  local lang="$1"
-  if [[ "$lang" == "ko" ]]; then
-    echo "--ko --prompt_lang ko"
-  else
-    echo "--prompt_lang en"
+  local KO_OPT=()
+  if [[ "$KO_FLAG" == "true" ]]; then
+    KO_OPT=(--ko)
   fi
+
+  local MODEL_OPT=()
+  if [[ -n "${MODELS}" ]]; then
+    # 공백 분리된 MODELS를 --models 뒤에 그대로 전달
+    MODEL_OPT=(--models ${MODELS})
+  fi
+
+  echo "[RUN] ${SCRIPT} | eval=${EVAL_NAME} | shifts=${NUM_SHIFTS} | pride=${USE_PRIDE}"
+  python "${SCRIPT}"     --data_root "${DATA_ROOT}"     --eval_name "${EVAL_NAME}"     --num_shifts "${NUM_SHIFTS}"     --lambda "${LAMBDA}"     --root_out "${OUTDIR}"     --extra "${EXTRA_ARGS}"     "${KO_OPT[@]}"     "${PRIDE_OPT[@]}"     "${MODEL_OPT[@]}"
 }
 
-declare -A OPT4=(
-  ["ABCD"]="A,B,C,D"
-  ["abcd"]="a,b,c,d"
-  ["1234"]="1,2,3,4"
-)
-declare -A OPT5=(
-  ["ABCD"]="A,B,C,D,E"
-  ["abcd"]="a,b,c,d,e"
-  ["12345"]="1,2,3,4,5"
-)
+# ====== 실행: ARC(4), CSQA(5) ======
+run_route "arc,0" 4
+run_route "csqa,0" 5
 
-move_variant_results() {
-  local model_name="$1"
-  local lang="$2"
-  local variant="$3"
-  local fewshot_tag="0s_${model_name}"
-
-  for task in arc csqa; do
-    local setting_suffix="${TASK_SUFFIX[$task]}"
-    local src="results/${task}/${fewshot_tag}/${task}${setting_suffix}"
-    local dst="results/${task}/${fewshot_tag}/${lang}/labels-${variant}/${task}${setting_suffix}"
-    if [[ -d "$src" ]]; then
-      mkdir -p "$(dirname "$dst")"
-      if [[ -d "$dst" ]]; then
-        echo "[SKIP] $dst already exists."
-      else
-        mv "$src" "$dst"
-        echo "[MOVED] $src -> $dst"
-      fi
-    fi
-  done
-}
-
-run_one() {
-  local model="$1"
-  local lang="$2"
-  local variant="$3"
-  local opt4="$4"
-  local opt5="$5"
-
-  echo "=== Running: model=$model | lang=$lang | variant=$variant ==="
-  python code/eval_clm.py \
-    --pretrained_model_path "$model" \
-    --eval_names "${EVAL_NAMES[@]}" \
-    $(lang_flags "$lang") \
-    --option_ids4 "$opt4" \
-    --option_ids5 "$opt5"
-
-  local model_name
-  model_name="$(basename "$model")"
-  move_variant_results "$model_name" "$lang" "$variant"
-}
-
-for MODEL in "${MODELS[@]}"; do
-  for LANG in ko en; do
-    run_one "$MODEL" "$LANG" "ABCD"  "${OPT4[ABCD]}"  "${OPT5[ABCD]}"
-    run_one "$MODEL" "$LANG" "abcd"  "${OPT4[abcd]}"  "${OPT5[abcd]}"
-    run_one "$MODEL" "$LANG" "1234"  "${OPT4[1234]}"  "${OPT5[12345]}"
-  done
-done
+echo "[DONE] routes saved under: ${OUTDIR}/"
