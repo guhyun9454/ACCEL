@@ -29,10 +29,10 @@ MODELS="${MODELS:-}"
 run_route () {
   local EVAL_NAME="$1" NUM_SHIFTS="$2"
 
-  local SCRIPT="router_no_pride.py"
+  local SCRIPT="code/router_no_pride.py"
   local PRIDE_OPT=()
   if [[ "$USE_PRIDE" == "true" ]]; then
-    SCRIPT="router_with_pride.py"
+    SCRIPT="code/router_with_pride.py"
     PRIDE_OPT=(--pride "$PRIDE_CFG")
   fi
 
