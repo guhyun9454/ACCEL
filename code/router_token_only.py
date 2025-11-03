@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, subprocess, os, json
+import argparse, subprocess, os
 
 TOKEN_SETS_4 = {"T0": "A,B,C,D", "T1": "a,b,c,d", "T2": "1,2,3,4"}
 TOKEN_SETS_5 = {"T0": "A,B,C,D,E", "T1": "a,b,c,d,e", "T2": "1,2,3,4,5"}
@@ -19,7 +19,7 @@ DEFAULT_MODELS = [
 def sanitize(s): return s.replace("/", "_").replace(" ", "_")
 def ensure_dir(p): os.makedirs(p, exist_ok=True)
 
-def run_once(model, eval_name, data_root, out_jsonl, tok4, tok5, ko, extra):
+def run_once(model, eval_name, data_root, out_jsonl, tok4, tok5, ko, extra, use_pride, pride_cfg):
     cmd = [
         "python", "code/eval_clm.py",
         "--pretrained_model_path", model,
@@ -32,32 +32,40 @@ def run_once(model, eval_name, data_root, out_jsonl, tok4, tok5, ko, extra):
     ]
     if ko: cmd.append("--ko")
     if extra.strip(): cmd += extra.strip().split()
+    if use_pride and pride_cfg:
+        cmd += ["--pride", pride_cfg]
     print(">>", " ".join(cmd))
     return subprocess.run(cmd).returncode
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", default="data")
-    ap.add_argument("--eval_name", default="arc,0")  # e.g., arc,0 | csqa,0
+    ap.add_argument("--eval_name", default="arc,0")      # arc,0 | csqa,0
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     ap.add_argument("--token", choices=["T0","T1","T2"], required=True)
-    ap.add_argument("--root_out", default="routes_out/token_only")
+    ap.add_argument("--out_base", default="routes_out/token_only")
     ap.add_argument("--extra", default="--prompt_lang en")
     ap.add_argument("--ko", action="store_true")
+    ap.add_argument("--use_pride", type=lambda x: str(x).lower() in ["1","true","yes","y"], default=False)
+    ap.add_argument("--pride_cfg", default="method=paraphrase,k=3,seed=42")
     args = ap.parse_args()
 
     tok4 = TOKEN_SETS_4[args.token]
     tok5 = TOKEN_SETS_5[args.token]
     eval_tag = args.eval_name.split(",")[0]
+    onoff = "pride_on" if args.use_pride else "pride_off"
 
     for model in args.models:
         model_tag = sanitize(model)
-        out_dir = os.path.join(args.root_out, eval_tag, model_tag, args.token)
+        out_dir = os.path.join(args.out_base, onoff, eval_tag, model_tag, args.token)
         ensure_dir(out_dir)
         out_jsonl = os.path.join(out_dir, "P0.jsonl")
-        rc = run_once(model, args.eval_name, args.data_root, out_jsonl, tok4, tok5, args.ko, args.extra)
+        rc = run_once(
+            model, args.eval_name, args.data_root, out_jsonl,
+            tok4, tok5, args.ko, args.extra, args.use_pride, args.pride_cfg
+        )
         if rc != 0:
-            print(f"[WARN] failed: {model_tag} ({args.token})")
+            print(f"[WARN] failed: {model_tag} ({args.token}, {onoff})")
 
 if __name__ == "__main__":
     main()
