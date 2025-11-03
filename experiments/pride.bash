@@ -14,7 +14,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 DATA_ROOT="data"
-OUTDIR="routes_out"
+OUT_BASE="routes_out"
+if [[ "$USE_PRIDE" == "true" ]]; then
+  OUTDIR="${OUT_BASE}/pride_on"
+else
+  OUTDIR="${OUT_BASE}/pride_off"
+fi
 LAMBDA="0.80"                 # 평균 top-1 confidence 임계치
 EXTRA_ARGS="--prompt_lang en" # 프롬프트 언어
 KO_FLAG="false"               # 한국어 데이터면 true로 변경
