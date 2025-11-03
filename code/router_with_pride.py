@@ -95,8 +95,8 @@ def run_eval(model, eval_name, data_root, out_jsonl, tok4, tok5, shift, ko, extr
     ]
     if ko: cmd.append("--ko")
     if extra.strip(): cmd += extra.strip().split()
-    if args.pride:
-        cmd += ["--pride", args.pride]
+    if pride_cfg:
+        cmd += ["--pride", pride_cfg]
 
     print("  >>", " ".join(cmd))
     return subprocess.run(cmd).returncode
