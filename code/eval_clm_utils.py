@@ -46,6 +46,10 @@ def parse_arguments():
                         help="Comma-separated option IDs for 4-choice tasks (e.g., 'A,B,C,D' or '가,나,다,라' or '1,2,3,4')")
     parser.add_argument("--option_ids5", type=str, default=None,
                         help="Comma-separated option IDs for 5-choice tasks (e.g., 'A,B,C,D,E' or '가,나,다,라,마' or '1,2,3,4,5')")
+    parser.add_argument("--save_preds", default=None, help="Write JSONL of per-item predictions here")
+    parser.add_argument("--permute_shift", type=int, default=0, help="Cyclic shift of options (0..L-1)")
+    parser.add_argument("--pride", default=None, help="PriDe config string")
+
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]

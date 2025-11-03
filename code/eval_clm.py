@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 import os
 import sys
 import json
@@ -17,7 +17,7 @@ from utils import (
 )
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers import BitsAndBytesConfig
+from transformers import BitsAndBytesConfig  # (미사용 가능)
 
 import gc
 
@@ -26,6 +26,30 @@ pynvml.nvmlInit()
 
 logger = logging.getLogger(__name__)
 
+# ===== JSONL 덤프 유틸 (변형/라우팅/시각화용) =====
+_PRED_DUMP = []
+def dump_pred(qid, gold_idx, pred_idx, probs=None):
+    rec = {"qid": qid, "gold": int(gold_idx), "pred": int(pred_idx)}
+    if probs is not None:
+        try:
+            rec["probs"] = [float(x) for x in probs]
+        except Exception:
+            # probs가 텐서/넘파이일 수도 있으니 best-effort 변환
+            try:
+                rec["probs"] = [float(x) for x in list(probs)]
+            except Exception:
+                pass
+    _PRED_DUMP.append(rec)
+
+def flush_dump(path):
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # subject 단위 append 저장 (라우터가 여러 번 호출 가능)
+    with open(path, "a", encoding="utf-8") as w:
+        for r in _PRED_DUMP:
+            w.write(json.dumps(r, ensure_ascii=False) + "\n")
+    _PRED_DUMP.clear()
 
 def logging_cuda_memory_usage():
     logger.info("******** Memory usage ********")
@@ -44,6 +68,8 @@ def main():
         level=logging.INFO,
     )
 
+    # ── 중요: 여기서 --save_preds / --permute_shift / --pride 를 받아야 함
+    # (아래 2)번에서 eval_clm_utils.py에 실제 argparse 추가 필요)
     args = parse_arguments()
     if len(args.eval_names) == 0:
         exit()
@@ -90,6 +116,12 @@ def main():
         return
     logging_cuda_memory_usage()
 
+    # 옵션 라벨(토큰) 파싱: 덤프 시 gold/pred 인덱스 해석용
+    tokens4 = getattr(args, "option_ids4", None)
+    tokens5 = getattr(args, "option_ids5", None)
+    tokens4 = tokens4.split(",") if isinstance(tokens4, str) and tokens4 else ["A","B","C","D"]
+    tokens5 = tokens5.split(",") if isinstance(tokens5, str) and tokens5 else ["A","B","C","D","E"]
+
     for eval_name in args.eval_names[::1]:
         (
             subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
@@ -113,6 +145,57 @@ def main():
             gc.collect()
             torch.cuda.empty_cache()
 
+            # ===== JSONL 덤프: qid/gold/pred/(probs) =====
+            def _safe_get_idx(rec, keys):
+                for k in keys:
+                    if k in rec and rec[k] is not None:
+                        return rec[k]
+                return None
+
+            def _letter_to_idx(letter, toks):
+                try:
+                    return toks.index(str(letter))
+                except Exception:
+                    return None
+
+            for i, r in enumerate(results):
+                qid = r.get("id", r.get("qid", f"{subject}:{i}"))
+
+                # 선택지 개수 추정
+                L = _safe_get_idx(r, ["num_choices", "n_choices"])
+                if not isinstance(L, int):
+                    for cand in ["choices", "options", "option_list"]:
+                        if cand in r and isinstance(r[cand], (list, tuple)):
+                            L = len(r[cand]); break
+                if not isinstance(L, int):
+                    L = 4
+                toks = tokens4 if L == 4 else (tokens5 if L == 5 else [str(k) for k in range(L)])
+
+                # gold / pred 인덱스 해석 (여러 키명 호환)
+                gold_idx = _safe_get_idx(r, ["gold_idx","label_idx","label","gold"])
+                if gold_idx is None:
+                    gold_letter = _safe_get_idx(r, ["gold_letter","answer","label_letter"])
+                    if gold_letter is not None:
+                        gold_idx = _letter_to_idx(gold_letter, toks)
+                if gold_idx is None: gold_idx = -1
+
+                pred_idx = _safe_get_idx(r, ["pred_idx","prediction_idx","pred","prediction"])
+                if pred_idx is None:
+                    pred_letter = _safe_get_idx(r, ["pred_letter","prediction_letter"])
+                    if pred_letter is not None:
+                        pred_idx = _letter_to_idx(pred_letter, toks)
+                if pred_idx is None: pred_idx = -1
+
+                probs = _safe_get_idx(r, ["probs","prob","choice_probs","choice_prob","logits"])
+                if not isinstance(probs, (list, tuple)):
+                    probs = None
+
+                dump_pred(qid, gold_idx, pred_idx, probs)
+
+            # subject 단위로 JSONL에 append 저장
+            flush_dump(getattr(args, "save_preds", None))
+
+            # ===== 기본 리포트/저장(기존 로직 유지) =====
             metrics = None
             if args.setting not in ['perm', 'cyclic'] and len(results) > 0:
                 metrics = {'type': 'metric', 'data': {}}
@@ -131,4 +214,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
