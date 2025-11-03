@@ -127,10 +127,13 @@ def main():
             subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
         ) = prepare_eval(args, eval_name)
         for subject in subjects[::1]:
-            # 결과 파일이 있으면 스킵 (원하면 아래 두 줄을 주석 처리해서 항상 재실행 가능)
-            if os.path.exists(f'{args.save_path}/{subject}.jsonl'):
-                logger.info(f"Results already exist: {args.save_path}/{subject}.jsonl")
+            cache_path = f'{args.save_path}/{subject}.jsonl'
+            save_preds_on = bool(getattr(args, "save_preds", None))
+            if os.path.exists(cache_path) and not save_preds_on:
+                logger.info(f"Results already exist (and --save_preds not set): {cache_path} — skipping")
                 continue
+            if os.path.exists(cache_path) and save_preds_on:
+                logger.info(f"Results exist but --save_preds is set — re-running to emit JSONL: {getattr(args, 'save_preds', None)}")
 
             logger.info(_blue(f"Preparing: {subject}"))
             few_shot_samples = prepare_few_shot_samples(subject)
