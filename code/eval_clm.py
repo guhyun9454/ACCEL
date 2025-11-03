@@ -127,6 +127,7 @@ def main():
             subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
         ) = prepare_eval(args, eval_name)
         for subject in subjects[::1]:
+            # 결과 파일이 있으면 스킵 (원하면 아래 두 줄을 주석 처리해서 항상 재실행 가능)
             if os.path.exists(f'{args.save_path}/{subject}.jsonl'):
                 logger.info(f"Results already exist: {args.save_path}/{subject}.jsonl")
                 continue

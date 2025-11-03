@@ -50,6 +50,7 @@ def parse_arguments():
     parser.add_argument("--permute_shift", type=int, default=0, help="Cyclic shift of options (0..L-1)")
     parser.add_argument("--pride", default=None, help="PriDe config string")
 
+
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]
