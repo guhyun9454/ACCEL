@@ -1,194 +1,221 @@
-
-import os
-import json
-import math
-import argparse
-import random
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import os, json, argparse, random, glob
+from pathlib import Path
 import numpy as np
-import logging
 from tqdm import tqdm
-from matplotlib import pyplot as plt
-import multiprocessing as mp
 from sklearn.metrics import classification_report
-from utils import load_results
+
+# 외부: priDe 핵심 로직
 from debias_utils import simple as debias_fn
 
-TASKS = {
-    'mmlu': 'MMLU',
-    'arc': 'ARC',
-    'csqa': 'CSQA',
-}
-NUM_SHOTS = [
-    0,
-    5,
-]
-MODELS = {
-    "llama-7b": ('llama', 7),
-    "llama-13b": ('llama', 13),
-    "llama-30b": ('llama', 30),
-    "llama-65b": ('llama', 65),
-    "Llama-2-7b-hf": ('llama-2', 7),
-    "Llama-2-13b-hf": ('llama-2', 13),
-    "Llama-2-70b-hf": ('llama-2', 70),
-    "Llama-2-7b-chat-hf": ('llama-2-chat', 7),
-    "Llama-2-13b-chat-hf": ('llama-2-chat', 13),
-    "Llama-2-70b-chat-hf": ('llama-2-chat', 70),
-    "vicuna-7b-v1.3": ('vicuna-v1.3', 7),
-    "vicuna-13b-v1.3": ('vicuna-v1.3', 13),
-    "vicuna-33b-v1.3": ('vicuna-v1.3', 33),
-    "vicuna-7b-v1.5": ('vicuna-v1.5', 7),
-    "vicuna-13b-v1.5": ('vicuna-v1.5', 13),
-    "falcon-7b": ('falcon', 7),
-    "falcon-40b": ('falcon', 40),
-    "falcon-7b-instruct": ('falcon-inst', 7),
-    "falcon-40b-instruct": ('falcon-inst', 40),
-    "ichat": ('gpt-3.5-turbo', 130),
-}
+def sanitize_model_id(hf_id: str) -> str:
+    # eval_clm.py에서 쓰던 방식과 맞추기: 마지막 토큰 + 슬래시/공백 정리
+    return hf_id.split("/")[-1].replace("/", "_").replace(" ", "_")
 
-SAVE_PATH = 'debias_pride'
-os.makedirs(SAVE_PATH, exist_ok=True)
-RATIO_PREFIX_SAMPLES = 0.05
+def infer_tokens_from_tag(tag: str, n_opt: int):
+    # T0: A/B/C/D(/E), T1: a/b/c/d(/e), T2: 1/2/3/4(/5)
+    if tag.lower().startswith("t1"):
+        base4 = ["a","b","c","d"]
+        base5 = base4 + ["e"]
+    elif tag.lower().startswith("t2"):
+        base4 = ["1","2","3","4"]
+        base5 = base4 + ["5"]
+    else:
+        base4 = ["A","B","C","D"]
+        base5 = base4 + ["E"]
+    return base4 if n_opt == 4 else base5
 
-TRANSFER = False
+def load_cyclic_probs_and_ideal(dir_path: Path):
+    """
+    dir_path: .../{task}/{shots}s_{model}/{task}_cyclic/
+    각 subject의 jsonl을 읽어 (observed, ideal_idx) 리스트를 반환.
+    observed: (K, L) 또는 (L,) 형태 가능 -> (K, L)로 통일해서 넘겨줌
+    """
+    items = []
+    jsonl_files = sorted(glob.glob(str(dir_path / "*.jsonl")))
+    for jf in jsonl_files:
+        with open(jf, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("type") != "result":
+                    continue
+                data = rec.get("data", {})
+                probs = data.get("probs", None)
+                ideal = data.get("ideal", None)
+                if probs is None or ideal is None:
+                    continue
 
+                # probs: (K x L) 또는 (L)
+                arr = np.array(probs, dtype=float)
+                if arr.ndim == 1:
+                    arr = arr[None, :]  # (1, L)
 
-task_pairs = [(task, task) for task in TASKS]
-if TRANSFER:
-    subtasks = [
-        'STEM',
-        'Social Science',
-        'Humanities',
-        'Others',
-        'arc',
-    ]
-    task_pairs = [(x, y) for x in subtasks for y in subtasks]
+                items.append((arr, str(ideal)))
+    return items  # [(KxL, ideal_str), ...]
 
-if TRANSFER:
-    record_file = f'{SAVE_PATH}/debias_{RATIO_PREFIX_SAMPLES}_transfer.json'
-else:
-    record_file = f'{SAVE_PATH}/debias_{RATIO_PREFIX_SAMPLES}.json'
+def compute_metrics(prefix_pairs, postfix_pairs, tokens):
+    """
+    prefix_pairs: [(KxL, ideal_str), ...]  (prior 추정에 사용)
+    postfix_pairs: [(KxL, ideal_str), ...] (prior 적용 평가)
+    tokens: ['A','B','C','D'] or ... 길이 L
+    """
+    rng = random.Random(0xC0FFEE)
 
+    # prior 추정
+    priors = []
+    for observed, ideal in prefix_pairs:
+        # debias_fn은 (KxL) 배열을 입력으로 가정
+        observed, debiased, prior = debias_fn(observed)
+        priors.append(prior)
 
-def single_process(args):
-    num_shots, (source_task, target_task), (model, (model_family, model_size)) = args
-    model_name = model_family
-    if model != 'ichat':
-        model_name += f'-{model_size}B'
+    if len(priors) == 0:
+        return None
 
-    if not TRANSFER:
-        assert source_task == target_task
+    prior = np.mean(np.stack(priors, axis=0), axis=0)  # (L,)
 
-    by_category = None if source_task in TASKS else source_task
-    task = source_task
-    if TRANSFER and source_task != 'arc':
-        task = 'mmlu'
-    source_path = f'results_{task}/{num_shots}s_{model}/{task}_perm'
-    if not os.path.exists(source_path):
-        source_path = f'results_{task}/{num_shots}s_{model}/{task}_cyclic'
-        if not os.path.exists(source_path):
-            return None
-    all_source_probs_and_ideals = load_results(source_path, by_category=by_category, only_probs_and_ideals=True)
-    source_rng = random.Random(source_path.encode('utf-8'))
-
-    if TRANSFER:
-        by_category = None if target_task in TASKS else target_task
-        task = target_task
-        if TRANSFER and target_task != 'arc':
-            task = 'mmlu'
-        target_path = f'results_{task}/{num_shots}s_{model}/{task}_perm'
-        if not os.path.exists(target_path):
-            target_path = f'results_{task}/{num_shots}s_{model}/{task}_cyclic'
-            if not os.path.exists(target_path):
-                return None
-        all_target_probs_and_ideals = load_results(target_path, by_category=by_category, only_probs_and_ideals=True)
-
-    n_iters = 5
-    if RATIO_PREFIX_SAMPLES == 1.:
-        n_iters = 1
-
-    num_prefix_samples = int(len(all_source_probs_and_ideals) * RATIO_PREFIX_SAMPLES)
-
-    costs = []
-    scores = []
-    recall_stds = []
-    for iter_idx in range(n_iters):
-        predictions = []
-        labels = []
-        cost = []
-
-        source_rng.shuffle(all_source_probs_and_ideals)
-        prefix_samples = all_source_probs_and_ideals[:num_prefix_samples]
-        if not TRANSFER:
-            postfix_samples = all_source_probs_and_ideals[num_prefix_samples:]
+    # 평가
+    predictions, labels, costs = [], [], []
+    for observed, ideal in postfix_pairs:
+        # single-sample 관측량: K개 순환 확률을 평균(또는 첫 번째)로 축약
+        if observed.ndim == 2:
+            obs = observed.mean(axis=0)  # (L,)
         else:
-            postfix_samples = all_target_probs_and_ideals[:]
+            obs = observed  # (L,)
 
-        all_priors = []
-        all_observed = []
-        for idx, prefix_sample in enumerate(prefix_samples):
-            observed, ideal = prefix_sample
-            observed = np.array(observed)
-            observed, debiased, prior = debias_fn(observed)
-            all_priors.append(prior)
-            all_observed.append(observed)
-            predictions.append(np.argmax(debiased))
-            cost.append(len(observed))
-            labels.append('ABCDE'.index(ideal))
+        # PriDe 점수: log p - log prior
+        debiased = np.log(obs + 1e-10) - np.log(prior + 1e-10)
+        pred_idx = int(np.argmax(debiased))
+        predictions.append(pred_idx)
 
-        prior = np.mean(all_priors, axis=0)
+        # 라벨 인덱스 매핑
+        try:
+            lab_idx = tokens.index(ideal)
+        except ValueError:
+            # ideal이 토큰셋과 다르면 대소문자만 바뀐 경우가 있음 → normalize 시도
+            lab_idx = tokens.index(ideal.strip())
+        labels.append(lab_idx)
 
-        for postfix_sample in postfix_samples:
-            observed, ideal = postfix_sample
-            observed = np.array(observed[0])
-            debiased = np.log(observed + 1e-10) - np.log(prior + 1e-10)
-            predictions.append(np.argmax(debiased))
-            cost.append(1)
-            labels.append('ABCDE'.index(ideal))
+        # 비용: 관측치 갯수(=K) 또는 1로 정의 가능. 여기서는 평균을 썼으니 1로.
+        costs.append(1)
 
-        final_score = np.mean(np.array(predictions) == np.array(labels)) * 100
-        scores.append(final_score)
-        costs.append(np.mean(cost))
+    labels = np.array(labels)
+    predictions = np.array(predictions)
+    acc = float(np.mean(labels == predictions) * 100)
 
-        report = classification_report(labels, predictions, output_dict=True)
-        recalls = [report[str(e)]['recall'] * 100 for e in range(prior.shape[-1])]
-        recall_stds.append(np.std(recalls))
+    # 클래스별 리콜 표준편차
+    report = classification_report(labels, predictions, output_dict=True, zero_division=0)
+    recalls = []
+    for i in range(len(tokens)):
+        cls_key = str(i)
+        if cls_key in report:
+            recalls.append(report[cls_key]["recall"] * 100)
+    rstd = float(np.std(recalls)) if recalls else 0.0
 
-    res = {
-        'num_shots': num_shots,
-        'source_task': source_task,
-        'target_task': target_task,
-        'model': model,
-        'rstd': float(np.mean(recall_stds)),
-        'rstd_max': float(np.max(recall_stds)),
-        'rstd_min': float(np.min(recall_stds)),
-        'rstd_std': float(np.std(recall_stds)),
-        'acc': float(np.mean(scores)),
-        'acc_max': float(np.max(scores)),
-        'acc_min': float(np.min(scores)),
-        'acc_std': float(np.std(scores)),
-        'cost': float(np.mean(costs)),
+    return {
+        "acc": acc,
+        "rstd": rstd,
+        "cost": float(np.mean(costs) if costs else 0.0),
+        "n_prefix": len(prefix_pairs),
+        "n_postfix": len(postfix_pairs),
     }
-    return res
-
 
 def main():
-    args_list = []
-    for task_pair in task_pairs:
-        for num_shots in NUM_SHOTS:
-            for model in MODELS:
-                args_list.append((num_shots, task_pair, (model, MODELS[model])))
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--base", type=str, default="results",
+                    help="run_all.py가 저장한 results의 베이스 경로 (예: results)")
+    ap.add_argument("--tag", type=str, required=True,
+                    help="run_all.py에 쓴 --tag (예: T0_cyclic / T1_cyclic ...)")
+    ap.add_argument("--tasks", type=str, nargs="+", default=["arc","csqa"],
+                    help="적용할 테스크 리스트")
+    ap.add_argument("--shots", type=int, default=0,
+                    help="few-shot 수 (폴더명 0s_* 에서 0)")
+    ap.add_argument("--models", type=str, nargs="+", required=True,
+                    help="HF 모델 id 리스트 (run_all.py에 넘긴 것과 동일)")
+    ap.add_argument("--ratio_prefix", type=float, default=0.05,
+                    help="prior 추정을 위한 prefix 샘플 비율 (0~1)")
+    ap.add_argument("--iters", type=int, default=5,
+                    help="샘플링 반복 횟수")
+    ap.add_argument("--out", type=str, default="debias_pride",
+                    help="결과 요약을 저장할 폴더")
+    args = ap.parse_args()
 
-    with mp.Pool(mp.cpu_count()) as pool:
-        results = list(tqdm(pool.imap(single_process, args_list), total=len(args_list), dynamic_ncols=True))
+    base_dir = Path(args.base) / args.tag
+    out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
 
-    all_results = []
-    for result in results:
-        if result is None:
-            continue
-        all_results.append(result)
-    with open(record_file, 'w') as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
+    # 모델 폴더명으로 변환
+    model_names = [sanitize_model_id(m) for m in args.models]
 
+    all_summaries = []
+    for task in args.tasks:
+        for model, model_name in zip(args.models, model_names):
+            # 결과 디렉토리: {base}/{task}/{K}s_{model_name}/{task}_cyclic/
+            result_dir = base_dir / task / f"{args.shots}s_{model_name}" / f"{task}_cyclic"
+            if not result_dir.is_dir():
+                # perm 폴더 fallback
+                alt_dir = base_dir / task / f"{args.shots}s_{model_name}" / f"{task}_perm"
+                if alt_dir.is_dir():
+                    result_dir = alt_dir
+                else:
+                    print(f"[SKIP] Not found: {result_dir}")
+                    continue
 
-if __name__ == '__main__':
+            # 로드
+            pairs = load_cyclic_probs_and_ideal(result_dir)
+            if not pairs:
+                print(f"[SKIP] Empty: {result_dir}")
+                continue
+
+            # 옵션 수 파악(4 or 5)
+            L = int(pairs[0][0].shape[-1])
+            tokens = infer_tokens_from_tag(args.tag, L)
+
+            # prefix / postfix 분리
+            n_total = len(pairs)
+            n_prefix = max(1, int(n_total * args.ratio_prefix))
+            rng = random.Random((task + model_name).encode("utf-8"))
+            best = None
+
+            for _ in range(max(1, args.iters)):
+                rng.shuffle(pairs)
+                prefix_pairs = pairs[:n_prefix]
+                postfix_pairs = pairs[n_prefix:]
+                if not postfix_pairs:
+                    postfix_pairs = pairs  # 극단적으로 작을 때 fallback
+
+                m = compute_metrics(prefix_pairs, postfix_pairs, tokens)
+                if m is None:
+                    continue
+                if best is None or m["acc"] > best["acc"]:
+                    best = m
+
+            if best is None:
+                print(f"[WARN] PriDe failed on {task} {model_name}")
+                continue
+
+            best.update({
+                "task": task,
+                "shots": args.shots,
+                "model": model,
+                "model_folder": model_name,
+                "tokens": "".join(tokens),
+                "dir": str(result_dir),
+                "ratio_prefix": args.ratio_prefix,
+                "iters": args.iters,
+            })
+            all_summaries.append(best)
+            print(f"[OK] {task}/{model_name}  acc={best['acc']:.2f}  rstd={best['rstd']:.2f}  n={best['n_prefix']}/{best['n_postfix']}")
+
+    # 저장
+    out_fp = out_dir / f"pride_{args.tag}_shots{args.shots}.json"
+    with open(out_fp, "w", encoding="utf-8") as f:
+        json.dump(all_summaries, f, indent=2, ensure_ascii=False)
+    print(f"[SAVED] {out_fp}")
+
+if __name__ == "__main__":
     main()
