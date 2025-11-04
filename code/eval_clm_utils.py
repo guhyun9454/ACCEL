@@ -50,6 +50,10 @@ def parse_arguments():
     ap.add_argument("--save_preds", type=str, default=None, help="여기에 JSONL 덤프")
     ap.add_argument("--permute_shift", type=int, default=0)
     ap.add_argument("--pride", type=str, default=None)  # "method=paraphrase,k=3,seed=42" 같은 문자열
+    ap.add_argument("--save_path", type=str, default="results",
+                help="결과 저장 디렉토리 base (기본: results)")
+    ap.add_argument("--model_name", type=str, default="",
+                help="모델 태그(미지정 시 pretrained_model_path의 마지막 토큰 사용)")
 
     # 기타 추가 옵션이 있으면 그대로…
 
