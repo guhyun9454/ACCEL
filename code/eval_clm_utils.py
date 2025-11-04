@@ -23,13 +23,19 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
-
 # ─────────────────────────────────────────────────────────
 # 공용 유틸
 # ─────────────────────────────────────────────────────────
 def _sanitize(s: str) -> str:
     return str(s).replace("/", "_").replace(" ", "_")
 
+def _rot(lst, k: int):
+    """리스트를 k칸 왼쪽 회전 (k<0이면 오른쪽 회전과 동일)"""
+    if not isinstance(lst, (list, tuple)) or not lst:
+        return list(lst)
+    L = len(lst)
+    k = (k % L + L) % L
+    return list(lst[k:]) + list(lst[:k])
 
 # ─────────────────────────────────────────────────────────
 # argparse
@@ -59,8 +65,9 @@ def parse_arguments():
     ap.add_argument("--model_name", type=str, default="",
                     help="모델 태그(미지정 시 pretrained_model_path의 마지막 토큰 사용)")
     ap.add_argument("--save_preds", type=str, default=None, help="여기에 JSONL 덤프")
-    ap.add_argument("--permute_shift", type=int, default=0)
-    ap.add_argument("--pride", type=str, default=None)  # "method=paraphrase,k=3,seed=42" 같은 문자열
+    ap.add_argument("--permute_shift", type=int, default=0,
+                    help="기본(default) 세팅에서도 옵션/정답을 k칸 회전 적용")
+    ap.add_argument("--pride", type=str, default=None)  # "method=paraphrase,k=3,seed=42" 같은 문자열 (여기선 패스스루)
 
     args = ap.parse_args()
 
@@ -81,7 +88,6 @@ def parse_arguments():
     args._save_base = args.save_path
 
     return args
-
 
 # ─────────────────────────────────────────────────────────
 # 데이터 준비
@@ -220,27 +226,55 @@ def prepare_eval(args, eval_name):
             df = df.apply(lambda x: move_answer(x, moved_answer), axis=1)
 
         if setting in ['perm']:
+            # 완전 순열 평가 (기존 로직 유지)
             inputs = df.apply(lambda x: [
                 [
                     sys_msg.format(subject.replace('_', ' ')),
                     create_user_prompt(x["Question"], permuted_options),
                 ] for permuted_options in permute_options([x[e] for e in option_ids_header])
             ], axis=1).to_list()
+            options = df.apply(lambda x: [str(x[e]) for e in option_ids_header], axis=1).to_list()
+            ideals = df.apply(lambda x: option_ids[option_ids_header.index(x["Answer"])], axis=1).to_list()
+
         elif setting in ['cyclic']:
+            # 순환(per option) 평가 (기존 로직 유지)
             inputs = df.apply(lambda x: [
                 [
                     sys_msg.format(subject.replace('_', ' ')),
                     create_user_prompt(x["Question"], cycled_options),
                 ] for cycled_options in cycle_options([x[e] for e in option_ids_header])
             ], axis=1).to_list()
+            options = df.apply(lambda x: [str(x[e]) for e in option_ids_header], axis=1).to_list()
+            ideals = df.apply(lambda x: option_ids[option_ids_header.index(x["Answer"])], axis=1).to_list()
+
         else:
+            # ✅ default에서도 --permute_shift 적용
+            k = int(getattr(args, 'permute_shift', 0) or 0)
+
             inputs = df.apply(lambda x: [
                 sys_msg.format(subject.replace('_', ' ')),
-                create_user_prompt(x["Question"], [x[e] for e in option_ids_header]),
+                create_user_prompt(
+                    x["Question"],
+                    _rot([x[e] for e in option_ids_header], k)
+                ),
             ], axis=1).to_list()
 
-        options = df.apply(lambda x: [str(x[e]) for e in option_ids_header], axis=1).to_list()
-        ideals = df.apply(lambda x: option_ids[option_ids_header.index(x["Answer"])], axis=1).to_list()
+            # 모델이 보게 될 options(회전 후) — 디코딩 로직과 일치시키기 위해 저장
+            options = df.apply(
+                lambda x: _rot([str(x[e]) for e in option_ids_header], k), axis=1
+            ).to_list()
+
+            # 정답 라벨도 회전 보정
+            # 원래 정답 index = option_ids_header.index(Answer)
+            # 회전 후 화면에서의 정답 위치 = (orig_idx - k) % L
+            L = len(option_ids_header)
+            ideals = df.apply(
+                lambda x: option_ids[
+                    (option_ids_header.index(x["Answer"]) - (k % L)) % L
+                ],
+                axis=1
+            ).to_list()
+
         return list(zip(inputs, options, ideals))
 
     # eval 함수 선택
@@ -252,7 +286,6 @@ def prepare_eval(args, eval_name):
         prepare_eval_fn = partial(prepare_eval_fn_base, num_few_shot=num_few_shot, option_ids=option_ids)
 
     return subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
-
 
 # ─────────────────────────────────────────────────────────
 # 평가 함수들
@@ -306,7 +339,6 @@ def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_id
         }
         return result
     return eval_fn
-
 
 def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot, option_ids):
     toker.padding_side = 'right'
@@ -369,7 +401,6 @@ def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot, option_id
         }
         return result
     return eval_fn
-
 
 def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_ids):
     toker.padding_side = 'left'
