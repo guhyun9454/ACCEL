@@ -7,11 +7,18 @@ Answer-match matrix (rows=models, cols=datasets).
   * correct     : "정답 맞춘 qid 집합" 간 겹침(Jaccard/overlap/inter)
   * pred_idx    : 같은 qid에서 예측 인덱스가 일치한 비율
   * pred_letter : 같은 qid에서 예측 '문자(A/B/C/D, a/b/c/d, 1/2/3/4 등)'가 일치한 비율
-- 입력: <root>/<dataset>/<model>/<T*/P0.jsonl>
+
+- 입력 구조(예시):
+  <root>/<dataset>/<model>/<T*/P0.jsonl>
+
+- JSONL 지원 포맷:
+  1) 기존 평면형 키(rec["qid"], "gold"/"pred", ... )
+  2) 최신 결과형: {"type":"result","data":{ "idx","ideal","sampled","correct","probs", ... }}
+
 - --pair T0 T1  또는 --pair ALL (T0,T1,T2 모든 쌍 평균)
 - --metric: jaccard/overlap/inter   ※ correct 모드에서만 사용
 - --token_map "T0:ABCD,T1:abcd,T2:1234"
-- --auto_token_map: P0.jsonl의 choices를 스캔해 토큰별 레터 자동추론
+- --auto_token_map: P0.jsonl의 choices를 스캔해 토큰별 레터 자동추론(가능한 경우)
 """
 
 import os, sys, json, argparse, numpy as np
@@ -41,7 +48,11 @@ def read_jsonl(path):
         for ln in f:
             ln=ln.strip()
             if ln:
-                rows.append(json.loads(ln))
+                try:
+                    rows.append(json.loads(ln))
+                except Exception:
+                    # 방어적 파싱
+                    continue
     return rows
 
 def simple_model_name(raw):
@@ -76,7 +87,7 @@ def inter_ratio(A,B):
 
 # ----------- 레터 정규화 & 추출 ----------
 def normalize_letter(x: str):
-    """'a'->'A', ' A.'->'A', '(b'->'B', '1)'->'1' 등 첫 글자 표준화"""
+    """'a'->'A', ' A.'->'A', '(b'->'B', '1)'->'1' 등 첫 글자 표준화 (한글은 원형 유지)"""
     if x is None:
         return None
     if not isinstance(x, str):
@@ -99,55 +110,108 @@ def get_first_str(rec, keys):
                 return str(v)
     return None
 
-def get_pred_letter_from_rec(rec):
-    keys = ("pred_letter","prediction_letter","answer","model_answer",
-            "choice","selected","output","final_answer","pred","prediction")
-    s = get_first_str(rec, keys)
-    return normalize_letter(s) if s else None
+# ----------- 최신(JSONL data) 대응 헬퍼 ----------
+def flatten_record(rec: dict) -> dict:
+    """{"type":"result","data":{...}} → {...} 로 평탄화"""
+    if isinstance(rec, dict) and "data" in rec and isinstance(rec["data"], dict):
+        flat = dict(rec["data"])
+        # qid 보정: 있으면 그대로, 없으면 idx로 대체
+        if "qid" not in flat and "idx" in flat:
+            flat["qid"] = str(flat["idx"])
+        return flat
+    # 기존 포맷: 그대로
+    return rec
 
-def get_gold_letter_from_rec(rec):
-    keys = ("gold_letter","label_letter","answer","gold","label","solution",
-            "target","correct_letter")
-    s = get_first_str(rec, keys)
-    return normalize_letter(s) if s else None
+def probs_to_idx_and_letter(probs, letters):
+    """probs(list or 2D list)을 평균 후 argmax → (idx, letter)"""
+    if probs is None or letters is None or len(letters) == 0:
+        return None, None
+    p = np.array(probs, dtype=np.float64)
+    if p.ndim == 2:  # cyclic/perm: [num_views, num_options]
+        p = p.mean(axis=0)
+    # 드문 케이스: 길이가 2*num_options (공백/비공백)인 경우 → fold
+    if letters and p.ndim == 1 and p.size == 2*len(letters):
+        p = p.reshape(2, len(letters)).sum(axis=0)
+    if p.ndim != 1 or p.size != len(letters):
+        return None, None
+    idx = int(np.argmax(p))
+    return idx, letters[idx]
 
 # ----------- 레코드 파싱 ----------------
-def parse_pred_gold(rec):
+def parse_pred_gold(rec, token_letters=None):
     """
-    반환: (qid, pred_idx, gold_idx, pred_letter, gold_letter)
-    - 인덱스/문자 모두 시도 (음수 인덱스는 None 처리)
+    반환: (qid, pred_idx, gold_idx, pred_letter, gold_letter, correct_flag_or_None)
+
+    - JSONL이 result/data 형태면 평탄화 후 키를 탐색
+    - pred는 우선순위: sampled → pred/pred_letter → probs(argmax)
+    - gold는 ideal → gold/gold_letter 등
+    - correct가 있으면 그대로 반환
     """
-    qid = rec.get("qid", rec.get("id", rec.get("uid", rec.get("question_id"))))
+    r = flatten_record(rec)
+
+    # qid
+    qid = r.get("qid") or r.get("id") or r.get("uid") or r.get("question_id")
+    if qid is None and "idx" in r:
+        qid = str(r["idx"])
     if qid is None:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
-    idx_keys_pred = ("pred_idx","prediction_idx","answer_idx","choice_idx",
-                     "selected_idx","output_idx","model_pred_idx","pred","prediction")
-    idx_keys_gold = ("gold_idx","label_idx","answer_idx","correct_idx",
-                     "solution_idx","target_idx","gold","label","answer")
+    # gold (letter 우선)
+    g_letter = None
+    g_letter = ( get_first_str(r, ("ideal","gold_letter","label_letter","answer","gold","label","solution","target","correct_letter")) )
+    g_letter = normalize_letter(g_letter) if g_letter else None
 
-    def to_int_or_none(v):
-        try:
-            iv = int(v)
-            return iv if iv >= 0 else None
-        except Exception:
-            return None
+    # pred (letter/idx/확률 역산)
+    p_letter = None
+    p_idx = None
 
-    pred_idx = None
-    gold_idx = None
-    for k in idx_keys_pred:
-        if k in rec:
-            pred_idx = to_int_or_none(rec[k])
-            if pred_idx is not None: break
-    for k in idx_keys_gold:
-        if k in rec:
-            gold_idx = to_int_or_none(rec[k])
-            if gold_idx is not None: break
+    # 1) 명시적 정오표기
+    correct_flag = r.get("correct", None)
+    if isinstance(correct_flag, str):
+        if correct_flag.lower() in ("true","yes","1"):
+            correct_flag = True
+        elif correct_flag.lower() in ("false","no","0"):
+            correct_flag = False
+        else:
+            correct_flag = None
 
-    p_letter = get_pred_letter_from_rec(rec)
-    g_letter = get_gold_letter_from_rec(rec)
+    # 2) 샘플된 문자
+    p_letter = ( get_first_str(r, ("sampled","pred_letter","prediction_letter","answer","model_answer",
+                                   "choice","selected","output","final_answer","pred","prediction")) )
+    p_letter = normalize_letter(p_letter) if p_letter else None
 
-    return str(qid), pred_idx, gold_idx, p_letter, g_letter
+    # 3) probs → argmax
+    if p_letter is None and "probs" in r and token_letters:
+        idx, ch = probs_to_idx_and_letter(r["probs"], token_letters)
+        if ch is not None:
+            p_idx = idx
+            p_letter = normalize_letter(ch)
+
+    # 4) pred_idx 직접
+    if p_idx is None:
+        for k in ("pred_idx","prediction_idx","answer_idx","choice_idx","selected_idx",
+                  "output_idx","model_pred_idx","pred","prediction"):
+            if k in r:
+                try:
+                    iv = int(r[k])
+                    if iv >= 0:
+                        p_idx = iv
+                except Exception:
+                    pass
+                break
+
+    # gold_idx (거의 없겠지만 호환)
+    g_idx = None
+    for k in ("gold_idx","label_idx","answer_idx","correct_idx","solution_idx","target_idx","gold","label","answer"):
+        if k in r:
+            try:
+                iv = int(r[k]); 
+                if iv >= 0: g_idx = iv
+            except Exception:
+                pass
+            break
+
+    return str(qid), p_idx, g_idx, p_letter, g_letter, correct_flag
 
 # ------- 토큰-문자 매핑 관련 ------------
 def parse_token_map(arg_str, default_map=None):
@@ -189,10 +253,12 @@ def _extract_letters_from_choices_field(choices):
     return letters or None
 
 def infer_token_letters_from_rows(rows):
-    for rec in rows[:100]:  # 조금 더 넉넉히
+    # 최신 포맷은 options가 텍스트라서 자동추론 실패 가능 → best-effort
+    for rec in rows[:100]:
+        r = flatten_record(rec)
         for key in ("choices","options","option_list"):
-            if key in rec and isinstance(rec[key], list) and rec[key]:
-                got = _extract_letters_from_choices_field(rec[key])
+            if key in r and isinstance(r[key], list) and r[key]:
+                got = _extract_letters_from_choices_field(r[key])
                 if got:
                     return got
     return None
@@ -229,51 +295,60 @@ def load_for_token(dir_model, token_name, mode, token_map, auto_token_map=False,
         elif verbose:
             print(f"  [AUTOMAP] token={token_name} letters NOT inferred", flush=True)
 
+    letters = token_map.get(token_name)
+
     if mode == "correct":
         ok = set()
-        c_total = 0
-        for rec in rows:
-            qid, pred_idx, gold_idx, p_letter, g_letter = parse_pred_gold(rec)
+        for raw in rows:
+            qid, p_idx, g_idx, p_letter, g_letter, correct_flag = parse_pred_gold(raw, token_letters=letters)
             if qid is None:
                 continue
+
             decided = None
-            if pred_idx is not None and gold_idx is not None:
-                decided = (pred_idx == gold_idx)
-            else:
-                if p_letter and g_letter:
-                    decided = (normalize_letter(p_letter) == normalize_letter(g_letter))
-                elif (pred_idx is not None) and (g_letter is not None) and (token_name in token_map):
-                    # gold가 문자, pred는 인덱스 → 문자로 비교
-                    ch = idx_to_letter(token_name, pred_idx, token_map)
-                    decided = (ch is not None and normalize_letter(ch) == normalize_letter(g_letter))
+            # 1) correct 플래그 우선
+            if isinstance(correct_flag, bool):
+                decided = correct_flag
+            # 2) 인덱스 vs 인덱스
+            if decided is None and (p_idx is not None) and (g_idx is not None):
+                decided = (p_idx == g_idx)
+            # 3) 문자 vs 문자
+            if decided is None and p_letter and g_letter:
+                decided = (normalize_letter(p_letter) == normalize_letter(g_letter))
+            # 4) idx→letter 매핑 후 비교
+            if decided is None and (p_idx is not None) and letters and g_letter:
+                ch = idx_to_letter(token_name, p_idx, token_map)
+                decided = (ch is not None and normalize_letter(ch) == normalize_letter(g_letter))
+
             if decided:
                 ok.add(qid)
-                c_total += 1
+
         if verbose:
             print(f"  [OKSET] token={token_name} correct={len(ok)}", flush=True)
         return ok
 
     out = {}
     took_idx = took_letter = 0
-    for rec in rows:
-        qid, pred_idx, _, p_letter, _ = parse_pred_gold(rec)
+    for raw in rows:
+        qid, p_idx, _, p_letter, _, _ = parse_pred_gold(raw, token_letters=letters)
         if qid is None:
             continue
+
         if mode == "pred_idx":
-            if pred_idx is not None:
-                out[qid] = int(pred_idx); took_idx += 1
-            elif p_letter and token_name in token_map:
-                letters = token_map[token_name]
+            if p_idx is not None:
+                out[qid] = int(p_idx); took_idx += 1
+            elif p_letter and letters:
                 ch = normalize_letter(p_letter)
                 if ch in letters:
                     out[qid] = int(letters.index(ch)); took_idx += 1
+
         elif mode == "pred_letter":
             if p_letter:
                 out[qid] = normalize_letter(p_letter); took_letter += 1
-            elif pred_idx is not None and token_name in token_map:
-                ch = idx_to_letter(token_name, pred_idx, token_map)
+            elif (p_idx is not None) and letters:
+                ch = idx_to_letter(token_name, p_idx, token_map)
                 if ch is not None:
                     out[qid] = ch; took_letter += 1
+
     if verbose:
         print(f"  [PRED] token={token_name} loaded={len(out)} mode={mode}", flush=True)
         if token_name in token_map:
