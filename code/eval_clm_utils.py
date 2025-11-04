@@ -1,4 +1,3 @@
-
 import os
 import sys
 import random
@@ -27,6 +26,16 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────
+# 공용 유틸
+# ─────────────────────────────────────────────────────────
+def _sanitize(s: str) -> str:
+    return str(s).replace("/", "_").replace(" ", "_")
+
+
+# ─────────────────────────────────────────────────────────
+# argparse
+# ─────────────────────────────────────────────────────────
 def parse_arguments():
     ap = argparse.ArgumentParser()
 
@@ -34,7 +43,6 @@ def parse_arguments():
     ap.add_argument("--pretrained_model_path", type=str, required=True)
     ap.add_argument("--data_root", type=str, default="data")
     ap.add_argument("--eval_names", type=str, nargs="+", default=[], help="예: arc,0 csqa,0")
-    ap.add_argument("--save_path", type=str, default="results")
     ap.add_argument("--num_few_shot", type=int, default=0)
     ap.add_argument("--setting", type=str, default="default")  # 그대로 유지
 
@@ -47,40 +55,58 @@ def parse_arguments():
     ap.add_argument("--prompt_lang", type=str, default="en")
 
     # 저장/라우팅 관련
+    # ⚠️ save_path는 "베이스" 경로로 사용 (예: results/T0)
+    ap.add_argument("--save_path", type=str, default="results",
+                    help="결과 저장 디렉토리 base (예: results 또는 results/T0)")
+    ap.add_argument("--model_name", type=str, default="",
+                    help="모델 태그(미지정 시 pretrained_model_path의 마지막 토큰 사용)")
     ap.add_argument("--save_preds", type=str, default=None, help="여기에 JSONL 덤프")
     ap.add_argument("--permute_shift", type=int, default=0)
     ap.add_argument("--pride", type=str, default=None)  # "method=paraphrase,k=3,seed=42" 같은 문자열
-    ap.add_argument("--save_path", type=str, default="results",
-                help="결과 저장 디렉토리 base (기본: results)")
-    ap.add_argument("--model_name", type=str, default="",
-                help="모델 태그(미지정 시 pretrained_model_path의 마지막 토큰 사용)")
 
     # 기타 추가 옵션이 있으면 그대로…
 
     args = ap.parse_args()
-    # eval_names 문자열을 공간/콤마 구분 모두 허용
+
+    # model_name 자동 보정
+    if not getattr(args, "model_name", None):
+        try:
+            args.model_name = _sanitize(args.pretrained_model_path.split("/")[-1])
+        except Exception:
+            args.model_name = "model"
+
+    # eval_names 문자열을 공간/콤마 구분 모두 허용 (이미 "arc,0" 형식이면 그대로)
     if len(args.eval_names) == 1 and "," in args.eval_names[0] and " " not in args.eval_names[0]:
-        # 단일 "arc,0" 형태면 그대로 유지
         pass
-    # 결과 저장 폴더
+
+    # 베이스 저장 폴더만 미리 생성
     os.makedirs(args.save_path, exist_ok=True)
     return args
 
+
+# ─────────────────────────────────────────────────────────
+# 데이터 준비
+# ─────────────────────────────────────────────────────────
 def prepare_eval(args, eval_name):
     # task and setting
     eval_args = eval_name.split(',')
     args.task = task = eval_args[0]
     args.num_few_shot = num_few_shot = int(eval_args[1])
     args.setting = setting = eval_args[2] if len(eval_args) > 2 and eval_args[2] else None
+
     if setting is not None and setting.startswith('move'):
         moved_answer = setting[-1].upper()
 
-    # save_path
-    save_path = f'results/{task}/{num_few_shot}s_{args.model_name}/{task}'
-    if setting is not None:
-        save_path += f'_{setting}'
-    args.save_path = save_path
-    os.makedirs(args.save_path, exist_ok=True)
+    # 최종 save_path 구성 (베이스 경로 기반)
+    #   {base}/{task}/{K}s_{model_name}/{task}[ _{setting}]
+    final_save = os.path.join(
+        args.save_path,
+        f"{task}",
+        f"{num_few_shot}s_{args.model_name}",
+        f"{task}" + (f"_{setting}" if setting is not None else "")
+    )
+    os.makedirs(final_save, exist_ok=True)
+    args.save_path = final_save  # 이후 코드가 이 경로를 사용
 
     # Column headers in CSV are fixed as English letters
     option_ids_header = list('ABCD')
@@ -111,9 +137,12 @@ def prepare_eval(args, eval_name):
     data_path = os.path.join(data_root, f'data_{task}')
     test_suffix = "_test.ko.csv" if getattr(args, 'ko', False) else "_test.csv"
     dev_suffix = "_dev.ko.csv" if getattr(args, 'ko', False) else "_dev.csv"
+
+    # 과목(subject) 리스트
     subjects = sorted([
         f.split(test_suffix)[0]
-        for f in os.listdir(f'{data_path}/test') if f.endswith(test_suffix)
+        for f in os.listdir(os.path.join(data_path, 'test'))
+        if f.endswith(test_suffix)
     ])
 
     # sys_msg and labels
@@ -154,7 +183,10 @@ def prepare_eval(args, eval_name):
 
     # prepare_few_shot_samples
     def prepare_few_shot_samples(subject):
-        df = pd.read_csv(f'{data_path}/dev/{subject}{dev_suffix}', names=("Question", *option_ids_header, "Answer"), dtype=str)
+        df = pd.read_csv(
+            os.path.join(data_path, 'dev', f'{subject}{dev_suffix}'),
+            names=("Question", *option_ids_header, "Answer"), dtype=str, encoding='utf-8'
+        )
         if setting in ['noid']:
             few_shot_samples = df.apply(lambda x:
                 create_user_prompt(x["Question"], [x[e] for e in option_ids_header])
@@ -169,7 +201,10 @@ def prepare_eval(args, eval_name):
 
     # prepare_eval_samples
     def prepare_eval_samples(subject):
-        df = pd.read_csv(open(f'{data_path}/test/{subject}{test_suffix}'), names=("Question", *option_ids_header, "Answer"), dtype=str)
+        df = pd.read_csv(
+            open(os.path.join(data_path, 'test', f'{subject}{test_suffix}'), encoding='utf-8'),
+            names=("Question", *option_ids_header, "Answer"), dtype=str
+        )
 
         if setting is not None and setting.startswith('move'):
             df = df.apply(lambda x: move_answer(x, moved_answer), axis=1)
@@ -193,6 +228,7 @@ def prepare_eval(args, eval_name):
                 sys_msg.format(subject.replace('_', ' ')),
                 create_user_prompt(x["Question"], [x[e] for e in option_ids_header]),
             ], axis=1).to_list()
+
         options = df.apply(lambda x: [str(x[e]) for e in option_ids_header], axis=1).to_list()
         ideals = df.apply(lambda x: option_ids[option_ids_header.index(x["Answer"])], axis=1).to_list()
         return list(zip(inputs, options, ideals))
@@ -208,6 +244,9 @@ def prepare_eval(args, eval_name):
     return subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
 
 
+# ─────────────────────────────────────────────────────────
+# 평가 함수들
+# ─────────────────────────────────────────────────────────
 def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_ids):
     try:
         id_space = toker.encode(': A', add_special_tokens=False)[-1]
@@ -376,4 +415,3 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
         }
         return result
     return eval_fn
-
