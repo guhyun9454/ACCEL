@@ -3,19 +3,15 @@
 """
 Answer-match matrix (rows=models, cols=datasets).
 
-기능
 - --mode:
   * correct     : "정답 맞춘 qid 집합" 간 겹침(Jaccard/overlap/inter)
   * pred_idx    : 같은 qid에서 예측 인덱스가 일치한 비율
   * pred_letter : 같은 qid에서 예측 '문자(A/B/C/D, a/b/c/d, 1/2/3/4 등)'가 일치한 비율
 - 입력: <root>/<dataset>/<model>/<T*/P0.jsonl>
 - --pair T0 T1  또는 --pair ALL (T0,T1,T2 모든 쌍 평균)
-- --metric: jaccard(기본) / overlap / inter   ※ correct 모드에서만 사용
-- 디버그: --verbose, --dry-run, --write_debug <json>
-- 모델필터: --models <substr ...>
-- 토큰-문자 매핑:
-    * --token_map "T0:ABCD,T1:abcd,T2:1234"
-    * --auto_token_map  (P0.jsonl의 choices를 스캔하여 토큰별 레터 자동추론)
+- --metric: jaccard/overlap/inter   ※ correct 모드에서만 사용
+- --token_map "T0:ABCD,T1:abcd,T2:1234"
+- --auto_token_map: P0.jsonl의 choices를 스캔해 토큰별 레터 자동추론
 """
 
 import os, sys, json, argparse, numpy as np
@@ -78,111 +74,142 @@ def inter_ratio(A,B):
     if not A: return np.nan
     return len(A & B)/len(A)
 
+# ----------- 레터 정규화 & 추출 ----------
+def normalize_letter(x: str):
+    """'a'->'A', ' A.'->'A', '(b'->'B', '1)'->'1' 등 첫 글자 표준화"""
+    if x is None:
+        return None
+    if not isinstance(x, str):
+        x = str(x)
+    x = x.strip()
+    if not x:
+        return None
+    ch = x[0]
+    if ch in "([{":
+        ch = x[1] if len(x) > 1 else ch
+    if ch.isalpha():
+        ch = ch.upper()
+    return ch
+
+def get_first_str(rec, keys):
+    for k in keys:
+        if k in rec and rec[k] is not None:
+            v = rec[k]
+            if isinstance(v, (str,int)):
+                return str(v)
+    return None
+
+def get_pred_letter_from_rec(rec):
+    keys = ("pred_letter","prediction_letter","answer","model_answer",
+            "choice","selected","output","final_answer","pred","prediction")
+    s = get_first_str(rec, keys)
+    return normalize_letter(s) if s else None
+
+def get_gold_letter_from_rec(rec):
+    keys = ("gold_letter","label_letter","answer","gold","label","solution",
+            "target","correct_letter")
+    s = get_first_str(rec, keys)
+    return normalize_letter(s) if s else None
+
 # ----------- 레코드 파싱 ----------------
 def parse_pred_gold(rec):
     """
-    반환: (qid:str, pred_idx:int|None, gold_idx:int|None)
-    ※ 인덱스 기반만 추출. 문자(A/B/C/...)는 별도로 매핑해서 복원.
+    반환: (qid, pred_idx, gold_idx, pred_letter, gold_letter)
+    - 인덱스/문자 모두 시도 (음수 인덱스는 None 처리)
     """
-    qid = rec.get("qid", rec.get("id"))
+    qid = rec.get("qid", rec.get("id", rec.get("uid", rec.get("question_id"))))
     if qid is None:
-        return None, None, None
-    pred = (rec.get("pred_idx") or rec.get("prediction_idx")
-            or rec.get("pred") or rec.get("prediction"))
-    gold = (rec.get("gold_idx") or rec.get("label_idx")
-            or rec.get("label") or rec.get("gold"))
-    try:
-        pred = int(pred) if pred is not None else None
-    except Exception:
-        pred = None
-    try:
-        gold = int(gold) if gold is not None else None
-    except Exception:
-        gold = None
-    return str(qid), pred, gold
+        return None, None, None, None, None
+
+    idx_keys_pred = ("pred_idx","prediction_idx","answer_idx","choice_idx",
+                     "selected_idx","output_idx","model_pred_idx","pred","prediction")
+    idx_keys_gold = ("gold_idx","label_idx","answer_idx","correct_idx",
+                     "solution_idx","target_idx","gold","label","answer")
+
+    def to_int_or_none(v):
+        try:
+            iv = int(v)
+            return iv if iv >= 0 else None
+        except Exception:
+            return None
+
+    pred_idx = None
+    gold_idx = None
+    for k in idx_keys_pred:
+        if k in rec:
+            pred_idx = to_int_or_none(rec[k])
+            if pred_idx is not None: break
+    for k in idx_keys_gold:
+        if k in rec:
+            gold_idx = to_int_or_none(rec[k])
+            if gold_idx is not None: break
+
+    p_letter = get_pred_letter_from_rec(rec)
+    g_letter = get_gold_letter_from_rec(rec)
+
+    return str(qid), pred_idx, gold_idx, p_letter, g_letter
 
 # ------- 토큰-문자 매핑 관련 ------------
 def parse_token_map(arg_str, default_map=None):
     """
-    "T0:ABCD,T1:abcd,T2:1234" -> {"T0": ["A","B","C","D"], "T1":[...], "T2":[...]}
+    "T0:ABCD,T1:abcd,T2:1234" -> {"T0": ["A","B","C","D"], ...}
     """
     if default_map is None:
         default_map = {"T0": list("ABCD"), "T1": list("abcd"), "T2": list("1234")}
     if not arg_str:
-        return dict(default_map)
+        return dict({k:[normalize_letter(c) for c in v] for k,v in default_map.items()})
     m = {}
     for chunk in arg_str.split(","):
         if not chunk.strip(): continue
         if ":" not in chunk: continue
         t, letters = chunk.split(":", 1)
         t = t.strip()
-        letters = [ch for ch in list(letters.strip())]
-        if len(letters)==0:
-            continue
-        m[t] = letters
-    base = dict(default_map)
+        letters = [normalize_letter(ch) for ch in list(letters.strip())]
+        letters = [ch for ch in letters if ch]
+        if letters:
+            m[t] = letters
+    base = dict({k:[normalize_letter(c) for c in v] for k,v in default_map.items()})
     base.update(m)  # 명시값 우선
     return base
 
 def _extract_letters_from_choices_field(choices):
-    """
-    choices가 list일 때 각 원소에서 'label'/'letter' 또는 문자열의 선행 레터(A/a/1 등)를 추출.
-    """
+    """choices의 각 항목에서 label/letter/문자 접두로 레터 추출"""
     letters = []
     for item in choices:
         ch = None
         if isinstance(item, dict):
-            for k in ("label","letter","option","id","name"):
-                if k in item and isinstance(item[k], str) and len(item[k])>0:
-                    ch = item[k].strip()[0]
-                    break
-        elif isinstance(item, str) and len(item)>0:
-            s = item.strip()
-            # "A. ...", "a) ...", "1) ..." 같은 패턴 처리
-            ch = s[0]
-            if ch in ["(", "["] and len(s) >= 2:
-                ch = s[1]
-        if ch is not None and len(ch)==1:
+            for k in ("label","letter","option","id","name","key","text"):
+                if k in item and isinstance(item[k], str) and item[k]:
+                    ch = normalize_letter(item[k]); break
+        elif isinstance(item, str) and item:
+            ch = normalize_letter(item)
+        if ch:
             letters.append(ch)
-    # 모두 한 글자 보장만 남기고 반환
-    letters = [str(c) for c in letters if isinstance(c, str) and len(c)==1]
-    # 길이가 2~5 범위면 유효한 것으로 간주
-    if 2 <= len(letters) <= 10:
-        return letters
-    return None
+    letters = [c for c in letters if isinstance(c, str) and len(c)==1]
+    return letters or None
 
 def infer_token_letters_from_rows(rows):
-    """
-    P0.jsonl 로우들을 훑어 토큰의 선택지 레터 배열을 추정.
-    우선순위: rec['choices'|'options'|'option_list'] → 각 항목의 label/letter/문자접두
-    """
-    for rec in rows[:50]:  # 퍼포먼스 고려, 앞부분만 스캔
+    for rec in rows[:100]:  # 조금 더 넉넉히
         for key in ("choices","options","option_list"):
-            if key in rec and isinstance(rec[key], list):
+            if key in rec and isinstance(rec[key], list) and rec[key]:
                 got = _extract_letters_from_choices_field(rec[key])
                 if got:
                     return got
-    # 못 찾으면 None
     return None
 
 def idx_to_letter(token_name, idx, token_map):
     letters = token_map.get(token_name)
-    if letters is None: 
+    if letters is None or not isinstance(idx, int):
         return None
-    if not isinstance(idx, int): 
-        return None
-    if 0 <= idx < len(letters):
-        return letters[idx]
-    return None
+    return letters[idx] if 0 <= idx < len(letters) else None
 
 # --------------- 로딩 -------------------
 def load_for_token(dir_model, token_name, mode, token_map, auto_token_map=False, verbose=False):
     """
     mode별 반환:
-      - "correct"     -> set[qid] (정답 맞춘 qid 집합)
-      - "pred_idx"    -> dict[qid] = pred_idx (int)
-      - "pred_letter" -> dict[qid] = pred_letter (str)  ※ 매핑 필요
-    auto_token_map=True 이면 P0.jsonl의 choices를 스캔해 token_map에 없는 토큰 레터 자동 채움.
+      - "correct"     -> set[qid]
+      - "pred_idx"    -> dict[qid] = int
+      - "pred_letter" -> dict[qid] = str
     """
     jf = os.path.join(dir_model, token_name, "P0.jsonl")
     if verbose:
@@ -199,38 +226,62 @@ def load_for_token(dir_model, token_name, mode, token_map, auto_token_map=False,
             token_map[token_name] = guessed
             if verbose:
                 print(f"  [AUTOMAP] token={token_name} letters={guessed}", flush=True)
-        else:
-            if verbose:
-                print(f"  [AUTOMAP] token={token_name} letters NOT inferred", flush=True)
+        elif verbose:
+            print(f"  [AUTOMAP] token={token_name} letters NOT inferred", flush=True)
 
     if mode == "correct":
         ok = set()
+        c_total = 0
         for rec in rows:
-            qid, pred, gold = parse_pred_gold(rec)
-            if qid is None or pred is None or gold is None: 
+            qid, pred_idx, gold_idx, p_letter, g_letter = parse_pred_gold(rec)
+            if qid is None:
                 continue
-            if pred == gold:
+            decided = None
+            if pred_idx is not None and gold_idx is not None:
+                decided = (pred_idx == gold_idx)
+            else:
+                if p_letter and g_letter:
+                    decided = (normalize_letter(p_letter) == normalize_letter(g_letter))
+                elif (pred_idx is not None) and (g_letter is not None) and (token_name in token_map):
+                    # gold가 문자, pred는 인덱스 → 문자로 비교
+                    ch = idx_to_letter(token_name, pred_idx, token_map)
+                    decided = (ch is not None and normalize_letter(ch) == normalize_letter(g_letter))
+            if decided:
                 ok.add(qid)
+                c_total += 1
         if verbose:
             print(f"  [OKSET] token={token_name} correct={len(ok)}", flush=True)
         return ok
 
-    # pred 기반
     out = {}
+    took_idx = took_letter = 0
     for rec in rows:
-        qid, pred, _ = parse_pred_gold(rec)
-        if qid is None or pred is None: 
+        qid, pred_idx, _, p_letter, _ = parse_pred_gold(rec)
+        if qid is None:
             continue
         if mode == "pred_idx":
-            out[qid] = pred
+            if pred_idx is not None:
+                out[qid] = int(pred_idx); took_idx += 1
+            elif p_letter and token_name in token_map:
+                letters = token_map[token_name]
+                ch = normalize_letter(p_letter)
+                if ch in letters:
+                    out[qid] = int(letters.index(ch)); took_idx += 1
         elif mode == "pred_letter":
-            ch = idx_to_letter(token_name, pred, token_map)
-            if ch is not None:
-                out[qid] = ch
+            if p_letter:
+                out[qid] = normalize_letter(p_letter); took_letter += 1
+            elif pred_idx is not None and token_name in token_map:
+                ch = idx_to_letter(token_name, pred_idx, token_map)
+                if ch is not None:
+                    out[qid] = ch; took_letter += 1
     if verbose:
         print(f"  [PRED] token={token_name} loaded={len(out)} mode={mode}", flush=True)
-        if mode=="pred_letter" and token_name in token_map:
+        if token_name in token_map:
             print(f"  [PRED] token_map[{token_name}]={token_map[token_name]}", flush=True)
+        if mode == "pred_idx":
+            print(f"  [PRED] via idx/letter = {took_idx}", flush=True)
+        else:
+            print(f"  [PRED] via letter/idx = {took_letter}", flush=True)
     return out
 
 # ----------- 페어 계산 ------------------
@@ -242,20 +293,13 @@ def pairwise_pairs(tokens):
     return out
 
 def compute_pair_value(objA, objB, mode, metric):
-    """
-    mode에 따라 objA/objB 해석:
-      - correct: A,B는 set ; metric은 jaccard/overlap/inter
-      - pred_* : A,B는 dict[qid]->value ; 반환은 교집합에서 value 동일한 비율
-    """
     if mode == "correct":
         if metric == "jaccard":      return jaccard(objA, objB)
         elif metric == "overlap":    return overlap_coeff(objA, objB)
         elif metric == "inter":      return inter_ratio(objA, objB)
         else: return np.nan
-
-    # pred_* : equality rate on intersection
     keys = set(objA.keys()) & set(objB.keys())
-    if not keys: 
+    if not keys:
         return np.nan
     same = sum(1 for k in keys if objA[k] == objB[k])
     return same / float(len(keys))
@@ -268,25 +312,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
     ap.add_argument("--datasets", nargs="+", default=["arc","csqa"])
-    ap.add_argument("--pair", nargs="+", default=["ALL"], help="T0 T1 또는 ALL")
+    ap.add_argument("--pair", nargs="+", default=["ALL"])
     ap.add_argument("--tokens", nargs="+", default=["T0","T1","T2"])
     ap.add_argument("--mode", choices=["correct","pred_idx","pred_letter"], default="correct")
-    ap.add_argument("--metric", choices=["jaccard","overlap","inter"], default="jaccard",
-                    help="※ correct 모드에서만 사용됨")
-    ap.add_argument("--token_map", default="T0:ABCD,T1:abcd,T2:1234",
-                    help="pred_letter 모드용 토큰-문자 매핑. 예: 'T0:ABCD,T1:abcd,T2:1234'")
-    ap.add_argument("--auto_token_map", action="store_true",
-                    help="P0.jsonl의 choices를 스캔하여 토큰별 레터 배열 자동 추정(명시 맵 없을 때만)")
+    ap.add_argument("--metric", choices=["jaccard","overlap","inter"], default="jaccard")
+    ap.add_argument("--token_map", default="T0:ABCD,T1:abcd,T2:1234")
+    ap.add_argument("--auto_token_map", action="store_true")
     ap.add_argument("--out_png", default="viz_out/answer_match_matrix.png")
     ap.add_argument("--out_csv", default="viz_out/answer_match_matrix.csv")
     ap.add_argument("--min_models", type=int, default=1)
-    ap.add_argument("--models", nargs="*", default=None, help="부분 문자열로 모델 필터")
-    ap.add_argument("--write_debug", default=None, help="중간 결과 JSON 저장 경로")
+    ap.add_argument("--models", nargs="*", default=None)
+    ap.add_argument("--write_debug", default=None)
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    # 경로/맵 로그
     out_png_abs = str(Path(args.out_png).resolve())
     out_csv_abs = str(Path(args.out_csv).resolve())
     token_map = parse_token_map(args.token_map)
