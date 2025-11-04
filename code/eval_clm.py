@@ -69,12 +69,11 @@ def dump_pred(qid, gold_idx, pred_idx, probs=None):
     }
     if probs is not None:
         try:
-            # 만약 logits라면 확률로 변환
             _p = list(probs)
-            if any(abs(float(v)) > 1.0 for v in _p):  # 대충 logits 힌트
+            # logits 흔적이면 softmax
+            if any(abs(float(v)) > 1.0 for v in _p):
                 _p = _softmax(_p)
             else:
-                # 이미 확률 형태여도 합이 1이 아니면 정규화
                 s = sum(float(v) for v in _p) or 1.0
                 _p = [float(v) / s for v in _p]
             rec["probs"] = [float(x) for x in _p]
@@ -113,14 +112,11 @@ def _safe_get(rec, keys):
     return None
 
 def _letter_to_idx(letter, toks):
-    """
-    letter('A','B','가','나','1','2'...) -> 인덱스.
-    """
+    """ letter('A','B','가','나','1','2'...) -> 인덱스 """
     try:
         s = str(letter).strip()
         if s in toks:
             return toks.index(s)
-        # 혹시 정수 문자열이면 직접 인덱싱 시도 (e.g., "0","1")
         if s.isdigit():
             i = int(s)
             if 0 <= i < len(toks):
@@ -149,11 +145,10 @@ def _resolve_gold_pred_indices(r, tokens4, tokens5):
             if cand in r and isinstance(r[cand], (list, tuple)):
                 L = len(r[cand]); break
     if not isinstance(L, int):
-        # 마지막 안전망
         L = 4
     toks = tokens4 if L == 4 else (tokens5 if L == 5 else [str(k) for k in range(L)])
 
-    # ---- GOLD ----
+    # GOLD
     gold_idx = _safe_get(r, ["gold_idx", "label_idx", "label", "gold"])
     gold_idx = _coerce_int(gold_idx, default=None)
     if gold_idx is None:
@@ -163,22 +158,19 @@ def _resolve_gold_pred_indices(r, tokens4, tokens5):
     if gold_idx is None:
         gold_idx = -1
 
-    # ---- PRED ----
+    # PRED
     pred_idx = _safe_get(r, ["pred_idx", "prediction_idx", "pred", "prediction"])
     pred_idx = _coerce_int(pred_idx, default=None)
-    pred_letter = None
     if pred_idx is None:
         pred_letter = _safe_get(r, ["pred_letter", "prediction_letter", "sampled"])
         if pred_letter is not None:
             pred_idx = _letter_to_idx(pred_letter, toks)
 
-    # ---- PROBS/LOGITS ----
+    # PROBS / LOGITS
     probs = _safe_get(r, ["probs", "prob", "choice_probs", "choice_prob"])
     logits = _safe_get(r, ["logits"])
     if isinstance(logits, (list, tuple)) and len(logits) > 0:
-        probs_from_logits = _softmax(logits)
-        probs = probs_from_logits
-    # pred_idx가 아직 없다면 probs로 보정
+        probs = _softmax(logits)
     if pred_idx is None and isinstance(probs, (list, tuple)) and len(probs) > 0:
         try:
             import numpy as np
@@ -189,7 +181,6 @@ def _resolve_gold_pred_indices(r, tokens4, tokens5):
     if pred_idx is None:
         pred_idx = -1
 
-    # probs가 있다면 리스트로 강제
     if isinstance(probs, (list, tuple)):
         probs = [float(x) for x in probs]
     else:
@@ -213,7 +204,7 @@ def main():
 
     os.makedirs('models', exist_ok=True)
 
-    # 토크나이저 로드 (fast 실패시 slow fallback)
+    # 토크나이저 (fast 실패시 slow)
     try:
         toker = AutoTokenizer.from_pretrained(
             args.pretrained_model_path,
@@ -240,7 +231,7 @@ def main():
             )
             return
 
-    # 모델 로드
+    # 모델
     try:
         model = AutoModelForCausalLM.from_pretrained(
             args.pretrained_model_path,
@@ -255,7 +246,7 @@ def main():
         return
     logging_cuda_memory_usage()
 
-    # 옵션 라벨(토큰) 파싱: 덤프 시 gold/pred 인덱스 해석용
+    # 옵션 라벨(토큰)
     tokens4 = getattr(args, "option_ids4", None)
     tokens5 = getattr(args, "option_ids5", None)
     tokens4 = tokens4.split(",") if isinstance(tokens4, str) and tokens4 else ["A","B","C","D"]
@@ -272,7 +263,6 @@ def main():
             cache_path = f'{args.save_path}/{subject}.jsonl'
             save_preds_on = bool(save_preds_path)
 
-            # 결과 파일 존재 & save_preds 미설정 → 스킵
             if os.path.exists(cache_path) and not save_preds_on:
                 logger.info(f"Results already exist (and --save_preds not set): {cache_path} — skipping")
                 continue
@@ -296,16 +286,14 @@ def main():
             # ===== JSONL 덤프: qid/gold_idx/pred_idx/probs =====
             for i, r in enumerate(results):
                 qid = r.get("id", r.get("qid", f"{subject}:{i}"))
-
                 gold_idx, pred_idx, probs, toks = _resolve_gold_pred_indices(
                     r, tokens4=tokens4, tokens5=tokens5
                 )
                 dump_pred(qid, gold_idx, pred_idx, probs)
 
-            # subject 단위로 JSONL append 저장
             flush_dump(save_preds_path)
 
-            # ===== 리포트/저장 (기존 로직 유지) =====
+            # ===== 리포트/저장 =====
             metrics = None
             if args.setting not in ['perm', 'cyclic'] and len(results) > 0:
                 metrics = {'type': 'metric', 'data': {}}

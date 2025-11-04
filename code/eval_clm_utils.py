@@ -28,55 +28,39 @@ logger = logging.getLogger(__name__)
 
 
 def parse_arguments():
-    logger.info(f'cuda is available {torch.cuda.is_available()}')
-    logger.info(f'cuda device count {torch.cuda.device_count()}')
-    logger.info(f'cuda device name {torch.cuda.get_device_name()}')
+    ap = argparse.ArgumentParser()
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--pretrained_model_path", type=str, required=True)
-    parser.add_argument("--eval_names", type=str, nargs='+', default=[],
-                        help='eval tasks and settings')
-    parser.add_argument("--data_root", type=str, default="data",
-                        help="Root directory containing data_{task} folders (e.g., 'code' when running from repo root)")
-    parser.add_argument("--ko", action='store_true',
-                        help="Use Korean CSV files (e.g., *_dev.ko.csv, *_test.ko.csv)")
-    parser.add_argument("--prompt_lang", type=str, choices=['en', 'ko'], default='en',
-                        help="Language of the prompt template and labels (Question/Options/Answer)")
-    parser.add_argument("--option_ids4", type=str, default=None,
-                        help="Comma-separated option IDs for 4-choice tasks (e.g., 'A,B,C,D' or '가,나,다,라' or '1,2,3,4')")
-    parser.add_argument("--option_ids5", type=str, default=None,
-                        help="Comma-separated option IDs for 5-choice tasks (e.g., 'A,B,C,D,E' or '가,나,다,라,마' or '1,2,3,4,5')")
-    parser.add_argument("--save_preds", default=None, help="Write JSONL of per-item predictions here")
-    parser.add_argument("--permute_shift", type=int, default=0, help="Cyclic shift of options (0..L-1)")
-    parser.add_argument("--pride", default=None, help="PriDe config string")
+    # 모델/데이터 공통
+    ap.add_argument("--pretrained_model_path", type=str, required=True)
+    ap.add_argument("--data_root", type=str, default="data")
+    ap.add_argument("--eval_names", type=str, nargs="+", default=[], help="예: arc,0 csqa,0")
+    ap.add_argument("--save_path", type=str, default="results")
+    ap.add_argument("--num_few_shot", type=int, default=0)
+    ap.add_argument("--setting", type=str, default="default")  # 그대로 유지
 
+    # 프롬프트/옵션 라벨 (토큰셋)
+    ap.add_argument("--option_ids4", type=str, default="A,B,C,D")
+    ap.add_argument("--option_ids5", type=str, default="A,B,C,D,E")
 
-    args = parser.parse_args()
+    # 한국어 토글 등(있다면 그대로)
+    ap.add_argument("--ko", action="store_true")
+    ap.add_argument("--prompt_lang", type=str, default="en")
 
-    args.model_name = args.pretrained_model_path.split('/')[-1]
+    # 저장/라우팅 관련
+    ap.add_argument("--save_preds", type=str, default=None, help="여기에 JSONL 덤프")
+    ap.add_argument("--permute_shift", type=int, default=0)
+    ap.add_argument("--pride", type=str, default=None)  # "method=paraphrase,k=3,seed=42" 같은 문자열
 
-    for eval_name in args.eval_names:
-        eval_args = eval_name.split(',')
-        task = eval_args[0]
-        if task not in [
-            'mmlu', 'arc', 'csqa',
-        ]:
-            raise ValueError(f"Unknown task: {task}")
+    # 기타 추가 옵션이 있으면 그대로…
 
-        num_few_shot = int(eval_args[1])
-
-        setting = eval_args[2] if len(eval_args) > 2 else None
-        if setting is not None and not (
-            setting in [
-                'noid',
-                'perm', 'cyclic',
-                'shuffle_both',
-            ] or (setting.startswith('move') and setting[-1] in ['a', 'b', 'c', 'd'])
-        ):
-            raise ValueError(f"Unknown setting: {setting}")
-
+    args = ap.parse_args()
+    # eval_names 문자열을 공간/콤마 구분 모두 허용
+    if len(args.eval_names) == 1 and "," in args.eval_names[0] and " " not in args.eval_names[0]:
+        # 단일 "arc,0" 형태면 그대로 유지
+        pass
+    # 결과 저장 폴더
+    os.makedirs(args.save_path, exist_ok=True)
     return args
-
 
 def prepare_eval(args, eval_name):
     # task and setting
