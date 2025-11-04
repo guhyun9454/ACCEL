@@ -1,88 +1,28 @@
 #!/usr/bin/env python3
-"""
-3-Stage Self-Escalation Router for MCQ (ARC/CSQA)
+# -*- coding: utf-8 -*-
+import os, sys, json, argparse, subprocess
+from collections import defaultdict, Counter
+import numpy as np
 
-Stage 1: T0P0
-Stage 2: + T1P0, T2P0   (token 확대)
-Stage 3: + P1..P(S-1)   (순환 확대; S=num_shifts)
+# 토큰 세트 정의 (위 파일과 동일)
+TOKSETS_EN4 = {"T0":"A,B,C,D","T1":"a,b,c,d","T2":"1,2,3,4"}
+TOKSETS_EN5 = {"T0":"A,B,C,D,E","T1":"a,b,c,d,e","T2":"1,2,3,4,5"}
+TOKSETS_KO4 = {"T0":"A,B,C,D","T1":"가,나,다,라","T2":"1,2,3,4"}
+TOKSETS_KO5 = {"T0":"A,B,C,D,E","T1":"가,나,다,라,마","T2":"1,2,3,4,5"}
 
-각 단계마다 JSONL을 저장하고, probs가 있으면 확률 평균으로 confidence를 평가해
-임계치(lambda) 이상이면 다음 단계를 생략합니다.
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data_root", required=True)
+    ap.add_argument("--eval_name", required=True)
+    ap.add_argument("--num_shifts", type=int, default=4)
+    ap.add_argument("--lambda", dest="lam", type=float, default=0.80)
+    ap.add_argument("--root_out", default="routes_out/pride_off")
+    ap.add_argument("--extra", default="")
+    ap.add_argument("--models", nargs="*", default=None)
+    ap.add_argument("--ko", action="store_true")
+    return ap.parse_args()
 
-eval_clm.py는 다음 패치를 적용했다고 가정합니다:
-  --save_preds <jsonl_path>
-  --permute_shift <int>
-  (선택) --pride "<cfg>" (router_with_pride만 사용)
-
-USAGE (ARC, 4지선다):
-  python router_no_pride.py --eval_name arc,0 --num_shifts 4 --lambda 0.80 --extra "--prompt_lang en"
-
-USAGE (CSQA, 5지선다):
-  python router_no_pride.py --eval_name csqa,0 --num_shifts 5 --lambda 0.80 --extra "--prompt_lang en"
-"""
-
-import argparse, subprocess, os, json, numpy as np
-from collections import defaultdict
-
-TOKEN_SETS_4 = {"T0": "A,B,C,D", "T1": "a,b,c,d", "T2": "1,2,3,4"}
-TOKEN_SETS_5 = {"T0": "A,B,C,D,E", "T1": "a,b,c,d,e", "T2": "1,2,3,4,5"}
-
-DEFAULT_MODELS = [
-    "K-intelligence/Midm-2.0-Mini-Instruct",
-    "LGAI-EXAONE/EXAONE-3.5-2.4B-Instruct",
-    "kakaocorp/kanana-1.5-2.1b-instruct-2505",
-    "naver-hyperclovax/HyperCLOVAX-SEED-Text-Instruct-1.5B",
-    "skt/A.X-4.0-Light",
-    "Qwen/Qwen2.5-1.5B-Instruct",
-    "meta-llama/Llama-3.2-1B-Instruct",
-    "meta-llama/Llama-3.2-3B-Instruct",
-    "google/gemma-3-1b-it",
-]
-
-def sanitize(s): return s.replace("/", "_").replace(" ", "_")
-
-def read_jsonl(p):
-    data = []
-    with open(p, "r", encoding="utf-8") as f:
-        for line in f:
-            data.append(json.loads(line))
-    return data
-
-def merge_probs(jsonl_paths):
-    """Load multiple JSONLs and average probs per qid. Assumes all sets cover same qids.
-       Returns dict: qid -> (avg_probs, gold) and summary stats (mean top1 conf, acc)."""
-    bags = defaultdict(list)
-    gold_map = {}
-    for p in jsonl_paths:
-        arr = read_jsonl(p)
-        for r in arr:
-            qid = r["qid"]
-            pr = r.get("probs", None)
-            if pr is None:
-                return None, None, None  # no probs -> stop and force full run
-            bags[qid].append(np.asarray(pr, dtype=float))
-            if qid not in gold_map:
-                gold_map[qid] = int(r["gold"])
-
-    qids = sorted(bags.keys())
-    avg_probs = {}
-    corrects = []
-    confs = []
-    for q in qids:
-        P = np.stack(bags[q], axis=0).mean(axis=0)
-        P = np.clip(P, 1e-12, None)
-        P /= P.sum()
-        avg_probs[q] = (P, gold_map[q])
-        pred = int(np.argmax(P))
-        corrects.append(1 if pred == gold_map[q] else 0)
-        confs.append(float(P[pred]))
-    mean_conf = float(np.mean(confs))
-    acc = float(np.mean(corrects))
-    return avg_probs, mean_conf, acc
-
-def ensure_dir(p): os.makedirs(p, exist_ok=True)
-
-def run_eval(model, eval_name, data_root, out_jsonl, tok4, tok5, shift, ko, extra, pride_cfg):
+def run_eval(model, eval_name, data_root, out_jsonl, tok4, tok5, shift, ko, extra):
     cmd = [
         "python", "code/eval_clm.py",
         "--pretrained_model_path", model,
@@ -95,89 +35,123 @@ def run_eval(model, eval_name, data_root, out_jsonl, tok4, tok5, shift, ko, extr
     ]
     if ko: cmd.append("--ko")
     if extra.strip(): cmd += extra.strip().split()
-    
-    print("  >>", " ".join(cmd))
-    return subprocess.run(cmd).returncode
+    os.makedirs(os.path.dirname(out_jsonl), exist_ok=True)
+    print("[CMD]", " ".join(cmd))
+    return subprocess.call(cmd)
+
+# ===== 아래 merge/save 유틸은 with_pride.py와 동일 =====
+def _read_jsonl(p):
+    out=[]; 
+    with open(p,"r",encoding="utf-8") as f:
+        for line in f:
+            try: out.append(json.loads(line))
+            except: pass
+    return out
+def _pull(r, ks, d=None):
+    for k in ks:
+        if k in r and r[k] is not None: return r[k]
+    return d
+def _norm(p):
+    import numpy as np
+    p=np.asarray(p,dtype=float); p=np.clip(p,1e-12,None); s=p.sum()
+    return (p/s) if s>0 else np.ones_like(p)/len(p)
+
+from collections import defaultdict, Counter
+import numpy as np
+
+def merge_prob_files(paths):
+    bag_probs=defaultdict(list); bag_votes=defaultdict(list); gold={}
+    for p in paths:
+        for r in _read_jsonl(p):
+            q=_pull(r,["qid","id"])
+            if q is None: continue
+            g=_pull(r,["gold_idx","label_idx","label","gold","answer"],-1)
+            try: g=int(g)
+            except: g=-1
+            gold[q]=g
+            pr=_pull(r,["probs"],None)
+            if isinstance(pr,(list,tuple)) and len(pr)>0:
+                bag_probs[q].append(_norm(pr))
+            else:
+                pi=_pull(r,["pred_idx","prediction_idx","pred","prediction"],-1)
+                try: pi=int(pi)
+                except: pi=-1
+                if pi>=0: bag_votes[q].append(pi)
+    merged={}
+    for q in set(list(bag_probs.keys())+list(bag_votes.keys())+list(gold.keys())):
+        G=gold.get(q,-1)
+        if bag_probs[q]:
+            import numpy as np
+            P=np.mean(bag_probs[q],axis=0); P=_norm(P)
+            pred=int(np.argmax(P)); conf=float(P[pred])
+            merged[q]=dict(gold_idx=G,pred_idx=pred,probs=P.tolist(),conf=conf)
+        else:
+            vs=bag_votes[q]
+            if vs:
+                c=Counter(vs); pred, _ = max(c.items(), key=lambda x:(x[1],-x[0]))
+            else:
+                pred=-1
+            merged[q]=dict(gold_idx=G,pred_idx=pred,probs=None,conf=None)
+    qids=sorted(merged.keys())
+    corr=[1 if (merged[q]["pred_idx"]==merged[q]["gold_idx"] and merged[q]["pred_idx"]>=0) else 0 for q in qids]
+    confs=[merged[q]["conf"] for q in qids if merged[q]["conf"] is not None]
+    mean_conf=float(np.mean(confs)) if confs else 0.0
+    acc=float(np.mean(corr)) if corr else 0.0
+    return merged, mean_conf, acc
+
+def save_merged(merged, out_jsonl):
+    os.makedirs(os.path.dirname(out_jsonl), exist_ok=True)
+    with open(out_jsonl,"w",encoding="utf-8") as w:
+        for q in sorted(merged.keys()):
+            w.write(json.dumps(dict(qid=q, **merged[q]), ensure_ascii=False)+"\n")
+    print(f"[SAVE] {out_jsonl} ({len(merged)} rows)")
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data_root", default="../LLM-MCQ-Bias_data")
-    ap.add_argument("--eval_name", default="arc,0", help="단일 평가셋만 (예: arc,0 | csqa,0)")
-    ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
-    ap.add_argument("--num_shifts", type=int, default=4, help="ARC=4, CSQA=5")
-    ap.add_argument("--lambda", dest="lam", type=float, default=0.80, help="평균 top-1 confidence 임계")
-    ap.add_argument("--root_out", default="routes_out")
-    ap.add_argument("--prompt_lang", default="en")
-    ap.add_argument("--ko", action="store_true")
-    ap.add_argument("--extra", default="", help='eval_clm.py로 포워드할 추가 플래그 (예: "--prompt_lang en")')
-    
-    args = ap.parse_args()
+    args = parse_args()
+    task = args.eval_name.split(",")[0]
+    tok4_map = TOKSETS_KO4 if args.ko else TOKSETS_EN4
+    tok5_map = TOKSETS_KO5 if args.ko else TOKSETS_EN5
+    models = args.models or ["K-intelligence/Midm-2.0-Mini-Instruct"]
 
-    # 토큰셋 결정
-    tok4_map = TOKEN_SETS_4
-    tok5_map = TOKEN_SETS_5
+    for model in models:
+        model_tag = model.split("/")[-1]
+        eval_tag = args.eval_name.replace(",", "_")
+        sdir = os.path.join(args.root_out, task, model_tag, eval_tag)
+        os.makedirs(sdir, exist_ok=True)
 
-    eval_tag = args.eval_name.split(",")[0]
-    for model in args.models:
-        model_tag = sanitize(model)
-        base_dir = os.path.join(args.root_out, eval_tag, model_tag)
-        ensure_dir(base_dir)
-
-        # Stage 1: T0P0
-        stage = 1
-        sdir = os.path.join(base_dir, f"stage{stage}")
-        ensure_dir(sdir)
-        out1 = os.path.join(sdir, "T0P0.jsonl")
-        rc = run_eval(model, args.eval_name, args.data_root, out1,
-                      tok4_map["T0"], tok5_map["T0"], 0, args.ko, args.extra, None)
-        if rc != 0:
-            print(f"[WARN] {model_tag} stage1 failed; continue to next model")
+        outs1=[]
+        jf=os.path.join(sdir,"T0P0.jsonl")
+        if run_eval(model,args.eval_name,args.data_root,jf,tok4_map["T0"],tok5_map["T0"],0,args.ko,args.extra)==0:
+            outs1.append(jf)
+        merged, mc, acc = merge_prob_files(outs1)
+        save_merged(merged, os.path.join(sdir,"stage1_merged.jsonl"))
+        print(f"[{model_tag}][{eval_tag}] Stage1 mean_conf={mc:.3f}, acc={acc:.3f}")
+        if mc>=args.lam:
+            print(f"  -> confidence {mc:.3f} >= λ {args.lam:.2f}, skip later stages.")
             continue
 
-        # Check confidence
-        merged, mean_conf, acc = merge_probs([out1])
-        if merged is not None:
-            print(f"[{model_tag}][{eval_tag}] Stage1 mean_conf={mean_conf:.3f}, acc={acc:.3f}")
-            if mean_conf >= args.lam:
-                print(f"  -> Stop at Stage1 (λ={args.lam})")
-                continue
-        else:
-            print(f"[{model_tag}] No probs found; will execute all stages.")
+        outs2=outs1[:]
+        for t in ["T1","T2"]:
+            jf=os.path.join(sdir,f"{t}P0.jsonl")
+            if run_eval(model,args.eval_name,args.data_root,jf,tok4_map[t],tok5_map[t],0,args.ko,args.extra)==0:
+                outs2.append(jf)
+        merged, mc, acc = merge_prob_files(outs2)
+        save_merged(merged, os.path.join(sdir,"stage2_merged.jsonl"))
+        print(f"[{model_tag}][{eval_tag}] Stage2 mean_conf={mc:.3f}, acc={acc:.3f}")
+        if mc>=args.lam:
+            print(f"  -> confidence {mc:.3f} >= λ {args.lam:.2f}, skip stage3.")
+            continue
 
-        # Stage 2: add T1P0, T2P0
-        stage = 2
-        sdir = os.path.join(base_dir, f"stage{stage}")
-        ensure_dir(sdir)
-        outs = [out1]
-        for t in ["T1", "T2"]:
-            jf = os.path.join(sdir, f"{t}P0.jsonl")
-            rc = run_eval(model, args.eval_name, args.data_root, jf,
-                          tok4_map[t], tok5_map[t], 0, args.ko, args.extra, None)
-            if rc == 0: outs.append(jf)
-
-        merged, mean_conf, acc = merge_probs(outs)
-        if merged is not None:
-            print(f"[{model_tag}][{eval_tag}] Stage2 mean_conf={mean_conf:.3f}, acc={acc:.3f}")
-            if mean_conf >= args.lam:
-                print(f"  -> Stop at Stage2 (λ={args.lam})")
-                continue
-
-        # Stage 3: add shifts P1..P(S-1) for T0,T1,T2
-        stage = 3
-        sdir = os.path.join(base_dir, f"stage{stage}")
-        ensure_dir(sdir)
-        outs3 = outs[:]
+        outs3=outs2[:]
         for shift in range(1, args.num_shifts):
-            for t in ["T0", "T1", "T2"]:
-                jf = os.path.join(sdir, f"{t}P{shift}.jsonl")
-                rc = run_eval(model, args.eval_name, args.data_root, jf,
-                              tok4_map[t], tok5_map[t], shift, args.ko, args.extra, None)
-                if rc == 0: outs3.append(jf)
+            for t in ["T0","T1","T2"]:
+                jf=os.path.join(sdir,f"{t}P{shift}.jsonl")
+                if run_eval(model,args.eval_name,args.data_root,jf,tok4_map[t],tok5_map[t],shift,args.ko,args.extra)==0:
+                    outs3.append(jf)
+        merged, mc, acc = merge_prob_files(outs3)
+        save_merged(merged, os.path.join(sdir,"stage3_merged.jsonl"))
+        print(f"[{model_tag}][{eval_tag}] Stage3 mean_conf={mc:.3f}, acc={acc:.3f}")
+        print("  -> Finished.")
 
-        merged, mean_conf, acc = merge_probs(outs3)
-        if merged is not None:
-            print(f"[{model_tag}][{eval_tag}] Stage3 mean_conf={mean_conf:.3f}, acc={acc:.3f}")
-        print(f"  -> Finished all stages for {model_tag}.")
-        
 if __name__ == "__main__":
     main()
