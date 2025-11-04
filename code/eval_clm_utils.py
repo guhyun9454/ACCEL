@@ -36,6 +36,8 @@ def parse_arguments():
     parser.add_argument("--pretrained_model_path", type=str, required=True)
     parser.add_argument("--eval_names", type=str, nargs='+', default=[],
                         help='eval tasks and settings')
+    parser.add_argument("--option_id_set", type=str, default=None,
+                        help='custom option ID string (e.g., ABCD / abcd / 1234). Length must match #options')
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]
@@ -84,6 +86,15 @@ def prepare_eval(args, eval_name):
     if task in ['csqa']:
         option_ids = list('ABCDE')
         option_ids_header = list('ABCDE')
+
+    # Override displayed option IDs by user-specified token set (for probing token preference)
+    # Keep headers (ground-truth labels) as uppercase letters to match dataset files.
+    if getattr(args, 'option_id_set', None):
+        k = len(option_ids_header)
+        custom = list(args.option_id_set)
+        if len(custom) != k:
+            raise ValueError(f"option_id_set length must be {k} for task '{task}', got {len(custom)}: {args.option_id_set}")
+        option_ids = custom
 
     data_path = f'data_{task}'
     subjects = sorted([f.split("_test.csv")[0]
