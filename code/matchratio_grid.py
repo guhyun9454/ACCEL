@@ -7,9 +7,13 @@ Answer-match matrix (rows=models, cols=datasets).
 - --pair T0 T1  (또는 --pair ALL 로 T0,T1,T2 모든 쌍 평균)
 - --metric: jaccard(기본), overlap, inter
 - 디버그 옵션: --verbose, --dry-run
+- 추가 옵션:
+  * --models <substr ...>   : 부분 문자열 매칭으로 모델 필터링
+  * --write_debug <path>    : 계산 결과를 JSON으로 저장
 """
 import os, sys, json, argparse, numpy as np
 import traceback
+from pathlib import Path
 
 import matplotlib
 # 백엔드 문제 회피(헤드리스에서도 동작)
@@ -24,7 +28,6 @@ def die(msg, code=2):
 def excepthook(exc_type, exc, tb):
     print("[EXCEPTION] Uncaught exception!", flush=True)
     traceback.print_exception(exc_type, exc, tb)
-    # 비정상 종료라도 명시적으로 종료코드 남김
     os._exit(1)
 
 sys.excepthook = excepthook
@@ -111,8 +114,20 @@ def simple_model_name(raw):
            .replace("K-intelligence_", "KT ").replace("_", " ")
     return s.strip()
 
+def filter_models(models, substrs):
+    if not substrs:
+        return models
+    keep=[]
+    for m in models:
+        for s in substrs:
+            if s in m:
+                keep.append(m); break
+    return sorted(set(keep))
+
 def main():
     print(f"[BOOT] python={sys.version.split()[0]} file={__file__}", flush=True)
+    print(f"[BOOT] cwd={os.getcwd()}", flush=True)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
     ap.add_argument("--datasets", nargs="+", default=["arc","csqa"])
@@ -122,25 +137,32 @@ def main():
     ap.add_argument("--out_png", default="viz_out/answer_match_matrix.png")
     ap.add_argument("--out_csv", default="viz_out/answer_match_matrix.csv")
     ap.add_argument("--min_models", type=int, default=1)
+    ap.add_argument("--models", nargs="*", default=None, help="부분 문자열로 모델 필터")
+    ap.add_argument("--write_debug", default=None, help="중간 결과를 JSON으로 저장할 경로")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
+    # 절대경로 에코
+    out_png_abs = str(Path(args.out_png).resolve())
+    out_csv_abs = str(Path(args.out_csv).resolve())
+
     print(f"[ARGS] root={args.root} datasets={args.datasets} pair={args.pair} "
           f"tokens={args.tokens} metric={args.metric} "
-          f"out_png={args.out_png} out_csv={args.out_csv} verbose={args.verbose} dry_run={args.dry_run}",
+          f"out_png={args.out_png} out_csv={args.out_csv} "
+          f"models_filter={args.models} verbose={args.verbose} dry_run={args.dry_run}",
           flush=True)
 
     # metric fn
     metric_fn = {"jaccard": jaccard, "overlap": overlap_coeff, "inter": inter_ratio}[args.metric]
 
-    # 모델 발견
+    # 모델 수집
     model_set=set()
     per_ds_models={}
     for ds in args.datasets:
         dsd=os.path.join(args.root, ds)
         print(f"[SCAN] dataset_dir={dsd} exists={os.path.isdir(dsd)}", flush=True)
-        if not os.path.isdir(dsd): 
+        if not os.path.isdir(dsd):
             continue
         ms=[m for m in os.listdir(dsd) if os.path.isdir(os.path.join(dsd,m))]
         per_ds_models[ds]=sorted(ms)
@@ -148,9 +170,13 @@ def main():
         print(f"[SCAN] dataset={ds} models={per_ds_models[ds]}", flush=True)
 
     models=sorted(model_set)
+    if args.models:
+        models = filter_models(models, args.models)
+        print(f"[FILTER] models after filter={models}", flush=True)
+
     print(f"[INFO] total_models={len(models)} → {models}", flush=True)
     if not models:
-        die(f"No models under {args.root}/<dataset>/*")
+        die(f"No models under {args.root}/<dataset>/* (after filter)")
 
     # 토큰쌍
     if len(args.pair)==1 and args.pair[0].upper()=="ALL":
@@ -165,6 +191,7 @@ def main():
 
     # 매트릭스
     M = np.full((len(models), len(args.datasets)), np.nan, float)
+    token_file_counts = {t:0 for t in args.tokens}  # 디버그: 각 토큰의 P0.jsonl 발견 개수
 
     for j, ds in enumerate(args.datasets):
         dsd=os.path.join(args.root, ds)
@@ -188,7 +215,10 @@ def main():
             if args.verbose:
                 print(f"[MODEL] ds={ds} model={model} need_tokens={need_tokens}", flush=True)
             for t in need_tokens:
-                correct[t] = load_correct_set(os.path.join(dir_model, t), verbose=args.verbose)
+                token_dir = os.path.join(dir_model, t)
+                if os.path.exists(os.path.join(token_dir,"P0.jsonl")):
+                    token_file_counts[t] += 1
+                correct[t] = load_correct_set(token_dir, verbose=args.verbose)
 
             vals=[]
             for a,b in pairs:
@@ -207,14 +237,33 @@ def main():
     order=np.argsort(-row_means)
     M=M[order,:]; models_sorted=[models[k] for k in order]
     print(f"[ORDER] row_means(desc)={[(models[k], float(row_means[k])) for k in order]}", flush=True)
+    print(f"[INFO] token file counts: {token_file_counts}", flush=True)
+
+    # 디버그 JSON 저장(선택)
+    if args.write_debug:
+        dbg = {
+            "root": args.root,
+            "cwd": os.getcwd(),
+            "datasets": args.datasets,
+            "tokens": args.tokens,
+            "pairs": pairs,
+            "pair_name": pair_name,
+            "metric": args.metric,
+            "models_sorted": models_sorted,
+            "matrix": M.tolist(),
+        }
+        Path(args.write_debug).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.write_debug, "w", encoding="utf-8") as w:
+            json.dump(dbg, w, ensure_ascii=False, indent=2)
+        print(f"[DEBUG] wrote {args.write_debug}", flush=True)
 
     if args.dry_run:
         print("[DRY] skip saving PNG/CSV", flush=True)
         return
 
     # 저장 경로 준비
-    os.makedirs(os.path.dirname(args.out_png), exist_ok=True)
-    os.makedirs(os.path.dirname(args.out_csv), exist_ok=True)
+    Path(args.out_png).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out_csv).parent.mkdir(parents=True, exist_ok=True)
 
     # CSV
     with open(args.out_csv, "w", encoding="utf-8") as w:
@@ -222,7 +271,10 @@ def main():
         for i, m in enumerate(models_sorted):
             row=[simple_model_name(m)] + [("" if np.isnan(M[i,j]) else f"{M[i,j]:.4f}") for j in range(M.shape[1])]
             w.write(",".join(row) + "\n")
-    print(f"[DONE] CSV: {args.out_csv}", flush=True)
+    # 저장 검증
+    if not (os.path.isfile(args.out_csv) and os.path.getsize(args.out_csv) > 0):
+        die(f"CSV not written: {args.out_csv}")
+    print(f"[DONE] CSV: {args.out_csv} (abs={out_csv_abs})", flush=True)
 
     # Heatmap
     plt.figure(figsize=(8, max(3, 0.35*len(models_sorted)+1)))
@@ -238,7 +290,10 @@ def main():
     plt.tight_layout()
     plt.savefig(args.out_png, dpi=180)
     plt.close()
-    print(f"[DONE] PNG: {args.out_png}", flush=True)
+    # 저장 검증
+    if not (os.path.isfile(args.out_png) and os.path.getsize(args.out_png) > 0):
+        die(f"PNG not written: {args.out_png}")
+    print(f"[DONE] PNG: {args.out_png} (abs={out_png_abs})", flush=True)
     print(f"[INFO] Root={args.root} Pair={pair_name} Metric={args.metric}", flush=True)
 
 if __name__ == "__main__":
