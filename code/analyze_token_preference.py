@@ -27,6 +27,8 @@ def parse_args():
     parser.add_argument("--option_id_sets", type=str, nargs='+',
                         default=["ABCD", "abcd", "1234"],
                         help="token ID sets to probe (e.g., ABCD abcd 1234). Length must match #options")
+    parser.add_argument("--cache_dir", type=str, default="models",
+                        help="Hugging Face cache directory where models/tokenizers are stored")
     return parser.parse_args()
 
 
@@ -39,16 +41,28 @@ def main():
     args = parse_args()
     model_name = args.pretrained_model_path.split("/")[-1]
 
+    # Resolve and set cache directory for this process
+    cache_dir = os.path.abspath(args.cache_dir)
+    os.makedirs(cache_dir, exist_ok=True)
+    os.environ.setdefault("HF_HOME", cache_dir)
+    os.environ.setdefault("HF_HUB_CACHE", cache_dir)
+    os.environ.setdefault("TRANSFORMERS_CACHE", cache_dir)
+    logger.info(f"Using HF cache dir: {cache_dir}")
+
     # Load model/tokenizer once
     toker = AutoTokenizer.from_pretrained(
-        args.pretrained_model_path, use_fast=False,
-        add_bos_token=False, add_eos_token=False,
+        args.pretrained_model_path,
+        use_fast=False,
+        add_bos_token=False,
+        add_eos_token=False,
+        cache_dir=cache_dir,
     )
     model = AutoModelForCausalLM.from_pretrained(
         args.pretrained_model_path,
         device_map='auto',
         use_safetensors=True,
         torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+        cache_dir=cache_dir,
     )
 
     save_dir = f"results_{args.task}/{args.num_few_shot}s_{model_name}/{args.task}_token_pref"
