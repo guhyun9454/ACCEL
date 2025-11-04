@@ -142,6 +142,7 @@ def main():
             'note': 'PRIDE-style prior estimated via cyclic permutations',
             'saved_at': datetime.utcnow().isoformat() + 'Z',
         }
+        print(result['prior_map'])
 
         save_path = os.path.join(save_dir, f"{option_id_set}.json")
         with open(save_path, 'w', encoding='utf-8') as f:
