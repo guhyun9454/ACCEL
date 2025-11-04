@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pretrained_model_path", type=str, required=True)
-    parser.add_argument("--task", type=str, default="arc", choices=["arc", "mmlu"],
+    parser.add_argument("--task", type=str, default="arc", choices=["arc", "mmlu", "csqa"],
                         help="evaluation dataset; uses 4 choices")
     parser.add_argument("--num_few_shot", type=int, default=0)
     parser.add_argument("--ratio_prefix_samples", type=float, default=0.05)
