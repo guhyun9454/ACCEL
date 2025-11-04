@@ -4,28 +4,31 @@
 Answer-match matrix (rows=models, cols=datasets).
 
 기능
-- 기준 선택(--mode):
-  * correct  : "정답 맞춘 qid 집합" 간 겹침(Jaccard/overlap/inter)  [기존 동작]
-  * pred_idx : 같은 qid에서 예측 인덱스가 일치한 비율
+- --mode:
+  * correct     : "정답 맞춘 qid 집합" 간 겹침(Jaccard/overlap/inter)
+  * pred_idx    : 같은 qid에서 예측 인덱스가 일치한 비율
   * pred_letter : 같은 qid에서 예측 '문자(A/B/C/D, a/b/c/d, 1/2/3/4 등)'가 일치한 비율
 - 입력: <root>/<dataset>/<model>/<T*/P0.jsonl>
-- 토큰쌍: --pair T0 T1  (또는 --pair ALL 로 T0,T1,T2 모든 쌍 평균)
-- 지표(--metric): jaccard(기본), overlap, inter   ※ correct 모드에서만 사용
+- --pair T0 T1  또는 --pair ALL (T0,T1,T2 모든 쌍 평균)
+- --metric: jaccard(기본) / overlap / inter   ※ correct 모드에서만 사용
 - 디버그: --verbose, --dry-run, --write_debug <json>
 - 모델필터: --models <substr ...>
-- 토큰-문자 매핑: --token_map "T0:ABCD,T1:abcd,T2:1234" (pred_letter 모드에 필요)
+- 토큰-문자 매핑:
+    * --token_map "T0:ABCD,T1:abcd,T2:1234"
+    * --auto_token_map  (P0.jsonl의 choices를 스캔하여 토큰별 레터 자동추론)
 """
+
 import os, sys, json, argparse, numpy as np
 import traceback
 from pathlib import Path
 
-# --- Matplotlib 안전 백엔드 ---
+# --- Matplotlib 백엔드 (헤드리스 안전) ---
 import matplotlib
 if os.environ.get("MPLBACKEND") is None:
     os.environ["MPLBACKEND"] = "Agg"
 import matplotlib.pyplot as plt
 
-# ---------- 유틸 ----------
+# ----------------- 유틸 -----------------
 def die(msg, code=2):
     print(f"[FATAL] {msg}", flush=True)
     raise SystemExit(code)
@@ -62,7 +65,7 @@ def filter_models(models, substrs):
                 keep.append(m); break
     return sorted(set(keep))
 
-# ---------- 지표 ----------
+# --------------- 지표 -------------------
 def jaccard(A,B):
     if not A and not B: return np.nan
     return len(A & B)/len(A | B) if (A|B) else np.nan
@@ -75,7 +78,7 @@ def inter_ratio(A,B):
     if not A: return np.nan
     return len(A & B)/len(A)
 
-# ---------- 레코드 파싱 ----------
+# ----------- 레코드 파싱 ----------------
 def parse_pred_gold(rec):
     """
     반환: (qid:str, pred_idx:int|None, gold_idx:int|None)
@@ -98,7 +101,7 @@ def parse_pred_gold(rec):
         gold = None
     return str(qid), pred, gold
 
-# ---------- 토큰-문자 매핑 ----------
+# ------- 토큰-문자 매핑 관련 ------------
 def parse_token_map(arg_str, default_map=None):
     """
     "T0:ABCD,T1:abcd,T2:1234" -> {"T0": ["A","B","C","D"], "T1":[...], "T2":[...]}
@@ -106,7 +109,7 @@ def parse_token_map(arg_str, default_map=None):
     if default_map is None:
         default_map = {"T0": list("ABCD"), "T1": list("abcd"), "T2": list("1234")}
     if not arg_str:
-        return default_map
+        return dict(default_map)
     m = {}
     for chunk in arg_str.split(","):
         if not chunk.strip(): continue
@@ -114,11 +117,53 @@ def parse_token_map(arg_str, default_map=None):
         t, letters = chunk.split(":", 1)
         t = t.strip()
         letters = [ch for ch in list(letters.strip())]
+        if len(letters)==0:
+            continue
         m[t] = letters
-    # 섞어서 반환(명시된 건 override)
     base = dict(default_map)
-    base.update(m)
+    base.update(m)  # 명시값 우선
     return base
+
+def _extract_letters_from_choices_field(choices):
+    """
+    choices가 list일 때 각 원소에서 'label'/'letter' 또는 문자열의 선행 레터(A/a/1 등)를 추출.
+    """
+    letters = []
+    for item in choices:
+        ch = None
+        if isinstance(item, dict):
+            for k in ("label","letter","option","id","name"):
+                if k in item and isinstance(item[k], str) and len(item[k])>0:
+                    ch = item[k].strip()[0]
+                    break
+        elif isinstance(item, str) and len(item)>0:
+            s = item.strip()
+            # "A. ...", "a) ...", "1) ..." 같은 패턴 처리
+            ch = s[0]
+            if ch in ["(", "["] and len(s) >= 2:
+                ch = s[1]
+        if ch is not None and len(ch)==1:
+            letters.append(ch)
+    # 모두 한 글자 보장만 남기고 반환
+    letters = [str(c) for c in letters if isinstance(c, str) and len(c)==1]
+    # 길이가 2~5 범위면 유효한 것으로 간주
+    if 2 <= len(letters) <= 10:
+        return letters
+    return None
+
+def infer_token_letters_from_rows(rows):
+    """
+    P0.jsonl 로우들을 훑어 토큰의 선택지 레터 배열을 추정.
+    우선순위: rec['choices'|'options'|'option_list'] → 각 항목의 label/letter/문자접두
+    """
+    for rec in rows[:50]:  # 퍼포먼스 고려, 앞부분만 스캔
+        for key in ("choices","options","option_list"):
+            if key in rec and isinstance(rec[key], list):
+                got = _extract_letters_from_choices_field(rec[key])
+                if got:
+                    return got
+    # 못 찾으면 None
+    return None
 
 def idx_to_letter(token_name, idx, token_map):
     letters = token_map.get(token_name)
@@ -130,13 +175,14 @@ def idx_to_letter(token_name, idx, token_map):
         return letters[idx]
     return None
 
-# ---------- 로딩 ----------
-def load_for_token(dir_model, token_name, mode, token_map, verbose=False):
+# --------------- 로딩 -------------------
+def load_for_token(dir_model, token_name, mode, token_map, auto_token_map=False, verbose=False):
     """
-    mode에 따라 반환 형태가 다름:
-      - "correct"    -> set[qid] (정답 맞춘 qid 집합)
-      - "pred_idx"   -> dict[qid] = pred_idx (int)
-      - "pred_letter"-> dict[qid] = pred_letter (str)
+    mode별 반환:
+      - "correct"     -> set[qid] (정답 맞춘 qid 집합)
+      - "pred_idx"    -> dict[qid] = pred_idx (int)
+      - "pred_letter" -> dict[qid] = pred_letter (str)  ※ 매핑 필요
+    auto_token_map=True 이면 P0.jsonl의 choices를 스캔해 token_map에 없는 토큰 레터 자동 채움.
     """
     jf = os.path.join(dir_model, token_name, "P0.jsonl")
     if verbose:
@@ -145,6 +191,18 @@ def load_for_token(dir_model, token_name, mode, token_map, verbose=False):
         return set() if mode=="correct" else {}
 
     rows = read_jsonl(jf)
+
+    # 필요시 토큰 레터 자동 추정
+    if auto_token_map and token_name not in token_map:
+        guessed = infer_token_letters_from_rows(rows)
+        if guessed:
+            token_map[token_name] = guessed
+            if verbose:
+                print(f"  [AUTOMAP] token={token_name} letters={guessed}", flush=True)
+        else:
+            if verbose:
+                print(f"  [AUTOMAP] token={token_name} letters NOT inferred", flush=True)
+
     if mode == "correct":
         ok = set()
         for rec in rows:
@@ -167,14 +225,15 @@ def load_for_token(dir_model, token_name, mode, token_map, verbose=False):
             out[qid] = pred
         elif mode == "pred_letter":
             ch = idx_to_letter(token_name, pred, token_map)
-            # 매핑 실패 시 건너뜀(혹은 pred 그대로 보관하려면 str(pred))
             if ch is not None:
                 out[qid] = ch
     if verbose:
         print(f"  [PRED] token={token_name} loaded={len(out)} mode={mode}", flush=True)
+        if mode=="pred_letter" and token_name in token_map:
+            print(f"  [PRED] token_map[{token_name}]={token_map[token_name]}", flush=True)
     return out
 
-# ---------- 페어 계산 ----------
+# ----------- 페어 계산 ------------------
 def pairwise_pairs(tokens):
     out=[]
     for i in range(len(tokens)):
@@ -201,7 +260,7 @@ def compute_pair_value(objA, objB, mode, metric):
     same = sum(1 for k in keys if objA[k] == objB[k])
     return same / float(len(keys))
 
-# ---------- 메인 ----------
+# ---------------- 메인 -------------------
 def main():
     print(f"[BOOT] python={sys.version.split()[0]} file={__file__}", flush=True)
     print(f"[BOOT] cwd={os.getcwd()}", flush=True)
@@ -216,6 +275,8 @@ def main():
                     help="※ correct 모드에서만 사용됨")
     ap.add_argument("--token_map", default="T0:ABCD,T1:abcd,T2:1234",
                     help="pred_letter 모드용 토큰-문자 매핑. 예: 'T0:ABCD,T1:abcd,T2:1234'")
+    ap.add_argument("--auto_token_map", action="store_true",
+                    help="P0.jsonl의 choices를 스캔하여 토큰별 레터 배열 자동 추정(명시 맵 없을 때만)")
     ap.add_argument("--out_png", default="viz_out/answer_match_matrix.png")
     ap.add_argument("--out_csv", default="viz_out/answer_match_matrix.csv")
     ap.add_argument("--min_models", type=int, default=1)
@@ -225,13 +286,14 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    # 절대경로 로그
+    # 경로/맵 로그
     out_png_abs = str(Path(args.out_png).resolve())
     out_csv_abs = str(Path(args.out_csv).resolve())
     token_map = parse_token_map(args.token_map)
 
     print(f"[ARGS] root={args.root} datasets={args.datasets} pair={args.pair} "
-          f"tokens={args.tokens} mode={args.mode} metric={args.metric} token_map={args.token_map} "
+          f"tokens={args.tokens} mode={args.mode} metric={args.metric} "
+          f"token_map={args.token_map} auto_token_map={args.auto_token_map} "
           f"out_png={args.out_png} out_csv={args.out_csv} "
           f"models_filter={args.models} verbose={args.verbose} dry_run={args.dry_run}",
           flush=True)
@@ -294,16 +356,19 @@ def main():
             for t in need_tokens:
                 if os.path.exists(os.path.join(dir_model, t, "P0.jsonl")):
                     token_file_counts[t] += 1
-                cache[t] = load_for_token(dir_model, t, args.mode, token_map, verbose=args.verbose)
+                cache[t] = load_for_token(
+                    dir_model, t, args.mode, token_map,
+                    auto_token_map=args.auto_token_map, verbose=args.verbose
+                )
 
             vals=[]
             for a,b in pairs:
-                A, B = cache.get(a, set() if args.mode=="correct" else {}), \
-                       cache.get(b, set() if args.mode=="correct" else {})
+                A = cache.get(a, set() if args.mode=="correct" else {})
+                B = cache.get(b, set() if args.mode=="correct" else {})
                 val = compute_pair_value(A, B, args.mode, args.metric)
                 vals.append(val)
                 if args.verbose:
-                    print(f"  [PAIR] {a} vs {b} | {args.mode} -> {val}", flush=True)
+                    print(f"  [PAIR] {a} vs {b} | mode={args.mode} -> {val}", flush=True)
 
             if vals:
                 M[i,j]=float(np.nanmean(vals))
@@ -324,7 +389,8 @@ def main():
             "datasets": args.datasets, "tokens": args.tokens,
             "pairs": pairs, "pair_name": pair_name,
             "mode": args.mode, "metric": args.metric,
-            "token_map": token_map, "models_sorted": models_sorted,
+            "token_map_effective": {k:v for k,v in token_map.items()},
+            "models_sorted": models_sorted,
             "matrix": M.tolist(),
         }
         Path(args.write_debug).parent.mkdir(parents=True, exist_ok=True)
