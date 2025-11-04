@@ -222,7 +222,7 @@ def main():
     ap.add_argument("--models", nargs="*", default=None, help="부분 문자열로 모델 필터")
     ap.add_argument("--write_debug", default=None, help="중간 결과 JSON 저장 경로")
     ap.add_argument("--verbose", action="store_true")
-    ap.addendant("--dry-run", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     # 절대경로 로그
