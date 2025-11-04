@@ -5,14 +5,12 @@ import copy
 import json
 import argparse
 import logging
-from tqdm import tqdm
 from typing import List
 from functools import partial
 
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 from utils import (
@@ -64,8 +62,6 @@ def parse_arguments():
     ap.add_argument("--permute_shift", type=int, default=0)
     ap.add_argument("--pride", type=str, default=None)  # "method=paraphrase,k=3,seed=42" 같은 문자열
 
-    # 기타 추가 옵션이 있으면 그대로…
-
     args = ap.parse_args()
 
     # model_name 자동 보정
@@ -81,6 +77,9 @@ def parse_arguments():
 
     # 베이스 저장 폴더만 미리 생성
     os.makedirs(args.save_path, exist_ok=True)
+    # ★중요: 변하지 않는 베이스 경로 보관 (중첩 저장 방지)
+    args._save_base = args.save_path
+
     return args
 
 
@@ -88,8 +87,8 @@ def parse_arguments():
 # 데이터 준비
 # ─────────────────────────────────────────────────────────
 def prepare_eval(args, eval_name):
-    # task and setting
-    eval_args = eval_name.split(',')
+    # task / num_few_shot / setting 파싱
+    eval_args = [e.strip() for e in eval_name.split(',')]
     args.task = task = eval_args[0]
     args.num_few_shot = num_few_shot = int(eval_args[1])
     args.setting = setting = eval_args[2] if len(eval_args) > 2 and eval_args[2] else None
@@ -97,10 +96,10 @@ def prepare_eval(args, eval_name):
     if setting is not None and setting.startswith('move'):
         moved_answer = setting[-1].upper()
 
-    # 최종 save_path 구성 (베이스 경로 기반)
-    #   {base}/{task}/{K}s_{model_name}/{task}[ _{setting}]
+    # 최종 save_path 구성 (항상 베이스로부터)
+    base = getattr(args, "_save_base", args.save_path)
     final_save = os.path.join(
-        args.save_path,
+        base,
         f"{task}",
         f"{num_few_shot}s_{args.model_name}",
         f"{task}" + (f"_{setting}" if setting is not None else "")
@@ -108,12 +107,12 @@ def prepare_eval(args, eval_name):
     os.makedirs(final_save, exist_ok=True)
     args.save_path = final_save  # 이후 코드가 이 경로를 사용
 
-    # Column headers in CSV are fixed as English letters
+    # CSV의 정답 열 헤더는 영문 고정
     option_ids_header = list('ABCD')
     if task in ['csqa']:
         option_ids_header = list('ABCDE')
 
-    # Determine display IDs used in prompts and evaluation
+    # 프롬프트/평가에서 사용할 표시용 ID 결정
     if task in ['csqa']:
         default_ids = list('ABCDE')
         if getattr(args, 'option_ids5', None):
@@ -133,35 +132,45 @@ def prepare_eval(args, eval_name):
         else:
             option_ids = default_ids
 
+    # 데이터 경로
     data_root = args.data_root if args.data_root is not None else "."
     data_path = os.path.join(data_root, f'data_{task}')
     test_suffix = "_test.ko.csv" if getattr(args, 'ko', False) else "_test.csv"
     dev_suffix = "_dev.ko.csv" if getattr(args, 'ko', False) else "_dev.csv"
 
+    test_dir = os.path.join(data_path, 'test')
+    dev_dir = os.path.join(data_path, 'dev')
+    if not os.path.isdir(test_dir):
+        raise FileNotFoundError(f"테스트 디렉토리를 찾을 수 없습니다: {test_dir}")
+    if not os.path.isdir(dev_dir):
+        raise FileNotFoundError(f"개발(dev) 디렉토리를 찾을 수 없습니다: {dev_dir}")
+
     # 과목(subject) 리스트
     subjects = sorted([
         f.split(test_suffix)[0]
-        for f in os.listdir(os.path.join(data_path, 'test'))
+        for f in os.listdir(test_dir)
         if f.endswith(test_suffix)
     ])
+    if not subjects:
+        raise FileNotFoundError(f"{test_dir} 아래에 *{test_suffix} 파일이 없습니다.")
 
-    # sys_msg and labels
+    # sys_msg / 라벨
     if getattr(args, 'prompt_lang', 'en') == 'ko':
         if 'mmlu' in task:
             sys_msg = '다음은 {}에 관한 객관식 문제입니다.'
-        else:  # task in ['arc', 'tqa', 'csqa']
+        else:
             sys_msg = '다음은 객관식 문제입니다.'
         sys_msg += ' 정답 선택지를 직접 선택해 답하세요.'
         q_label, o_label, a_label = '질문', '선지', '정답'
     else:
         if 'mmlu' in task:
             sys_msg = 'The following are multiple choice questions about {}.'
-        else:  # task in ['arc', 'tqa', 'csqa']
+        else:
             sys_msg = 'The following are multiple choice questions.'
         sys_msg += ' You should directly answer the question by choosing the correct option.'
         q_label, o_label, a_label = 'Question', 'Options', 'Answer'
 
-    # create_user_prompt
+    # 프롬프트 생성
     def create_user_prompt(question: str, options: List[str]):
         if setting in ['noid']:
             user_prompt = f"{q_label}: {question.strip()}\n{o_label}:\n" + \
@@ -181,11 +190,12 @@ def prepare_eval(args, eval_name):
                 f"\n{a_label}:"
         return user_prompt
 
-    # prepare_few_shot_samples
+    # few-shot 준비
     def prepare_few_shot_samples(subject):
         df = pd.read_csv(
-            os.path.join(data_path, 'dev', f'{subject}{dev_suffix}'),
-            names=("Question", *option_ids_header, "Answer"), dtype=str, encoding='utf-8'
+            os.path.join(dev_dir, f'{subject}{dev_suffix}'),
+            names=("Question", *option_ids_header, "Answer"),
+            dtype=str, encoding='utf-8'
         )
         if setting in ['noid']:
             few_shot_samples = df.apply(lambda x:
@@ -199,10 +209,10 @@ def prepare_eval(args, eval_name):
             , axis=1).to_list()
         return few_shot_samples
 
-    # prepare_eval_samples
+    # 평가 샘플 준비
     def prepare_eval_samples(subject):
         df = pd.read_csv(
-            open(os.path.join(data_path, 'test', f'{subject}{test_suffix}'), encoding='utf-8'),
+            open(os.path.join(test_dir, f'{subject}{test_suffix}'), encoding='utf-8'),
             names=("Question", *option_ids_header, "Answer"), dtype=str
         )
 
@@ -233,7 +243,7 @@ def prepare_eval(args, eval_name):
         ideals = df.apply(lambda x: option_ids[option_ids_header.index(x["Answer"])], axis=1).to_list()
         return list(zip(inputs, options, ideals))
 
-    # prepare_eval_fn
+    # eval 함수 선택
     if setting in ['noid']:
         prepare_eval_fn = partial(prepare_eval_fn_noid, num_few_shot=num_few_shot, option_ids=option_ids)
     elif setting in ['perm', 'cyclic']:
