@@ -23,6 +23,7 @@ from collections import defaultdict
 
 import numpy as np
 import matplotlib.pyplot as plt
+from typing import Optional
 
 # ───── 공통 유틸 ─────
 def ensure_dir(p): Path(p).mkdir(parents=True, exist_ok=True)
@@ -36,7 +37,7 @@ def flatten_record(rec: dict) -> dict:
         return d
     return rec
 
-def fold_probs(p: np.ndarray, n_opts_hint: int|None=None) -> np.ndarray:
+def fold_probs(p: np.ndarray, n_opts_hint: Optional[int] = None) -> np.ndarray:
     """p가 2D면 평균, 길이가 2*C면 접어서 C로 합산."""
     arr = np.array(p, dtype=float)
     if arr.ndim == 2:
