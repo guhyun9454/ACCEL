@@ -49,8 +49,11 @@ def main():
         exit()
 
     toker = AutoTokenizer.from_pretrained(
-        args.pretrained_model_path, use_fast=False,
-        add_bos_token=False, add_eos_token=False,
+        args.pretrained_model_path,
+        use_fast=False,
+        add_bos_token=False,
+        add_eos_token=False,
+        cache_dir=args.cache_dir,
     )
 
     model = AutoModelForCausalLM.from_pretrained(
@@ -58,6 +61,7 @@ def main():
         device_map='auto',
         use_safetensors=True,
         torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+        cache_dir=args.cache_dir,
     )
     logging_cuda_memory_usage()
 
@@ -105,7 +109,7 @@ def main():
                             if not bpe_has_space_prefix:
                                 input_text += ' '
 
-                    logger.info(_purple("==== Prompt example (one only) ===="))
+                    logger.info(_purple("==== Prompt example ===="))
                     logger.info("\n" + input_text)
                     logger.info(_purple("==== End prompt example ===="))
                     printed_example = True

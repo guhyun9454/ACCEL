@@ -40,6 +40,8 @@ def parse_arguments():
                         help='custom option ID string (e.g., ABCD / abcd / 1234). Length must match #options')
     parser.add_argument("--print_prompt_example", action="store_true",
                         help='Print exactly one example prompt (after applying option ids) and continue evaluation')
+    parser.add_argument("--cache_dir", type=str, default=None,
+                        help='Hugging Face cache directory for model/tokenizer downloads')
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]
