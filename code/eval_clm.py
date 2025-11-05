@@ -80,6 +80,15 @@ def main():
         overall_both_correct = 0
         overall_both_incorrect = 0
 
+        def _read_results_file(file_path):
+            try:
+                lines = [json.loads(line) for line in open(file_path)]
+                lines = [e for e in lines if e.get('type') == 'result']
+                lines = sorted(lines, key=lambda x: int(x['data']['idx']))
+                return lines
+            except FileNotFoundError:
+                return None
+
         for eval_name in args.eval_names[::1]:
             eval_args = eval_name.split(',')
             setting = eval_args[2] if len(eval_args) > 2 else None
@@ -132,18 +141,35 @@ def main():
                     except Exception as e:
                         logger.warning(f"Failed to build prompt example: {e}")
 
-                logger.info(_blue(f"Run started (A): {subject} [{id_set_a}]"))
-                results_a = eval_all_samples(
-                    eval_fn_a, eval_samples_a,
-                    name=f'{args_a.task},{args_a.num_few_shot},{args_a.setting},{subject},{id_set_a}',
-                    threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
-                )
-                logger.info(_blue(f"Run started (B): {subject} [{id_set_b}]"))
-                results_b = eval_all_samples(
-                    eval_fn_b, eval_samples_b,
-                    name=f'{args_b.task},{args_b.num_few_shot},{args_b.setting},{subject},{id_set_b}',
-                    threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
-                )
+                # Try cached results first
+                path_a = f'{args_a.save_path}/{subject}.jsonl'
+                path_b = f'{args_b.save_path}/{subject}.jsonl'
+                results_a = _read_results_file(path_a)
+                results_b = _read_results_file(path_b)
+
+                if results_a is not None:
+                    logger.info(_blue(f"Using cached results (A): {path_a}"))
+                else:
+                    logger.info(_blue(f"Run started (A): {subject} [{id_set_a}]"))
+                    results_a = eval_all_samples(
+                        eval_fn_a, eval_samples_a,
+                        name=f'{args_a.task},{args_a.num_few_shot},{args_a.setting},{subject},{id_set_a}',
+                        threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
+                    )
+                    save_results(path_a, results_a, metrics=None)
+                    logger.info(f"Results saved (A): {subject}")
+
+                if results_b is not None:
+                    logger.info(_blue(f"Using cached results (B): {path_b}"))
+                else:
+                    logger.info(_blue(f"Run started (B): {subject} [{id_set_b}]"))
+                    results_b = eval_all_samples(
+                        eval_fn_b, eval_samples_b,
+                        name=f'{args_b.task},{args_b.num_few_shot},{args_b.setting},{subject},{id_set_b}',
+                        threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
+                    )
+                    save_results(path_b, results_b, metrics=None)
+                    logger.info(f"Results saved (B): {subject}")
 
                 # Align by idx
                 map_a = {int(r['data']['idx']): r for r in results_a if r['type'] == 'result'}

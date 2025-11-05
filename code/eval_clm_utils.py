@@ -84,6 +84,8 @@ def prepare_eval(args, eval_name):
     save_path = f'results_{task}/{num_few_shot}s_{args.model_name}/{task}'
     if setting is not None:
         save_path += f'_{setting}'
+    if getattr(args, 'option_id_set', None):
+        save_path += f'_id-{args.option_id_set}'
     args.save_path = save_path
     os.makedirs(args.save_path, exist_ok=True)
 
