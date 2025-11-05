@@ -107,7 +107,7 @@ def fold_probs(arr: np.ndarray, n_opts: int) -> np.ndarray:
 def locate_jsonl(root: str, token: str, dataset: str, model: str) -> Optional[Path]:
     base = Path(root) / token / dataset / model
     c1 = base / f"{dataset}.jsonl"
-       c2 = base / dataset / f"{dataset}.jsonl"
+    c2 = base / dataset / f"{dataset}.jsonl"
     if c1.is_file(): return c1
     if c2.is_file(): return c2
     return None
