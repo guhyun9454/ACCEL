@@ -1,60 +1,85 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ece_viz.py  — confidence 분포 + reliability + matching ratio (MR)
+ECE & Matching-Ratio visualizer (pretty palette)
 
-지원 경로:
-  1) <root>/<token>/<dataset>/<model>/<dataset>.jsonl
-  2) <root>/<token>/<dataset>/<model>/<dataset>/<dataset>.jsonl  ← 현재 구조
+입력 구조(둘 다 지원):
+  <root>/<token>/<dataset>/<model>/<dataset>.jsonl
+  <root>/<token>/<dataset>/<model>/<dataset>/<dataset>.jsonl  ← (질문자 현재 구조)
+
+JSONL 예:
+  {"type":"result","data":{ "qid": "...", "probs":[...], "sampled":"C", "ideal":"B", "correct":true }}
+  { "qid":..., "probs":[...], "pred_idx":2, "gold_idx":1, ... }
 
 출력:
-  - 히스토그램(정답만 / 오답만)  [토큰별 색상: T0=red, T1=blue, T2=green; 범례명 T0→ABCD, T1→abcd, T2→1234]
-  - 리라이어빌리티 다이어그램(토큰별 한 장)
+  - 히스토그램(정답/오답 분리, T0/T1/T2 고정색)
+  - 리라이어빌리티 다이어그램(토큰별)
+  - 매칭비율 히트맵: all / correct-only / wrong-only (칸에 % 주석)
   - ECE/정확도 요약 TSV
-  - Matching Ratio 히트맵 3종:
-      (a) MR_all: 전 샘플에서 pred_idx 일치 비율
-      (b) MR_wrong: 두 토큰이 모두 오답인 샘플에서 같은 오답을 골랐는지 비율
-      (c) Correct-set Jaccard: 정답 qid 집합 간 Jaccard(겹침) 비율
 
-예시:
-  python code/ece_viz.py \
-    --root results \
-    --datasets arc csqa \
-    --models "0s_Llama-3.2-1B-Instruct" "0s_Llama-3.2-3B-Instruct" "0s_Qwen2.5-1.5B-Instruct" "0s_gemma-3-1b-it" \
-    --outdir viz_out/ece \
-    --per_model_dir --xmin 0.3 --xmax 1.0 --also_combined
+사용 예:
+  python ece_viz.py --root results --datasets arc csqa \
+    --models "0s_Llama-3.2-1B-Instruct" "0s_Llama-3.2-3B-Instruct" \
+    --outdir viz_out/ece
 """
 
 import os, json, argparse
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Set
+from typing import Optional, List, Dict, Tuple
 
 import numpy as np
 
-# 헤드리스 안전
+# --- headless 안전 ---
 import matplotlib
 if os.environ.get("MPLBACKEND") is None:
     os.environ["MPLBACKEND"] = "Agg"
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 
+# =========================
+#  Pretty 스타일 & 팔레트
+# =========================
+def try_set_korean_font():
+    # 시스템에 있는 한글 폰트 우선 적용(없으면 무시)
+    for f in ["Apple SD Gothic Neo", "Malgun Gothic", "NanumGothic", "Noto Sans CJK KR"]:
+        try:
+            plt.rcParams["font.family"] = f
+            return
+        except Exception:
+            pass
 
-# ────────────── 유틸 ──────────────
-TOKEN_LABEL_MAP = {"T0": "ABCD", "T1": "abcd", "T2": "1234"}
-COLOR_MAP = {"T0": "red", "T1": "blue", "T2": "green"}
+# 깔끔한 스타일(Seaborn 내장 스타일 사용; seaborn 설치 불필요)
+try:
+    plt.style.use("seaborn-v0_8-whitegrid")
+except Exception:
+    plt.style.use("ggplot")
+try_set_korean_font()
+plt.rcParams["axes.titlesize"] = 16
+plt.rcParams["axes.labelsize"] = 12
+plt.rcParams["legend.fontsize"] = 10
 
-def safe_name(s: str) -> str:
-    return str(s).replace("/", "__").replace("\\", "__").strip()
+# ColorBrewer/Vega 계열 3색 (정답=진한, 오답=연한으로 같은 계열 유지)
+BASE_COL = {
+    "T0": "#4C78A8",  # 블루
+    "T1": "#59A14F",  # 그린
+    "T2": "#E15759",  # 레드
+}
+
+def lighten(c, amount=0.45):
+    """색을 밝게(오답용). amount↑ 밝아짐."""
+    r, g, b = mcolors.to_rgb(c)
+    return (1 - amount) + amount*r, (1 - amount) + amount*g, (1 - amount) + amount*b
+
+TOKEN_LABEL = {"T0": "ABCD", "T1": "abcd", "T2": "1234"}
+
+# =========================
+#  유틸/파서
+# =========================
+def safe_tag(s: str) -> str:
+    return str(s).replace("/", "_").replace("\\", "_").strip()
 
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
-
-def locate_jsonl(root: str, token: str, dataset: str, model: str) -> Optional[Path]:
-    base = Path(root) / token / dataset / model
-    cand1 = base / f"{dataset}.jsonl"
-    cand2 = base / dataset / f"{dataset}.jsonl"
-    if cand1.is_file(): return cand1
-    if cand2.is_file(): return cand2
-    return None
 
 def flatten_record(rec: dict) -> dict:
     if isinstance(rec, dict) and "data" in rec and isinstance(rec["data"], dict):
@@ -65,38 +90,53 @@ def flatten_record(rec: dict) -> dict:
     return rec
 
 def normalize_letter(x: Optional[str]) -> Optional[str]:
-    if x is None: return None
+    if x is None:
+        return None
     s = str(x).strip()
-    if not s: return None
+    if not s:
+        return None
     ch = s[0]
-    if ch in "([{": ch = s[1] if len(s) > 1 else ch
-    if ch.isalpha(): ch = ch.upper()
+    if ch in "([{":
+        ch = s[1] if len(s) > 1 else ch
+    if ch.isalpha():
+        ch = ch.upper()
     return ch
 
-def fold_probs(p: np.ndarray, n_opts_hint: Optional[int] = None) -> np.ndarray:
-    arr = np.array(p, dtype=float)
-    if arr.ndim == 2:  # 여러 뷰 평균
-        arr = arr.mean(axis=0)
-    if arr.ndim == 1 and arr.size % 2 == 0 and (n_opts_hint is None or arr.size == 2*n_opts_hint):
-        arr = arr.reshape(2, arr.size//2).sum(axis=0)
-    arr = np.clip(arr, 1e-12, None)
-    arr = arr / arr.sum()
-    return arr
+def token_letters(token: str) -> List[str]:
+    if token in ("T0", "T1"):
+        return list("ABCD")   # 비교는 대문자 기준 (abcd → ABCD)
+    if token == "T2":
+        return list("1234")
+    return list("ABCD")
 
-def ece_from_conf(conf: np.ndarray, correct: np.ndarray, n_bins: int = 15) -> float:
-    bins = np.linspace(0., 1., n_bins+1)
-    N = len(conf); ece_val = 0.0
-    for b in range(n_bins):
-        lo, hi = bins[b], bins[b+1]
-        mask = (conf >= lo) & (conf <= hi) if b == 0 else ((conf > lo) & (conf <= hi))
-        if not np.any(mask): continue
-        acc_b  = correct[mask].mean()
-        conf_b = conf[mask].mean()
-        ece_val += (mask.sum()/N) * abs(acc_b - conf_b)
-    return float(ece_val)
+def letter_to_idx(token: str, letter: str) -> Optional[int]:
+    if token == "T2":
+        ch = str(letter).strip()[:1] if letter else None
+    else:
+        ch = normalize_letter(letter)
+    if not ch:
+        return None
+    L = token_letters(token)
+    return L.index(ch) if ch in L else None
 
+def fold_probs(arr: np.ndarray, n_opts: int) -> np.ndarray:
+    p = np.array(arr, dtype=float)
+    if p.ndim == 2:
+        p = p.mean(axis=0)
+    if p.ndim == 1 and p.size == 2*n_opts:
+        p = p.reshape(2, n_opts).sum(axis=0)  # 공백/비공백 두 열 묶기
+    p = np.clip(p, 1e-12, None)
+    p /= p.sum()
+    return p
 
-# ────────────── 로딩 ──────────────
+def locate_jsonl(root: str, token: str, dataset: str, model: str) -> Optional[Path]:
+    base = Path(root) / token / dataset / model
+    c1 = base / f"{dataset}.jsonl"
+    c2 = base / dataset / f"{dataset}.jsonl"
+    if c1.is_file(): return c1
+    if c2.is_file(): return c2
+    return None
+
 def collect_models(root: str, tokens: List[str], datasets: List[str]) -> List[str]:
     mset = set()
     for t in tokens:
@@ -109,354 +149,293 @@ def collect_models(root: str, tokens: List[str], datasets: List[str]) -> List[st
     return sorted(mset)
 
 def filter_models(all_models: List[str], wants: Optional[List[str]]) -> List[str]:
-    if not wants: return all_models
-    wants_a = [w.lower() for w in wants]
-    wants_b = [safe_name(w).lower() for w in wants]
+    if not wants:
+        return all_models
+    wants_s = [safe_tag(w).lower() for w in wants]
+    wants_r = [w.lower() for w in wants]
     out = []
     for m in all_models:
         ml = m.lower()
-        if any(w in ml for w in wants_a) or any(w in ml for w in wants_b):
+        if any(w in ml for w in wants_s) or any(w in ml for w in wants_r):
             out.append(m)
     return sorted(set(out))
 
-def load_token_records(fp: Path) -> List[dict]:
-    if not fp or not fp.is_file(): return []
-    rows: List[dict] = []
+def load_records(fp: Optional[Path]) -> List[dict]:
+    if not fp or not fp.is_file():
+        return []
+    rows = []
     with fp.open("r", encoding="utf-8") as f:
         for line in f:
             s = line.strip()
             if not s: continue
             try:
-                rec = json.loads(s)
+                rows.append(flatten_record(json.loads(s)))
             except Exception:
                 continue
-            rows.append(flatten_record(rec))
     return rows
 
-def extract_conf_correct(rows: List[dict]) -> Tuple[np.ndarray, np.ndarray]:
-    confs: List[float] = []; rights: List[int] = []
+def parse_one_rec(rec: dict, token: str) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[float], Optional[bool]]:
+    qid = rec.get("qid") or rec.get("id") or rec.get("uid") or rec.get("question_id")
+    if qid is None and "idx" in rec: qid = str(rec["idx"])
+    if qid is None: return None, None, None, None, None
+
+    L = token_letters(token); n_opts = len(L)
+
+    # gold
+    gold_idx = None
+    g_letter = rec.get("ideal") or rec.get("gold_letter") or rec.get("label_letter") or rec.get("answer") \
+               or rec.get("gold") or rec.get("label") or rec.get("solution") or rec.get("target")
+    gi = letter_to_idx(token, g_letter) if g_letter is not None else None
+    if gi is not None:
+        gold_idx = gi
+    else:
+        for k in ("gold_idx","label_idx","correct_idx","target_idx","solution_idx","answer_idx"):
+            if k in rec:
+                try:
+                    vi = int(rec[k]); 
+                    if vi >= 0: gold_idx = vi
+                    break
+                except Exception:
+                    pass
+
+    # pred
+    pred_idx = None
+    p_letter = rec.get("sampled") or rec.get("pred_letter") or rec.get("prediction_letter") or rec.get("model_answer") \
+               or rec.get("choice") or rec.get("selected") or rec.get("output") or rec.get("final_answer") \
+               or rec.get("pred") or rec.get("prediction") or rec.get("answer")
+    pi = letter_to_idx(token, p_letter) if p_letter is not None else None
+    if pi is not None:
+        pred_idx = pi
+    else:
+        for k in ("pred_idx","prediction_idx","answer_idx","choice_idx","selected_idx","output_idx","model_pred_idx"):
+            if k in rec:
+                try:
+                    vi = int(rec[k]); 
+                    if vi >= 0: pred_idx = vi
+                    break
+                except Exception:
+                    pass
+        if pred_idx is None and "probs" in rec:
+            p = fold_probs(rec["probs"], n_opts)
+            pred_idx = int(np.argmax(p))
+
+    # conf
+    top1_conf = None
+    if "probs" in rec:
+        p = fold_probs(rec["probs"], n_opts)
+        top1_conf = float(p.max())
+
+    # correct
+    cf = rec.get("correct", None)
+    if isinstance(cf, str): cf = cf.lower() in ("true","1","yes")
+    if isinstance(cf, bool):
+        correct_flag = cf
+    else:
+        correct_flag = (pred_idx is not None and gold_idx is not None and pred_idx == gold_idx)
+
+    return str(qid), pred_idx, gold_idx, top1_conf, correct_flag
+
+def load_arrays_for_token(root: str, token: str, dataset: str, model: str):
+    fp = locate_jsonl(root, token, dataset, model)
+    rows = load_records(fp)
+    qids, preds, golds, confs, rights = [], [], [], [], []
     for r in rows:
-        p = r.get("probs") or r.get("all_probs")
-        if p is None: continue
-        probs = fold_probs(p)
-        confs.append(float(np.max(probs)))
-
-        c = r.get("correct", None)
-        if isinstance(c, str): c = c.lower() in ("true","1","yes")
-        if isinstance(c, bool):
-            rights.append(1 if c else 0); continue
-
-        p_letter = normalize_letter(r.get("sampled"))
-        g_letter = normalize_letter(r.get("ideal"))
-        if p_letter is not None and g_letter is not None:
-            rights.append(1 if p_letter == g_letter else 0); continue
-
-        pred_idx = None
-        for k in ("pred_idx","prediction_idx","answer_idx","choice_idx","selected_idx","output_idx"):
-            if k in r:
-                try:
-                    vi = int(r[k])
-                    if vi >= 0: pred_idx = vi; break
-                except Exception: pass
-        gold_idx = None
-        for k in ("gold_idx","label_idx","correct_idx","target_idx","solution_idx"):
-            if k in r:
-                try:
-                    vi = int(r[k])
-                    if vi >= 0: gold_idx = vi; break
-                except Exception: pass
-        if pred_idx is None: pred_idx = int(np.argmax(probs))
-        if gold_idx is None:
-            confs.pop(); continue
-        rights.append(1 if pred_idx == gold_idx else 0)
-
-    if not confs: return np.array([]), np.array([])
-    return np.array(confs, dtype=float), np.array(rights, dtype=int)
-
-def build_qid_pred_right(rows: List[dict]) -> Tuple[Dict[str, int], Dict[str, int]]:
-    """
-    각 qid에 대해 (pred_idx, correct) 추출.
-    pred_idx는 'pred_idx' 없으면 probs argmax 사용.
-    """
-    pred: Dict[str, int] = {}
-    right: Dict[str, int] = {}
-    for r in rows:
-        qid = r.get("qid") or r.get("id") or r.get("uid") or r.get("question_id")
-        if qid is None:
-            if "idx" in r: qid = str(r["idx"])
-            else: continue
-        qid = str(qid)
-
-        probs = r.get("probs") or r.get("all_probs")
-        pred_idx = None
-        for k in ("pred_idx","prediction_idx","answer_idx","choice_idx","selected_idx","output_idx"):
-            if k in r:
-                try:
-                    vi = int(r[k])
-                    if vi >= 0: pred_idx = vi; break
-                except Exception: pass
-        if pred_idx is None and probs is not None:
-            pred_idx = int(np.argmax(fold_probs(probs)))
-        if pred_idx is None:  # pred를 전혀 못구하면 스킵
+        qid, pi, gi, conf, cf = parse_one_rec(r, token)
+        if qid is None or pi is None or gi is None or conf is None:
             continue
+        qids.append(qid); preds.append(int(pi)); golds.append(int(gi))
+        confs.append(float(conf)); rights.append(1 if cf else 0)
+    return np.array(qids), np.array(preds), np.array(golds), np.array(confs), np.array(rights, dtype=int)
 
-        # correct
-        c = r.get("correct", None)
-        if isinstance(c, str): c = c.lower() in ("true","1","yes")
-        if isinstance(c, bool):
-            is_right = 1 if c else 0
-        else:
-            # gold 비교
-            gold_idx = None
-            for k in ("gold_idx","label_idx","correct_idx","target_idx","solution_idx"):
-                if k in r:
-                    try:
-                        vi = int(r[k])
-                        if vi >= 0: gold_idx = vi; break
-                    except Exception: pass
-            if gold_idx is None:
-                # 문자 비교 마지막 시도
-                p_letter = normalize_letter(r.get("sampled"))
-                g_letter = normalize_letter(r.get("ideal"))
-                is_right = 1 if (p_letter is not None and g_letter is not None and p_letter==g_letter) else 0
-            else:
-                is_right = 1 if pred_idx == gold_idx else 0
+# =========================
+#  ECE/그림
+# =========================
+def ece_from_conf(conf: np.ndarray, correct: np.ndarray, n_bins: int = 15) -> float:
+    bins = np.linspace(0., 1., n_bins + 1)
+    N = len(conf); e = 0.0
+    for b in range(n_bins):
+        lo, hi = bins[b], bins[b + 1]
+        mask = (conf >= lo) & (conf <= hi) if b == 0 else ((conf > lo) & (conf <= hi))
+        if not np.any(mask): continue
+        e += (mask.sum()/N) * abs(correct[mask].mean() - conf[mask].mean())
+    return float(e)
 
-        pred[qid] = int(pred_idx)
-        right[qid] = int(is_right)
-    return pred, right
-
-
-# ────────────── 시각화 ──────────────
-def _plot_hist(ax, data_list, labels, colors, bins, rng, title):
-    for (vec, lab, col) in zip(data_list, labels, colors):
-        if vec.size == 0: continue
-        ax.hist(vec, bins=bins, range=rng, density=True, alpha=0.65, color=col, label=lab)
-    ax.set_xlabel("Confidence (top-1 prob)"); ax.set_ylabel("Density"); ax.set_title(title)
-    ax.legend(fontsize=9)
-
-def plot_hist_split_by_token(model_tag, dataset, conf_by_tok, right_by_tok, outdir, bins=20, per_model_dir=False, xlim=(0.0,1.0)):
-    base = outdir / safe_name(model_tag) if per_model_dir else outdir
-    ensure_dir(base)
-
-    # Correct only
-    data, labels, colors = [], [], []
-    for t in sorted(conf_by_tok.keys()):
-        conf = conf_by_tok[t]; right = right_by_tok[t]
-        vec = conf[right == 1]
-        if vec.size == 0: continue
-        data.append(vec); labels.append(f"{TOKEN_LABEL_MAP.get(t,t)} (n={len(vec)})"); colors.append(COLOR_MAP.get(t,"gray"))
-    if data:
-        fig, ax = plt.subplots()
-        _plot_hist(ax, data, labels, colors, bins, xlim, f"{model_tag} — {dataset} | Confidence (correct only)")
-        out_png = base / f"{safe_name(model_tag)}_{dataset}_conf_hist_correct.png"
-        fig.tight_layout(); fig.savefig(out_png, dpi=200); plt.close(fig)
-        print(f"[SAVE] {out_png}")
-
-    # Wrong only
-    data, labels, colors = [], [], []
-    for t in sorted(conf_by_tok.keys()):
-        conf = conf_by_tok[t]; right = right_by_tok[t]
-        vec = conf[right == 0]
-        if vec.size == 0: continue
-        data.append(vec); labels.append(f"{TOKEN_LABEL_MAP.get(t,t)} (n={len(vec)})"); colors.append(COLOR_MAP.get(t,"gray"))
-    if data:
-        fig, ax = plt.subplots()
-        _plot_hist(ax, data, labels, colors, bins, xlim, f"{model_tag} — {dataset} | Confidence (wrong only)")
-        out_png = base / f"{safe_name(model_tag)}_{dataset}_conf_hist_wrong.png"
-        fig.tight_layout(); fig.savefig(out_png, dpi=200); plt.close(fig)
-        print(f"[SAVE] {out_png}")
-
-def plot_hist_combined_overlay(model_tag, dataset, conf_by_tok, right_by_tok, outdir, bins=20, per_model_dir=False, xlim=(0.0,1.0)):
-    base = outdir / safe_name(model_tag) if per_model_dir else outdir
-    ensure_dir(base)
-    fig = plt.figure(); any_data=False
-    for t in sorted(conf_by_tok.keys()):
-        conf = conf_by_tok[t]; right = right_by_tok[t]
+def plot_hist_separated(model: str, dataset: str, conf_by_tok: Dict[str, np.ndarray], right_by_tok: Dict[str, np.ndarray], outdir: Path, bins=20):
+    fig = plt.figure()
+    for t, conf in conf_by_tok.items():
         if conf.size == 0: continue
-        any_data=True
-        conf_ok  = conf[right==1]; conf_bad = conf[right==0]
-        plt.hist(conf_bad, bins=bins, range=xlim, alpha=0.35, color=COLOR_MAP.get(t,"gray"),
-                 label=f"{TOKEN_LABEL_MAP.get(t,t)} wrong (n={len(conf_bad)})", density=True)
-        plt.hist(conf_ok,  bins=bins, range=xlim, alpha=0.55, color=COLOR_MAP.get(t,"gray"),
-                 label=f"{TOKEN_LABEL_MAP.get(t,t)} correct (n={len(conf_ok)})", density=True)
-    if any_data:
-        plt.xlabel("Confidence (top-1 prob)"); plt.ylabel("Density")
-        plt.title(f"{model_tag} — {dataset} | Confidence distribution by token")
-        plt.legend(fontsize=9)
-        out_png = base / f"{safe_name(model_tag)}_{dataset}_conf_hist.png"
-        plt.tight_layout(); plt.savefig(out_png, dpi=200); plt.close()
-        print(f"[SAVE] {out_png}")
+        right = right_by_tok[t]
+        ok  = conf[right==1]
+        bad = conf[right==0]
+        base = BASE_COL.get(t, "#808080")
+        light = lighten(base, 0.6)
+        # 오답(연한), 정답(진한)
+        plt.hist(bad, bins=bins, range=(0,1), alpha=0.55, color=light,
+                 density=True, label=f"{t} {TOKEN_LABEL.get(t,t)} 오답 (n={len(bad)})")
+        plt.hist(ok,  bins=bins, range=(0,1), alpha=0.85, color=base,
+                 density=True, label=f"{t} {TOKEN_LABEL.get(t,t)} 정답 (n={len(ok)})")
+    plt.xlabel("Confidence (top-1 prob)")
+    plt.ylabel("Density")
+    plt.title(f"{model} — {dataset} | 정답/오답별 확률 분포")
+    plt.legend(ncol=2, fontsize=9)
+    out_png = outdir / f"{safe_tag(model)}_{dataset}_conf_hist.png"
+    fig.tight_layout(); fig.savefig(out_png, dpi=220); plt.close(fig)
 
-def plot_reliability_by_token(model_tag, dataset, conf_by_tok, right_by_tok, outdir, n_bins=15, per_model_dir=False):
-    base = outdir / safe_name(model_tag) if per_model_dir else outdir
-    ensure_dir(base)
+def plot_reliability(model: str, dataset: str, conf_by_tok: Dict[str, np.ndarray], right_by_tok: Dict[str, np.ndarray], outdir: Path, n_bins=15):
     fig = plt.figure()
     xs = np.linspace(0,1,101)
-    plt.plot(xs,xs,linestyle="--",color="black",linewidth=1,label="Ideal")
-    for t in sorted(conf_by_tok.keys()):
-        conf = conf_by_tok[t]; right = right_by_tok[t]
+    plt.plot(xs, xs, "--", color="#555555", linewidth=1.1, label="Ideal")
+    for t, conf in conf_by_tok.items():
         if conf.size == 0: continue
-        bins = np.linspace(0.,1.,n_bins+1); mids = 0.5*(bins[:-1]+bins[1:])
-        accs=[]
+        right = right_by_tok[t]
+        bins = np.linspace(0.,1.,n_bins+1)
+        mids = 0.5*(bins[:-1]+bins[1:])
+        accs = []
         for b in range(n_bins):
-            lo,hi=bins[b],bins[b+1]
-            mask = (conf >= lo) & (conf <= hi) if b==0 else ((conf>lo)&(conf<=hi))
+            lo,hi = bins[b], bins[b+1]
+            mask = (conf >= lo) & (conf <= hi) if b==0 else ((conf > lo) & (conf <= hi))
             accs.append(right[mask].mean() if np.any(mask) else np.nan)
-        accs = np.array(accs, float)
-        plt.plot(mids, accs, marker="o", color=COLOR_MAP.get(t,"gray"),
-                 label=f"{TOKEN_LABEL_MAP.get(t,t)}")
-    plt.xlabel("Confidence"); plt.ylabel("Accuracy"); plt.ylim(0.0,1.0)
-    plt.title(f"{model_tag} — {dataset} | Reliability by token")
+        base = BASE_COL.get(t, "#808080")
+        plt.plot(mids, np.array(accs, float), marker="o", linewidth=2,
+                 color=base, label=f"{t} {TOKEN_LABEL.get(t,t)}")
+    plt.xlabel("Confidence")
+    plt.ylabel("Accuracy")
+    plt.ylim(0,1)
+    plt.title(f"{model} — {dataset} | Reliability by token")
     plt.legend()
-    out_png = base / f"{safe_name(model_tag)}_{dataset}_reliability.png"
-    plt.tight_layout(); plt.savefig(out_png, dpi=200); plt.close()
-    print(f"[SAVE] {out_png}")
+    out_png = outdir / f"{safe_tag(model)}_{dataset}_reliability.png"
+    fig.tight_layout(); fig.savefig(out_png, dpi=220); plt.close(fig)
 
-def _plot_matrix(M: np.ndarray, labels: List[str], title: str, out_png: Path, vmin=0.0, vmax=1.0, fmt="{:.1%}"):
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    im = ax.imshow(M, vmin=vmin, vmax=vmax, aspect="auto")
-    ax.set_xticks(range(len(labels))); ax.set_xticklabels(labels)
-    ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels)
-    ax.set_title(title)
-    fig.colorbar(im, ax=ax)
-    # 숫자 표기
-    for i in range(M.shape[0]):
-        for j in range(M.shape[1]):
-            if np.isfinite(M[i,j]):
-                ax.text(j, i, fmt.format(M[i,j]), ha="center", va="center", fontsize=9)
-    fig.tight_layout()
-    ensure_dir(out_png.parent)
-    fig.savefig(out_png, dpi=200)
-    plt.close(fig)
-    print(f"[SAVE] {out_png}")
+# =========================
+#  Matching Ratio (MR)
+# =========================
+def mr_matrix(preds_by_tok: Dict[str, Dict[str,int]], mask_qids: Optional[set]=None, tok_order: Optional[List[str]]=None):
+    order = tok_order or sorted(preds_by_tok.keys())
+    V = len(order)
+    M = np.zeros((V,V), dtype=float)
+    for i, ti in enumerate(order):
+        for j, tj in enumerate(order):
+            Qi = set(preds_by_tok[ti].keys())
+            Qj = set(preds_by_tok[tj].keys())
+            keys = Qi & Qj
+            if mask_qids is not None:
+                keys &= mask_qids
+            if not keys:
+                M[i,j] = np.nan
+            else:
+                same = sum(1 for q in keys if preds_by_tok[ti][q] == preds_by_tok[tj][q])
+                M[i,j] = same / float(len(keys))
+    return order, M
 
-# ── MR 계산
-def pairwise_pairs(tokens: List[str]) -> List[Tuple[str,str]]:
-    return [(tokens[i], tokens[j]) for i in range(len(tokens)) for j in range(i+1, len(tokens))]
+def plot_mr(model: str, dataset: str, tokens: List[str],
+            preds_by_tok: Dict[str, Dict[str,int]],
+            correct_by_tok: Dict[str, Dict[str,int]],
+            outdir: Path):
 
-def compute_mr_matrices(pred_by_tok: Dict[str, Dict[str,int]],
-                        right_by_tok: Dict[str, Dict[str,int]],
-                        tokens: List[str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
-    """
-    반환:
-      MR_all      : 전 샘플에서 pred_idx 일치 비율
-      MR_wrong    : 두 토큰이 모두 오답인 샘플에서 pred_idx 일치 비율(같은 오답을 골랐는지)
-      Jacc_correct: 정답 qid 집합 Jaccard(겹침/합집합)
-    """
-    T = len(tokens)
-    MR_all = np.full((T,T), np.nan, float)
-    MR_wrong = np.full((T,T), np.nan, float)
-    Jacc = np.full((T,T), np.nan, float)
+    order = tokens
 
-    for i, ti in enumerate(tokens):
-        for j, tj in enumerate(tokens):
-            if i == j:
-                MR_all[i,j] = 1.0; MR_wrong[i,j] = 1.0; Jacc[i,j] = 1.0
-                continue
-            Pi, Ri = pred_by_tok.get(ti, {}), right_by_tok.get(ti, {})
-            Pj, Rj = pred_by_tok.get(tj, {}), right_by_tok.get(tj, {})
-            keys = set(Pi.keys()) & set(Pj.keys())
-            if not keys: continue
+    # 공통 집합
+    def draw(M, suffix):
+        fig, ax = plt.subplots()
+        im = ax.imshow(M, vmin=0, vmax=1, cmap="YlGnBu", aspect="equal")
+        ax.set_xticks(range(len(order))); ax.set_yticks(range(len(order)))
+        ax.set_xticklabels(order); ax.set_yticklabels(order)
+        ax.set_xlabel("Token"); ax.set_ylabel("Token")
+        ax.set_title(f"Matching Ratio — {model} / {dataset} ({suffix})")
 
-            # 전체 MR
-            eq = [1 for k in keys if Pi[k] == Pj[k]]
-            MR_all[i,j] = np.mean(eq) if eq else np.nan
+        # 격자선
+        ax.set_xticks(np.arange(-.5, len(order), 1), minor=True)
+        ax.set_yticks(np.arange(-.5, len(order), 1), minor=True)
+        ax.grid(which="minor", color="white", linestyle="-", linewidth=1.2)
+        ax.tick_params(which="minor", bottom=False, left=False)
 
-            # 오답 MR (두 토큰 모두 오답인 공통 qid)
-            wrong_keys = [k for k in keys if (Ri.get(k,0)==0 and Rj.get(k,0)==0)]
-            if wrong_keys:
-                eqw = [1 for k in wrong_keys if Pi[k] == Pj[k]]
-                MR_wrong[i,j] = np.mean(eqw) if eqw else np.nan
+        # 주석
+        for i in range(M.shape[0]):
+            for j in range(M.shape[1]):
+                if not np.isnan(M[i,j]):
+                    txt_color = "black" if M[i,j] > 0.6 else "white"
+                    ax.text(j, i, f"{100*M[i,j]:.1f}%", ha="center", va="center", color=txt_color, fontsize=11)
+        fig.colorbar(im, ax=ax)
+        out_png = outdir / f"{safe_tag(model)}_{dataset}_mr_{suffix}.png"
+        fig.tight_layout(); fig.savefig(out_png, dpi=220); plt.close(fig)
 
-            # 정답 세트 Jaccard
-            Ai = {k for k,v in Ri.items() if v==1}
-            Aj = {k for k,v in Rj.items() if v==1}
-            u = len(Ai|Aj)
-            Jacc[i,j] = (len(Ai&Aj)/u) if u>0 else np.nan
+    # ALL
+    _, M_all = mr_matrix(preds_by_tok, tok_order=order)
+    draw(M_all, "all")
 
-    labels = [t for t in tokens]
-    return MR_all, MR_wrong, Jacc, labels
+    # CORRECT-ONLY
+    both_correct = None
+    for t in order:
+        q_ok = {q for q,v in correct_by_tok[t].items() if v==1}
+        both_correct = q_ok if both_correct is None else (both_correct & q_ok)
+    _, M_c = mr_matrix(preds_by_tok, mask_qids=both_correct, tok_order=order)
+    draw(M_c, "correct")
 
+    # WRONG-ONLY
+    both_wrong = None
+    for t in order:
+        q_bad = {q for q,v in correct_by_tok[t].items() if v==0}
+        both_wrong = q_bad if both_wrong is None else (both_wrong & q_bad)
+    _, M_w = mr_matrix(preds_by_tok, mask_qids=both_wrong, tok_order=order)
+    draw(M_w, "wrong")
 
-# ────────────── 메인 ──────────────
+# =========================
+#  메인
+# =========================
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
     ap.add_argument("--datasets", nargs="+", default=["arc","csqa"])
-    ap.add_argument("--tokens", nargs="+", default=["T0","T1","T2"])
-    ap.add_argument("--models", nargs="*", default=None,
-                    help="부분문자열 매칭. 비우면 자동 탐색.")
-    ap.add_argument("--outdir", default="viz_out/ece")
+    ap.add_argument("--tokens",   nargs="+", default=["T0","T1","T2"])
+    ap.add_argument("--models",   nargs="*", default=None)
+    ap.add_argument("--outdir",   default="viz_out/ece")
     ap.add_argument("--bins", type=int, default=20)
     ap.add_argument("--n_bins_ece", type=int, default=15)
-    ap.add_argument("--per_model_dir", action="store_true")
-    ap.add_argument("--xmin", type=float, default=0.0)
-    ap.add_argument("--xmax", type=float, default=1.0)
-    ap.add_argument("--skip_reliability", action="store_true")
-    ap.add_argument("--also_combined", action="store_true")
     return ap.parse_args()
 
 def main():
     args = parse_args()
     outdir = Path(args.outdir); ensure_dir(outdir)
-    xlim = (args.xmin, args.xmax)
 
     auto_models = collect_models(args.root, args.tokens, args.datasets)
     models = filter_models(auto_models, args.models)
     if not models:
-        print("[WARN] 모델 디렉토리를 찾지 못했습니다."); return
+        print("[WARN] 모델 디렉토리 없음"); return
 
-    # TSV 헤더
     tsv_lines = ["model\tdataset\ttoken\tn\tacc\tece\n"]
 
     for model in models:
         for ds in args.datasets:
-            conf_by_tok: Dict[str, np.ndarray] = {}
-            right_by_tok_arr: Dict[str, np.ndarray] = {}
-
-            # MR 계산을 위한 qid 맵
-            pred_by_tok: Dict[str, Dict[str,int]] = {}
-            right_by_tok_qid: Dict[str, Dict[str,int]] = {}
+            conf_by_tok : Dict[str,np.ndarray] = {}
+            right_by_tok: Dict[str,np.ndarray] = {}
+            preds_by_tok   : Dict[str,Dict[str,int]] = {}
+            correct_by_tok : Dict[str,Dict[str,int]] = {}
 
             for t in args.tokens:
-                jf = locate_jsonl(args.root, t, ds, model)
-                rows = load_token_records(jf) if jf is not None else []
-                conf, right = extract_conf_correct(rows)
-                conf_by_tok[t] = conf
-                right_by_tok_arr[t] = right
+                qid, pred, gold, conf, right = load_arrays_for_token(args.root, t, ds, model)
+                conf_by_tok[t]  = conf
+                right_by_tok[t] = right
+                preds_by_tok[t]   = {q:int(pi) for q,pi in zip(qid, pred)}
+                correct_by_tok[t] = {q:int(r)  for q,r  in zip(qid, right)}
 
-                pred_qid, right_qid = build_qid_pred_right(rows)
-                pred_by_tok[t] = pred_qid
-                right_by_tok_qid[t] = right_qid
+                if conf.size > 0:
+                    ece_val = ece_from_conf(conf, right, n_bins=args.n_bins_ece)
+                    tsv_lines.append(f"{model}\t{ds}\t{t}\t{len(conf)}\t{right.mean():.4f}\t{ece_val:.4f}\n")
 
-            # 히스토그램
-            plot_hist_split_by_token(model, ds, conf_by_tok, right_by_tok_arr, outdir,
-                                     bins=args.bins, per_model_dir=args.per_model_dir, xlim=xlim)
-            if args.also_combined:
-                plot_hist_combined_overlay(model, ds, conf_by_tok, right_by_tok_arr, outdir,
-                                           bins=args.bins, per_model_dir=args.per_model_dir, xlim=xlim)
-            # 리라이어빌리티
-            if not args.skip_reliability:
-                plot_reliability_by_token(model, ds, conf_by_tok, right_by_tok_arr, outdir,
-                                          n_bins=args.n_bins_ece, per_model_dir=args.per_model_dir)
+            # 시각화
+            plot_hist_separated(model, ds, conf_by_tok, right_by_tok, outdir, bins=args.bins)
+            plot_reliability(model, ds, conf_by_tok, right_by_tok, outdir, n_bins=args.n_bins_ece)
+            plot_mr(model, ds, args.tokens, preds_by_tok, correct_by_tok, outdir)
 
-            # ECE/ACC 요약
-            for t in args.tokens:
-                conf = conf_by_tok[t]; right = right_by_tok_arr[t]
-                if conf.size == 0: continue
-                ece_val = ece_from_conf(conf, right, n_bins=args.n_bins_ece)
-                acc_val = float(right.mean())
-                tsv_lines.append(f"{model}\t{ds}\t{t}\t{len(conf)}\t{acc_val:.4f}\t{ece_val:.4f}\n")
-
-            # ── Matching Ratio 히트맵 3종 ──
-            MR_all, MR_wrong, Jacc, labels = compute_mr_matrices(pred_by_tok, right_by_tok_qid, args.tokens)
-            base = outdir / safe_name(model) if args.per_model_dir else outdir
-
-            _plot_matrix(MR_all,   labels, f"Matching Ratio — {model} / {ds}", base / f"{safe_name(model)}_{ds}_mr_all.png")
-            _plot_matrix(MR_wrong, labels, f"Matching Ratio (wrong-only) — {model} / {ds}", base / f"{safe_name(model)}_{ds}_mr_wrong.png")
-            _plot_matrix(Jacc,     labels, f"Correct-set Overlap (Jaccard) — {model} / {ds}", base / f"{safe_name(model)}_{ds}_correct_jaccard.png")
+            # 토큰 간 100% 동일 경고(디버그)
+            if len(args.tokens) >= 2:
+                first = args.tokens[0]
+                for other in args.tokens[1:]:
+                    inter = set(preds_by_tok[first]).intersection(preds_by_tok[other])
+                    if inter:
+                        same = sum(1 for q in inter if preds_by_tok[first][q]==preds_by_tok[other][q])
+                        if same == len(inter):
+                            print(f"[WARN] {model}/{ds}: {first} vs {other} 예측이 교집합 {len(inter)}개에서 100% 동일. 경로/파서 점검 권장.")
 
     # TSV 저장
     tsv_path = outdir / "ece_summary.tsv"
