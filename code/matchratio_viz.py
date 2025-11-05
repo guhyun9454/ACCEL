@@ -34,6 +34,21 @@ import matplotlib.pyplot as plt
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
+def locate_jsonl(root: str, token: str, dataset: str, model: str) -> Optional[Path]:
+    """
+    지원하는 두 가지 구조를 순서대로 탐색:
+      1) <root>/<token>/<dataset>/<model>/<dataset>.jsonl
+      2) <root>/<token>/<dataset>/<model>/<dataset>/<dataset>.jsonl   ← (당신 현재 구조)
+    """
+    base = Path(root) / token / dataset / model
+    cand1 = base / f"{dataset}.jsonl"
+    cand2 = base / dataset / f"{dataset}.jsonl"
+    if cand1.is_file():
+        return cand1
+    if cand2.is_file():
+        return cand2
+    return None
+
 def safe_tag(s: str) -> str:
     """파일명/경로에 안전한 태그로 치환"""
     return str(s).replace("/", "_").replace("\\", "_").strip()
@@ -299,10 +314,10 @@ def main():
             right_by_tok: Dict[str, np.ndarray] = {}
 
             for t in args.tokens:
-                jf = Path(args.root) / t / ds / model / f"{ds}.jsonl"
-                rows = load_token_records(jf)
+                jf = locate_jsonl(args.root, t, ds, model)
+                rows = load_token_records(jf) if jf is not None else []
                 conf, right = extract_conf_correct(rows)
-                conf_by_tok[t] = conf
+                conf_by_tok[t]  = conf
                 right_by_tok[t] = right
 
             # 그림들 저장
