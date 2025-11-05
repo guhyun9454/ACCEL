@@ -6,6 +6,8 @@ ECE & Matching-Ratio visualizer (pretty palette, font tweaks OFF)
 지원 경로:
   1) <root>/<token>/<dataset>/<model>/<dataset>.jsonl
   2) <root>/<token>/<dataset>/<model>/<dataset>/<dataset>.jsonl
+  3) (추가) <root>/<token>/<dataset>/<model>/<아무_하위폴더>/<dataset>.jsonl
+     예: csqa_cyclic/csqa.jsonl, arc_cyclic/arc.jsonl 등
 
 출력:
   - 히스토그램(정답/오답 완전 분리: 좌/우 패널, T0/T1/T2 고정색)
@@ -27,6 +29,8 @@ if os.environ.get("MPLBACKEND") is None:
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 
+DEBUG = os.environ.get("VIZ_DEBUG", "0") != "0"
+
 # =========================
 #  스타일 & 팔레트
 # =========================
@@ -40,11 +44,30 @@ plt.rcParams["legend.fontsize"] = 10
 
 # 기본색(정답=진한, 오답=연한)
 BASE_COL = {"T0": "#4C78A8", "T1": "#59A14F", "T2": "#E15759"}
+# cyclic 토큰도 예쁘게 고정
+BASE_COL["T0_cyclic"] = BASE_COL["T0"]
+BASE_COL["T1_cyclic"] = BASE_COL["T1"]
+BASE_COL["T2_cyclic"] = BASE_COL["T2"]
+
 def lighten(c, amount=0.55):
     r, g, b = mcolors.to_rgb(c)
     return (1 - amount) + amount*r, (1 - amount) + amount*g, (1 - amount) + amount*b
 
 TOKEN_LABEL = {"T0": "ABCD", "T1": "abcd", "T2": "1234"}
+TOKEN_LABEL["T0_cyclic"] = "ABCD (cyc)"
+TOKEN_LABEL["T1_cyclic"] = "abcd (cyc)"
+TOKEN_LABEL["T2_cyclic"] = "1234 (cyc)"
+
+def canonical_token(token: str) -> str:
+    """T0_cyclic -> T0, T1_foo -> T1, T2_bar -> T2"""
+    t = str(token).upper().split("_")[0].strip()
+    return t if t in ("T0","T1","T2") else token
+
+def get_color(token: str) -> str:
+    return BASE_COL.get(token, BASE_COL.get(canonical_token(token), "#808080"))
+
+def get_label(token: str) -> str:
+    return TOKEN_LABEL.get(token, TOKEN_LABEL.get(canonical_token(token), token))
 
 # =========================
 #  유틸/파서
@@ -73,12 +96,14 @@ def normalize_letter(x: Optional[str]) -> Optional[str]:
     return ch
 
 def token_letters(token: str) -> List[str]:
-    if token in ("T0","T1"): return list("ABCD")
-    if token == "T2": return list("1234")
+    base = canonical_token(token)
+    if base in ("T0","T1"): return list("ABCD")
+    if base == "T2": return list("1234")
     return list("ABCD")
 
 def letter_to_idx(token: str, letter: str) -> Optional[int]:
-    if token == "T2":
+    base = canonical_token(token)
+    if base == "T2":
         ch = str(letter).strip()[:1] if letter else None
     else:
         ch = normalize_letter(letter)
@@ -95,11 +120,25 @@ def fold_probs(arr: np.ndarray, n_opts: int) -> np.ndarray:
     return p
 
 def locate_jsonl(root: str, token: str, dataset: str, model: str) -> Optional[Path]:
+    """원래 2패턴 + one-level deeper 폴더도 탐색"""
     base = Path(root) / token / dataset / model
     c1 = base / f"{dataset}.jsonl"
     c2 = base / dataset / f"{dataset}.jsonl"
-    if c1.is_file(): return c1
-    if c2.is_file(): return c2
+    if c1.is_file():
+        if DEBUG: print(f"[PATH] hit c1: {c1}")
+        return c1
+    if c2.is_file():
+        if DEBUG: print(f"[PATH] hit c2: {c2}")
+        return c2
+    # NEW: one-level deeper (e.g., csqa_cyclic/csqa.jsonl, arc_cyclic/arc.jsonl, 혹은 임의 폴더)
+    if base.is_dir():
+        for child in base.iterdir():
+            if child.is_dir():
+                cand = child / f"{dataset}.jsonl"
+                if cand.is_file():
+                    if DEBUG: print(f"[PATH] hit deeper: {cand}")
+                    return cand
+    if DEBUG: print(f"[PATH] not found for: {base}")
     return None
 
 def collect_models(root: str, tokens: List[str], datasets: List[str]) -> List[str]:
@@ -134,6 +173,7 @@ def load_records(fp: Optional[Path]) -> List[dict]:
                 rows.append(flatten_record(json.loads(s)))
             except Exception:
                 continue
+    if DEBUG: print(f"[LOAD] {fp} -> {len(rows)} lines")
     return rows
 
 def parse_one_rec(rec: dict, token: str) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[float], Optional[bool]]:
@@ -154,7 +194,7 @@ def parse_one_rec(rec: dict, token: str) -> Tuple[Optional[str], Optional[int], 
         for k in ("gold_idx","label_idx","correct_idx","target_idx","solution_idx","answer_idx"):
             if k in rec:
                 try:
-                    vi = int(rec[k]); 
+                    vi = int(rec[k])
                     if vi >= 0: gold_idx = vi; break
                 except Exception: pass
 
@@ -170,7 +210,7 @@ def parse_one_rec(rec: dict, token: str) -> Tuple[Optional[str], Optional[int], 
         for k in ("pred_idx","prediction_idx","answer_idx","choice_idx","selected_idx","output_idx","model_pred_idx"):
             if k in rec:
                 try:
-                    vi = int(rec[k]); 
+                    vi = int(rec[k])
                     if vi >= 0: pred_idx = vi; break
                 except Exception: pass
         if pred_idx is None and "probs" in rec:
@@ -199,10 +239,11 @@ def load_arrays_for_token(root: str, token: str, dataset: str, model: str):
     qids, preds, golds, confs, rights = [], [], [], [], []
     for r in rows:
         qid, pi, gi, conf, cf = parse_one_rec(r, token)
-        if qid is None or pi is None or gi is None or conf is None: 
+        if qid is None or pi is None or gi is None or conf is None:
             continue
         qids.append(qid); preds.append(int(pi)); golds.append(int(gi))
         confs.append(float(conf)); rights.append(1 if cf else 0)
+    if DEBUG: print(f"[PARSE] token={token} dataset={dataset} -> n={len(qids)}")
     return np.array(qids), np.array(preds), np.array(golds), np.array(confs), np.array(rights, dtype=int)
 
 # =========================
@@ -215,7 +256,7 @@ def ece_from_conf(conf: np.ndarray, correct: np.ndarray, n_bins: int = 15) -> fl
         lo, hi = bins[b], bins[b + 1]
         mask = (conf >= lo) & (conf <= hi) if b == 0 else ((conf > lo) & (conf <= hi))
         if not np.any(mask): continue
-        e += (mask.sum()/N) * abs(correct[mask].mean() - conf[mask].mean())
+        e += (mask.sum()/N) * abs(np.nanmean(correct[mask]) - np.nanmean(conf[mask]))
     return float(e)
 
 def _hist(ax, vec, *, color, label, bins, xlim, alpha):
@@ -245,15 +286,15 @@ def plot_hist_correct_wrong(model: str, dataset: str, conf_by_tok: Dict[str, np.
 
     for t, vec in data_ok.items():
         if vec.size == 0: continue
-        _hist(axL, vec, color=BASE_COL.get(t, "#808080"),
-              label=f"{TOKEN_LABEL.get(t,t)} (n={len(vec)})",
+        _hist(axL, vec, color=get_color(t),
+              label=f"{get_label(t)} (n={len(vec)})",
               bins=bins, xlim=xlim, alpha=alpha_correct)
     axL.set_title("Correct only"); axL.set_xlabel("Confidence (top-1 prob)"); axL.set_ylabel("Density"); axL.legend(fontsize=9)
 
     for t, vec in data_bad.items():
         if vec.size == 0: continue
-        _hist(axR, vec, color=lighten(BASE_COL.get(t, "#808080"), 0.55),
-              label=f"{TOKEN_LABEL.get(t,t)} (n={len(vec)})",
+        _hist(axR, vec, color=lighten(get_color(t), 0.55),
+              label=f"{get_label(t)} (n={len(vec)})",
               bins=bins, xlim=xlim, alpha=alpha_wrong)
     axR.set_title("Wrong only"); axR.set_xlabel("Confidence (top-1 prob)"); axR.legend(fontsize=9)
 
@@ -275,12 +316,12 @@ def plot_hist_combined_overlay(model: str, dataset: str, conf_by_tok: Dict[str, 
         any_data = True
         right = right_by_tok[t]
         ok  = conf[right==1]; bad = conf[right==0]
-        base_col  = BASE_COL.get(t, "#808080")
+        base_col  = get_color(t)
         light_col = lighten(base_col, 0.55)
         plt.hist(bad, bins=bins, range=xlim, alpha=alpha_wrong, color=light_col, density=True,
-                 label=f"{TOKEN_LABEL.get(t,t)} wrong (n={len(bad)})", edgecolor="white", linewidth=0.6)
+                 label=f"{get_label(t)} wrong (n={len(bad)})", edgecolor="white", linewidth=0.6)
         plt.hist(ok,  bins=bins, range=xlim, alpha=alpha_correct, color=base_col, density=True,
-                 label=f"{TOKEN_LABEL.get(t,t)} correct (n={len(ok)})", edgecolor="white", linewidth=0.6)
+                 label=f"{get_label(t)} correct (n={len(ok)})", edgecolor="white", linewidth=0.6)
     if any_data:
         plt.xlabel("Confidence (top-1 prob)"); plt.ylabel("Density")
         plt.title(f"{model} — {dataset} | Confidence distribution by token")
@@ -308,7 +349,7 @@ def plot_reliability(model: str, dataset: str, conf_by_tok: Dict[str, np.ndarray
             mask = (conf >= lo) & (conf <= hi) if b==0 else ((conf>lo)&(conf<=hi))
             accs.append(right[mask].mean() if np.any(mask) else np.nan)
         plt.plot(mids, np.array(accs, float), marker="o", linewidth=2,
-                 color=BASE_COL.get(t,"#808080"), label=f"{TOKEN_LABEL.get(t,t)}")
+                 color=get_color(t), label=f"{get_label(t)}")
     plt.xlabel("Confidence"); plt.ylabel("Accuracy"); plt.ylim(0,1)
     plt.title(f"{model} — {dataset} | Reliability by token"); plt.legend()
     out_png = base / f"{safe_tag(model)}_{dataset}_reliability.png"
@@ -326,8 +367,8 @@ def mr_matrix(preds_by_tok: Dict[str, Dict[str,int]],
     M = np.zeros((V,V), dtype=float)
     for i, ti in enumerate(order):
         for j, tj in enumerate(order):
-            Qi = set(preds_by_tok[ti].keys())
-            Qj = set(preds_by_tok[tj].keys())
+            Qi = set(preds_by_tok.get(ti, {}).keys())
+            Qj = set(preds_by_tok.get(tj, {}).keys())
             keys = Qi & Qj
             if mask_qids is not None:
                 keys &= mask_qids
@@ -341,17 +382,21 @@ def mr_matrix(preds_by_tok: Dict[str, Dict[str,int]],
 def _plot_matrix(M: np.ndarray, order_tokens: List[str], title: str, out_png: Path,
                  vmin=0.0, vmax=1.0, fmt="{:.1%}"):
     fig, ax = plt.subplots()
-    tick_labels = [TOKEN_LABEL.get(t, t) for t in order_tokens]
+    # 라벨/축 안전 처리
+    nrows, ncols = M.shape
+    tick_labels = [get_label(t) for t in order_tokens]
+    tick_labels_x = tick_labels[:ncols]
+    tick_labels_y = tick_labels[:nrows]
     im = ax.imshow(M, vmin=vmin, vmax=vmax, cmap="viridis", aspect="equal",
                    interpolation="none")
-    ax.set_xticks(range(len(tick_labels))); ax.set_yticks(range(len(tick_labels)))
-    ax.set_xticklabels(tick_labels);       ax.set_yticklabels(tick_labels)
+    ax.set_xticks(range(ncols)); ax.set_yticks(range(nrows))
+    ax.set_xticklabels(tick_labels_x); ax.set_yticklabels(tick_labels_y)
     ax.set_xlabel("Token"); ax.set_ylabel("Token")
     ax.set_title(title)
     for sp in ax.spines.values(): sp.set_visible(False)
     ax.grid(False)
-    for i in range(M.shape[0]):
-        for j in range(M.shape[1]):
+    for i in range(nrows):
+        for j in range(ncols):
             if np.isfinite(M[i, j]):
                 val = M[i, j]
                 ax.text(j, i, fmt.format(val),
@@ -368,7 +413,13 @@ def plot_mr_triplet(model: str, dataset: str, tokens: List[str],
                     outdir: Path, per_model_dir=False):
     base = outdir / safe_tag(model) if per_model_dir else outdir
     ensure_dir(base)
-    order = tokens
+    # 빈 토큰 자동 제외 + 로그
+    order = [t for t in tokens if len(preds_by_tok.get(t, {})) > 0]
+    for t in tokens:
+        print(f"[MR] token={t} n_qids={len(preds_by_tok.get(t, {}))}")
+    if len(order) < 2:
+        print(f"[WARN] MR: 유효 토큰 {len(order)}개 -> 히트맵 생략")
+        return
     _, M_all = mr_matrix(preds_by_tok, tok_order=order)
     S_corr = None
     for t in order:
@@ -465,7 +516,7 @@ def main():
             if len(args.tokens) >= 2:
                 first = args.tokens[0]
                 for other in args.tokens[1:]:
-                    inter = set(preds_by_tok[first]).intersection(preds_by_tok[other])
+                    inter = set(preds_by_tok.get(first, {})).intersection(preds_by_tok.get(other, {}))
                     if inter:
                         same = sum(1 for q in inter if preds_by_tok[first][q]==preds_by_tok[other][q])
                         if same == len(inter):
