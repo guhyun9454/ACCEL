@@ -2,19 +2,29 @@
 # -*- coding: utf-8 -*-
 """
 ece_viz.py
-- 디렉토리 구조: <root>/<token>/<dataset>/<model>/<dataset>.jsonl
-- 각 jsonl 한 줄은 다음 둘 중 하나를 가정
+
+입력 디렉토리 구조(둘 다 지원):
+  1) <root>/<token>/<dataset>/<model>/<dataset>.jsonl
+  2) <root>/<token>/<dataset>/<model>/<dataset>/<dataset>.jsonl  ← (요청하신 현재 구조)
+
+각 jsonl 라인은 다음 중 하나를 가정
   (A) {"type":"result","data":{ ... "probs":[...], "correct":true/false, "qid":... }}
   (B) 평면형 { "probs":[...], "correct":true/false, "qid":... }  (+ 일부 키 변형 허용)
-- 출력:
-  1) 히스토그램(정답/오답 confidence 분포, T0/T1/T2 색상 고정: R/B/G)
-  2) 리라이어빌리티 다이어그램(토큰별)
-  3) ECE/정확도 요약 TSV
+
+출력:
+  1) 히스토그램(정답만 / 오답만) — 토큰별 색상(R/B/G), 범례명: T0→ABCD, T1→abcd, T2→1234
+  2) 리라이어빌리티 다이어그램(토큰별 한 그림)
+  3) ECE/정확도 요약 TSV (top-1 confidence 기반)
 
 사용 예)
-  python code/ece_viz.py --root results --datasets arc csqa \
-    --models "Qwen/Qwen2.5-1.5B-Instruct" "meta-llama/Llama-3.2-1B-Instruct" \
-    --outdir viz_out/ece
+  python code/ece_viz.py \
+    --root results \
+    --datasets arc csqa \
+    --models "0s_Llama-3.2-1B-Instruct" "0s_Llama-3.2-3B-Instruct" "0s_Qwen2.5-1.5B-Instruct" "0s_gemma-3-1b-it" \
+    --outdir viz_out/ece \
+    --per_model_dir \
+    --xmin 0.3 --xmax 1.0 \
+    --also_combined
 """
 
 import os, json, argparse
@@ -31,6 +41,14 @@ import matplotlib.pyplot as plt
 
 
 # ────────────── 공통 유틸 ──────────────
+
+def safe_name(s: str) -> str:
+    """경로/파일명에 안전한 이름으로 변환"""
+    return str(s).replace("/", "__").replace("\\", "__").strip()
+
+# 토큰 → 표시 이름(범례에 사용)
+TOKEN_LABEL_MAP = {"T0": "ABCD", "T1": "abcd", "T2": "1234"}
+
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
 
@@ -38,7 +56,7 @@ def locate_jsonl(root: str, token: str, dataset: str, model: str) -> Optional[Pa
     """
     지원하는 두 가지 구조를 순서대로 탐색:
       1) <root>/<token>/<dataset>/<model>/<dataset>.jsonl
-      2) <root>/<token>/<dataset>/<model>/<dataset>/<dataset>.jsonl   ← (당신 현재 구조)
+      2) <root>/<token>/<dataset>/<model>/<dataset>/<dataset>.jsonl
     """
     base = Path(root) / token / dataset / model
     cand1 = base / f"{dataset}.jsonl"
@@ -48,10 +66,6 @@ def locate_jsonl(root: str, token: str, dataset: str, model: str) -> Optional[Pa
     if cand2.is_file():
         return cand2
     return None
-
-def safe_tag(s: str) -> str:
-    """파일명/경로에 안전한 태그로 치환"""
-    return str(s).replace("/", "_").replace("\\", "_").strip()
 
 def flatten_record(rec: dict) -> dict:
     """{"type":"result","data":{...}} → {...} 로 평탄화"""
@@ -107,7 +121,7 @@ def ece_from_conf(conf: np.ndarray, correct: np.ndarray, n_bins: int = 15) -> fl
 
 # ────────────── 로딩 ──────────────
 def collect_models(root: str, tokens: List[str], datasets: List[str]) -> List[str]:
-    """결과 폴더에서 모델 디렉토리 자동 수집 (폴더명 기준: 슬래시가 '_'로 치환된 형태일 가능성 큼)"""
+    """결과 폴더에서 모델 디렉토리 자동 수집"""
     mset = set()
     for t in tokens:
         for ds in datasets:
@@ -119,21 +133,20 @@ def collect_models(root: str, tokens: List[str], datasets: List[str]) -> List[st
     return sorted(mset)
 
 def filter_models(all_models: List[str], wants: Optional[List[str]]) -> List[str]:
-    """--models 가 주어지면 부분문자열 매칭(원문/치환문 모두)으로 필터링"""
+    """--models 가 주어지면 부분문자열 매칭으로 필터링(원문/치환문 모두)"""
     if not wants:
         return all_models
-    wants_sanit = [safe_tag(w).lower() for w in wants]
-    wants_raw   = [w.lower() for w in wants]
+    wants_a = [w.lower() for w in wants]
+    wants_b = [safe_name(w).lower() for w in wants]
     out = []
     for m in all_models:
         ml = m.lower()
-        keep = any(w in ml for w in wants_sanit) or any(w in ml for w in wants_raw)
-        if keep:
+        if any(w in ml for w in wants_a) or any(w in ml for w in wants_b):
             out.append(m)
     return sorted(set(out))
 
 def load_token_records(fp: Path) -> List[dict]:
-    if not fp.is_file():
+    if not fp or not fp.is_file():
         return []
     rows: List[dict] = []
     with fp.open("r", encoding="utf-8") as f:
@@ -170,8 +183,7 @@ def extract_conf_correct(rows: List[dict]) -> Tuple[np.ndarray, np.ndarray]:
             rights.append(1 if c else 0)
             continue
 
-        # correct가 없으면 pred/gold로 복원
-        # 문자 비교: sampled vs ideal
+        # correct가 없으면 문자 비교: sampled vs ideal
         p_letter = normalize_letter(r.get("sampled"))
         g_letter = normalize_letter(r.get("ideal"))
         if p_letter is not None and g_letter is not None:
@@ -213,45 +225,109 @@ def extract_conf_correct(rows: List[dict]) -> Tuple[np.ndarray, np.ndarray]:
 
 
 # ────────────── 시각화 ──────────────
-def plot_hist_by_token(model_tag: str,
-                       dataset: str,
-                       conf_by_tok: Dict[str, np.ndarray],
-                       right_by_tok: Dict[str, np.ndarray],
-                       outdir: Path,
-                       bins: int = 20) -> None:
-    """토큰별(빨/파/초) 정답/오답 히스토그램 오버레이(단일 플롯)."""
+def _plot_hist_single(ax, data_list, labels, colors, bins, rng, title, xlabel="Confidence (top-1 prob)"):
+    for (conf_vec, lab, col) in zip(data_list, labels, colors):
+        if conf_vec.size == 0:
+            continue
+        ax.hist(conf_vec, bins=bins, range=rng, density=True, alpha=0.65, color=col, label=lab)
+    ax.set_xlabel(xlabel); ax.set_ylabel("Density"); ax.set_title(title)
+    ax.legend(fontsize=9)
+
+def plot_hist_split_by_token(model_tag: str,
+                             dataset: str,
+                             conf_by_tok: Dict[str, np.ndarray],
+                             right_by_tok: Dict[str, np.ndarray],
+                             outdir: Path,
+                             bins: int = 20,
+                             per_model_dir: bool = False,
+                             xlim: Tuple[float,float] = (0.0,1.0)) -> None:
+    """정답만/오답만 두 장으로 분리 저장. 범례명은 ABCD/abcd/1234."""
     color_map = {"T0": "red", "T1": "blue", "T2": "green"}
+    base = outdir / safe_name(model_tag) if per_model_dir else outdir
+    ensure_dir(base)
+
+    # Correct only
+    data, labels, colors = [], [], []
+    for t in sorted(conf_by_tok.keys()):
+        conf = conf_by_tok[t]; right = right_by_tok[t]
+        vec = conf[right == 1]
+        if vec.size == 0:
+            continue
+        data.append(vec)
+        labels.append(f"{TOKEN_LABEL_MAP.get(t, t)} (n={len(vec)})")
+        colors.append(color_map.get(t, "gray"))
+    if data:
+        fig, ax = plt.subplots()
+        _plot_hist_single(ax, data, labels, colors, bins, xlim,
+                          f"{model_tag} — {dataset} | Confidence (correct only)")
+        out_png = base / f"{safe_name(model_tag)}_{dataset}_conf_hist_correct.png"
+        fig.tight_layout(); fig.savefig(out_png, dpi=200); plt.close(fig)
+        print(f"[SAVE] {out_png}")
+
+    # Wrong only
+    data, labels, colors = [], [], []
+    for t in sorted(conf_by_tok.keys()):
+        conf = conf_by_tok[t]; right = right_by_tok[t]
+        vec = conf[right == 0]
+        if vec.size == 0:
+            continue
+        data.append(vec)
+        labels.append(f"{TOKEN_LABEL_MAP.get(t, t)} (n={len(vec)})")
+        colors.append(color_map.get(t, "gray"))
+    if data:
+        fig, ax = plt.subplots()
+        _plot_hist_single(ax, data, labels, colors, bins, xlim,
+                          f"{model_tag} — {dataset} | Confidence (wrong only)")
+        out_png = base / f"{safe_name(model_tag)}_{dataset}_conf_hist_wrong.png"
+        fig.tight_layout(); fig.savefig(out_png, dpi=200); plt.close(fig)
+        print(f"[SAVE] {out_png}")
+
+def plot_hist_combined_overlay(model_tag: str,
+                               dataset: str,
+                               conf_by_tok: Dict[str, np.ndarray],
+                               right_by_tok: Dict[str, np.ndarray],
+                               outdir: Path,
+                               bins: int = 20,
+                               per_model_dir: bool = False,
+                               xlim: Tuple[float,float] = (0.0,1.0)) -> None:
+    """(옵션) 정답/오답을 동일 그림에 토큰별로 오버레이"""
+    color_map = {"T0": "red", "T1": "blue", "T2": "green"}
+    base = outdir / safe_name(model_tag) if per_model_dir else outdir
+    ensure_dir(base)
+
     fig = plt.figure()
+    any_data = False
     for t in sorted(conf_by_tok.keys()):
         conf = conf_by_tok[t]; right = right_by_tok[t]
         if conf.size == 0:
             continue
+        any_data = True
         conf_ok  = conf[right == 1]
         conf_bad = conf[right == 0]
-        plt.hist(conf_bad, bins=bins, range=(0.0, 1.0), alpha=0.35,
-                 color=color_map.get(t, "gray"), density=True,
-                 label=f"{t} wrong (n={len(conf_bad)})")
-        plt.hist(conf_ok, bins=bins, range=(0.0, 1.0), alpha=0.55,
-                 color=color_map.get(t, "gray"), density=True,
-                 label=f"{t} correct (n={len(conf_ok)})")
-    plt.xlabel("Confidence (top-1 prob)")
-    plt.ylabel("Density")
-    plt.title(f"{model_tag} — {dataset} | Confidence distribution by token")
-    plt.legend(fontsize=9)
-    out_png = outdir / f"{safe_tag(model_tag)}_{dataset}_conf_hist.png"
-    ensure_dir(out_png.parent)
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=200)
-    plt.close(fig)
+        plt.hist(conf_bad, bins=bins, range=xlim, alpha=0.35, color=color_map.get(t,"gray"),
+                 label=f"{TOKEN_LABEL_MAP.get(t,t)} wrong (n={len(conf_bad)})", density=True)
+        plt.hist(conf_ok,  bins=bins, range=xlim, alpha=0.55, color=color_map.get(t,"gray"),
+                 label=f"{TOKEN_LABEL_MAP.get(t,t)} correct (n={len(conf_ok)})", density=True)
+    if any_data:
+        plt.xlabel("Confidence (top-1 prob)"); plt.ylabel("Density")
+        plt.title(f"{model_tag} — {dataset} | Confidence distribution by token")
+        plt.legend(fontsize=9)
+        out_png = base / f"{safe_name(model_tag)}_{dataset}_conf_hist.png"
+        plt.tight_layout(); plt.savefig(out_png, dpi=200); plt.close()
+        print(f"[SAVE] {out_png}")
 
 def plot_reliability_by_token(model_tag: str,
                               dataset: str,
                               conf_by_tok: Dict[str, np.ndarray],
                               right_by_tok: Dict[str, np.ndarray],
                               outdir: Path,
-                              n_bins: int = 15) -> None:
-    """토큰별 리라이어빌리티 다이어그램(단일 플롯)."""
+                              n_bins: int = 15,
+                              per_model_dir: bool = False) -> None:
+    """토큰별 리라이어빌리티 다이어그램(한 그림)."""
     color_map = {"T0": "red", "T1": "blue", "T2": "green"}
+    base = outdir / safe_name(model_tag) if per_model_dir else outdir
+    ensure_dir(base)
+
     fig = plt.figure()
     xs = np.linspace(0, 1, 101)
     plt.plot(xs, xs, linestyle="--", color="black", linewidth=1, label="Ideal")
@@ -267,17 +343,14 @@ def plot_reliability_by_token(model_tag: str,
             mask = (conf >= lo) & (conf <= hi) if b == 0 else ((conf > lo) & (conf <= hi))
             accs.append(right[mask].mean() if np.any(mask) else np.nan)
         accs = np.array(accs, dtype=float)
-        plt.plot(mids, accs, marker="o", color=color_map.get(t, "gray"), label=f"{t}")
-    plt.xlabel("Confidence")
-    plt.ylabel("Accuracy")
-    plt.ylim(0.0, 1.0)
+        plt.plot(mids, accs, marker="o", color=color_map.get(t, "gray"),
+                 label=f"{TOKEN_LABEL_MAP.get(t, t)}")
+    plt.xlabel("Confidence"); plt.ylabel("Accuracy"); plt.ylim(0.0, 1.0)
     plt.title(f"{model_tag} — {dataset} | Reliability by token")
     plt.legend()
-    out_png = outdir / f"{safe_tag(model_tag)}_{dataset}_reliability.png"
-    ensure_dir(out_png.parent)
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=200)
-    plt.close(fig)
+    out_png = base / f"{safe_name(model_tag)}_{dataset}_reliability.png"
+    plt.tight_layout(); plt.savefig(out_png, dpi=200); plt.close()
+    print(f"[SAVE] {out_png}")
 
 
 # ────────────── 메인 ──────────────
@@ -291,12 +364,20 @@ def parse_args():
     ap.add_argument("--outdir", default="viz_out/ece")
     ap.add_argument("--bins", type=int, default=20)
     ap.add_argument("--n_bins_ece", type=int, default=15)
+    ap.add_argument("--per_model_dir", action="store_true",
+                    help="모델별 하위 폴더에 PNG 저장")
+    ap.add_argument("--xmin", type=float, default=0.0)
+    ap.add_argument("--xmax", type=float, default=1.0)
+    ap.add_argument("--skip_reliability", action="store_true",
+                    help="리라이어빌리티 플롯 생략")
+    ap.add_argument("--also_combined", action="store_true",
+                    help="정답/오답 분리 외에 합쳐진 오버레이 그림도 추가 저장")
     return ap.parse_args()
 
 def main():
     args = parse_args()
-    outdir = Path(args.outdir)
-    ensure_dir(outdir)
+    outdir = Path(args.outdir); ensure_dir(outdir)
+    xlim = (args.xmin, args.xmax)
 
     auto_models = collect_models(args.root, args.tokens, args.datasets)
     models = filter_models(auto_models, args.models)
@@ -320,9 +401,25 @@ def main():
                 conf_by_tok[t]  = conf
                 right_by_tok[t] = right
 
-            # 그림들 저장
-            plot_hist_by_token(model, ds, conf_by_tok, right_by_tok, outdir, bins=args.bins)
-            plot_reliability_by_token(model, ds, conf_by_tok, right_by_tok, outdir, n_bins=args.n_bins_ece)
+            # 히스토그램(정답/오답 분리)
+            plot_hist_split_by_token(
+                model, ds, conf_by_tok, right_by_tok, outdir,
+                bins=args.bins, per_model_dir=args.per_model_dir, xlim=xlim
+            )
+
+            # (옵션) 합쳐진 오버레이도 저장
+            if args.also_combined:
+                plot_hist_combined_overlay(
+                    model, ds, conf_by_tok, right_by_tok, outdir,
+                    bins=args.bins, per_model_dir=args.per_model_dir, xlim=xlim
+                )
+
+            # 리라이어빌리티 다이어그램
+            if not args.skip_reliability:
+                plot_reliability_by_token(
+                    model, ds, conf_by_tok, right_by_tok, outdir,
+                    n_bins=args.n_bins_ece, per_model_dir=args.per_model_dir
+                )
 
             # 수치 요약(ECE/ACC)
             for t in args.tokens:
