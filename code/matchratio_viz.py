@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ECE & Matching-Ratio visualizer (pretty palette, no font tweak)
+ECE & Matching-Ratio visualizer (pretty palette, font tweaks OFF)
 
-입력 구조(둘 다 지원):
-  <root>/<token>/<dataset>/<model>/<dataset>.jsonl
-  <root>/<token>/<dataset>/<model>/<dataset>/<dataset>.jsonl
+지원 경로:
+  1) <root>/<token>/<dataset>/<model>/<dataset>.jsonl
+  2) <root>/<token>/<dataset>/<model>/<dataset>/<dataset>.jsonl
 
 출력:
-  - 히스토그램(정답/오답 분리, T0/T1/T2 고정색)
+  - 히스토그램(정답/오답 완전 분리: 좌/우 패널, T0/T1/T2 고정색)
+  - (옵션) 토큰별 오버레이 히스토그램
   - 리라이어빌리티 다이어그램(토큰별)
-  - 매칭비율 히트맵: all / correct-only / wrong-only (칸에 % 주석)
+  - 매칭비율 히트맵 3종: all / correct-only / wrong-only  (셀에 % 주석)
   - ECE/정확도 요약 TSV
+
+예시:
+  python ece_viz.py --root results --datasets arc csqa \
+    --models "0s_Llama-3.2-1B-Instruct" "0s_Llama-3.2-3B-Instruct" \
+    --outdir viz_out/ece --per_model_dir --xmin 0.3 --xmax 1.0 --also_combined
 """
 
 import os, json, argparse
@@ -28,7 +34,7 @@ import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 
 # =========================
-#  스타일 & 팔레트
+#  스타일 & 팔레트 (폰트 건드리지 않음)
 # =========================
 try:
     plt.style.use("seaborn-v0_8-whitegrid")
@@ -38,13 +44,13 @@ plt.rcParams["axes.titlesize"] = 16
 plt.rcParams["axes.labelsize"] = 12
 plt.rcParams["legend.fontsize"] = 10
 
-# ColorBrewer/Vega 계열 3색 (정답=진한, 오답=연한)
+# 보기 좋은 기본색(정답=진한, 오답=연한)
 BASE_COL = {
-    "T0": "#4C78A8",  # 블루
-    "T1": "#59A14F",  # 그린
-    "T2": "#E15759",  # 레드
+    "T0": "#4C78A8",  # blue
+    "T1": "#59A14F",  # green
+    "T2": "#E15759",  # red
 }
-def lighten(c, amount=0.45):
+def lighten(c, amount=0.55):
     r, g, b = mcolors.to_rgb(c)
     return (1 - amount) + amount*r, (1 - amount) + amount*g, (1 - amount) + amount*b
 
@@ -77,7 +83,7 @@ def normalize_letter(x: Optional[str]) -> Optional[str]:
     return ch
 
 def token_letters(token: str) -> List[str]:
-    if token in ("T0", "T1"): return list("ABCD")
+    if token in ("T0", "T1"): return list("ABCD")   # T1도 비교는 대문자로
     if token == "T2": return list("1234")
     return list("ABCD")
 
@@ -92,8 +98,8 @@ def letter_to_idx(token: str, letter: str) -> Optional[int]:
 
 def fold_probs(arr: np.ndarray, n_opts: int) -> np.ndarray:
     p = np.array(arr, dtype=float)
-    if p.ndim == 2: p = p.mean(axis=0)
-    if p.ndim == 1 and p.size == 2*n_opts:
+    if p.ndim == 2: p = p.mean(axis=0)              # view 평균
+    if p.ndim == 1 and p.size == 2*n_opts:          # 공백/비공백 접기
         p = p.reshape(2, n_opts).sum(axis=0)
     p = np.clip(p, 1e-12, None); p /= p.sum()
     return p
@@ -141,6 +147,7 @@ def load_records(fp: Optional[Path]) -> List[dict]:
     return rows
 
 def parse_one_rec(rec: dict, token: str) -> Tuple[Optional[str], Optional[int], Optional[int], Optional[float], Optional[bool]]:
+    """(qid, pred_idx, gold_idx, top1_conf, correct_flag)"""
     qid = rec.get("qid") or rec.get("id") or rec.get("uid") or rec.get("question_id")
     if qid is None and "idx" in rec: qid = str(rec["idx"])
     if qid is None: return None, None, None, None, None
@@ -160,8 +167,7 @@ def parse_one_rec(rec: dict, token: str) -> Tuple[Optional[str], Optional[int], 
                 try:
                     vi = int(rec[k]); 
                     if vi >= 0: gold_idx = vi; break
-                except Exception:
-                    pass
+                except Exception: pass
 
     # pred
     pred_idx = None
@@ -177,8 +183,7 @@ def parse_one_rec(rec: dict, token: str) -> Tuple[Optional[str], Optional[int], 
                 try:
                     vi = int(rec[k]); 
                     if vi >= 0: pred_idx = vi; break
-                except Exception:
-                    pass
+                except Exception: pass
         if pred_idx is None and "probs" in rec:
             p = fold_probs(rec["probs"], n_opts)
             pred_idx = int(np.argmax(p))
@@ -205,7 +210,8 @@ def load_arrays_for_token(root: str, token: str, dataset: str, model: str):
     qids, preds, golds, confs, rights = [], [], [], [], []
     for r in rows:
         qid, pi, gi, conf, cf = parse_one_rec(r, token)
-        if qid is None or pi is None or gi is None or conf is None: continue
+        if qid is None or pi is None or gi is None or conf is None: 
+            continue
         qids.append(qid); preds.append(int(pi)); golds.append(int(gi))
         confs.append(float(conf)); rights.append(1 if cf else 0)
     return np.array(qids), np.array(preds), np.array(golds), np.array(confs), np.array(rights, dtype=int)
@@ -223,29 +229,77 @@ def ece_from_conf(conf: np.ndarray, correct: np.ndarray, n_bins: int = 15) -> fl
         e += (mask.sum()/N) * abs(correct[mask].mean() - conf[mask].mean())
     return float(e)
 
-def plot_hist_separated(model: str, dataset: str, conf_by_tok: Dict[str, np.ndarray],
-                        right_by_tok: Dict[str, np.ndarray], outdir: Path, bins=20):
-    fig = plt.figure()
+def plot_hist_correct_wrong(model: str, dataset: str, conf_by_tok: Dict[str, np.ndarray],
+                            right_by_tok: Dict[str, np.ndarray], outdir: Path,
+                            bins=20, per_model_dir=False, xlim=(0.0,1.0)):
+    """좌: correct-only / 우: wrong-only (같은 축 범위)"""
+    base = outdir / safe_tag(model) if per_model_dir else outdir
+    ensure_dir(base)
+
+    data_ok, data_bad = {}, {}
     for t, conf in conf_by_tok.items():
         if conf.size == 0: continue
         right = right_by_tok[t]
-        ok  = conf[right==1]
-        bad = conf[right==0]
-        base = BASE_COL.get(t, "#808080")
-        light = lighten(base, 0.6)
-        plt.hist(bad, bins=bins, range=(0,1), alpha=0.55, color=light,
-                 density=True, label=f"{t} {TOKEN_LABEL.get(t,t)} wrong (n={len(bad)})")
-        plt.hist(ok,  bins=bins, range=(0,1), alpha=0.85, color=base,
-                 density=True, label=f"{t} {TOKEN_LABEL.get(t,t)} correct (n={len(ok)})")
-    plt.xlabel("Confidence (top-1 prob)")
-    plt.ylabel("Density")
-    plt.title(f"{model} — {dataset} | Confidence by correctness")
-    plt.legend(ncol=2, fontsize=9)
-    out_png = outdir / f"{safe_tag(model)}_{dataset}_conf_hist.png"
-    fig.tight_layout(); fig.savefig(out_png, dpi=220); plt.close(fig)
+        data_ok[t]  = conf[right==1]
+        data_bad[t] = conf[right==0]
+
+    if not data_ok and not data_bad: return
+
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+
+    # 좌: 정답
+    for t, vec in data_ok.items():
+        if vec.size == 0: continue
+        axL.hist(vec, bins=bins, range=xlim, density=True, alpha=0.90,
+                 color=BASE_COL.get(t, "#808080"),
+                 label=f"{TOKEN_LABEL.get(t,t)} (n={len(vec)})")
+    axL.set_title("Correct only"); axL.set_xlabel("Confidence (top-1 prob)"); axL.set_ylabel("Density"); axL.legend(fontsize=9)
+
+    # 우: 오답
+    for t, vec in data_bad.items():
+        if vec.size == 0: continue
+        axR.hist(vec, bins=bins, range=xlim, density=True, alpha=0.90,
+                 color=lighten(BASE_COL.get(t, "#808080"), 0.55),
+                 label=f"{TOKEN_LABEL.get(t,t)} (n={len(vec)})")
+    axR.set_title("Wrong only"); axR.set_xlabel("Confidence (top-1 prob)"); axR.legend(fontsize=9)
+
+    fig.suptitle(f"{model} — {dataset} | Confidence (correct vs wrong)", fontsize=14)
+    out_png = base / f"{safe_tag(model)}_{dataset}_conf_hist_split.png"
+    fig.tight_layout(rect=[0, 0, 1, 0.94]); fig.savefig(out_png, dpi=220); plt.close(fig)
+    print(f"[SAVE] {out_png}")
+
+def plot_hist_combined_overlay(model: str, dataset: str, conf_by_tok: Dict[str, np.ndarray],
+                               right_by_tok: Dict[str, np.ndarray], outdir: Path,
+                               bins=20, per_model_dir=False, xlim=(0.0,1.0)):
+    """토큰별 오버레이(정답 진한/오답 연한)"""
+    base = outdir / safe_tag(model) if per_model_dir else outdir
+    ensure_dir(base)
+    fig = plt.figure()
+    any_data = False
+    for t, conf in conf_by_tok.items():
+        if conf.size == 0: continue
+        any_data = True
+        right = right_by_tok[t]
+        ok  = conf[right==1]; bad = conf[right==0]
+        base_col  = BASE_COL.get(t, "#808080")
+        light_col = lighten(base_col, 0.55)
+        plt.hist(bad, bins=bins, range=xlim, alpha=0.55, color=light_col, density=True,
+                 label=f"{TOKEN_LABEL.get(t,t)} wrong (n={len(bad)})")
+        plt.hist(ok,  bins=bins, range=xlim, alpha=0.85, color=base_col, density=True,
+                 label=f"{TOKEN_LABEL.get(t,t)} correct (n={len(ok)})")
+    if any_data:
+        plt.xlabel("Confidence (top-1 prob)"); plt.ylabel("Density")
+        plt.title(f"{model} — {dataset} | Confidence distribution by token")
+        plt.legend(ncol=2, fontsize=9)
+        out_png = base / f"{safe_tag(model)}_{dataset}_conf_hist_overlay.png"
+        plt.tight_layout(); plt.savefig(out_png, dpi=220); plt.close()
+        print(f"[SAVE] {out_png}")
 
 def plot_reliability(model: str, dataset: str, conf_by_tok: Dict[str, np.ndarray],
-                     right_by_tok: Dict[str, np.ndarray], outdir: Path, n_bins=15):
+                     right_by_tok: Dict[str, np.ndarray], outdir: Path,
+                     n_bins=15, per_model_dir=False):
+    base = outdir / safe_tag(model) if per_model_dir else outdir
+    ensure_dir(base)
     fig = plt.figure()
     xs = np.linspace(0,1,101)
     plt.plot(xs, xs, "--", color="#555555", linewidth=1.1, label="Ideal")
@@ -257,21 +311,22 @@ def plot_reliability(model: str, dataset: str, conf_by_tok: Dict[str, np.ndarray
         accs = []
         for b in range(n_bins):
             lo,hi = bins[b], bins[b+1]
-            mask = (conf >= lo) & (conf <= hi) if b==0 else ((conf > lo) & (conf <= hi))
+            mask = (conf >= lo) & (conf <= hi) if b==0 else ((conf>lo)&(conf<=hi))
             accs.append(right[mask].mean() if np.any(mask) else np.nan)
-        base = BASE_COL.get(t, "#808080")
         plt.plot(mids, np.array(accs, float), marker="o", linewidth=2,
-                 color=base, label=f"{t} {TOKEN_LABEL.get(t,t)}")
+                 color=BASE_COL.get(t,"#808080"), label=f"{TOKEN_LABEL.get(t,t)}")
     plt.xlabel("Confidence"); plt.ylabel("Accuracy"); plt.ylim(0,1)
-    plt.title(f"{model} — {dataset} | Reliability by token")
-    plt.legend()
-    out_png = outdir / f"{safe_tag(model)}_{dataset}_reliability.png"
+    plt.title(f"{model} — {dataset} | Reliability by token"); plt.legend()
+    out_png = base / f"{safe_tag(model)}_{dataset}_reliability.png"
     fig.tight_layout(); fig.savefig(out_png, dpi=220); plt.close(fig)
+    print(f"[SAVE] {out_png}")
 
 # =========================
-#  Matching Ratio (MR)
+#  Matching Ratio (MR) — 네가 원하는 스타일
 # =========================
-def mr_matrix(preds_by_tok: Dict[str, Dict[str,int]], mask_qids: Optional[set]=None, tok_order: Optional[List[str]]=None):
+def mr_matrix(preds_by_tok: Dict[str, Dict[str,int]],
+              mask_qids: Optional[set]=None,
+              tok_order: Optional[List[str]]=None):
     order = tok_order or sorted(preds_by_tok.keys())
     V = len(order)
     M = np.zeros((V,V), dtype=float)
@@ -280,7 +335,8 @@ def mr_matrix(preds_by_tok: Dict[str, Dict[str,int]], mask_qids: Optional[set]=N
             Qi = set(preds_by_tok[ti].keys())
             Qj = set(preds_by_tok[tj].keys())
             keys = Qi & Qj
-            if mask_qids is not None: keys &= mask_qids
+            if mask_qids is not None:
+                keys &= mask_qids
             if not keys:
                 M[i,j] = np.nan
             else:
@@ -288,48 +344,59 @@ def mr_matrix(preds_by_tok: Dict[str, Dict[str,int]], mask_qids: Optional[set]=N
                 M[i,j] = same / float(len(keys))
     return order, M
 
-def plot_mr(model: str, dataset: str, tokens: List[str],
-            preds_by_tok: Dict[str, Dict[str,int]],
-            correct_by_tok: Dict[str, Dict[str,int]],
-            outdir: Path):
-
+def plot_mr_triplet(model: str, dataset: str, tokens: List[str],
+                    preds_by_tok: Dict[str, Dict[str,int]],
+                    correct_by_tok: Dict[str, Dict[str,int]],
+                    outdir: Path, per_model_dir=False):
+    base = outdir / safe_tag(model) if per_model_dir else outdir
+    ensure_dir(base)
     order = tokens
+
+    # 공통 집합 계산
+    # ALL
+    _, M_all = mr_matrix(preds_by_tok, tok_order=order)
+    # CORRECT
+    S_corr = None
+    for t in order:
+        cur = {q for q,v in correct_by_tok[t].items() if v==1}
+        S_corr = cur if S_corr is None else (S_corr & cur)
+    _, M_corr = mr_matrix(preds_by_tok, mask_qids=S_corr, tok_order=order)
+    # WRONG
+    S_wrong = None
+    for t in order:
+        cur = {q for q,v in correct_by_tok[t].items() if v==0}
+        S_wrong = cur if S_wrong is None else (S_wrong & cur)
+    _, M_wrong = mr_matrix(preds_by_tok, mask_qids=S_wrong, tok_order=order)
 
     def draw(M, suffix):
         fig, ax = plt.subplots()
-        im = ax.imshow(M, vmin=0, vmax=1, cmap="YlGnBu", aspect="equal")
+        im = ax.imshow(M, vmin=0, vmax=1, cmap="viridis", aspect="equal")
         ax.set_xticks(range(len(order))); ax.set_yticks(range(len(order)))
         ax.set_xticklabels(order); ax.set_yticklabels(order)
         ax.set_xlabel("Token"); ax.set_ylabel("Token")
         ax.set_title(f"Matching Ratio — {model} / {dataset} ({suffix})")
+
+        # minor grid로 칸 경계 강조
         ax.set_xticks(np.arange(-.5, len(order), 1), minor=True)
         ax.set_yticks(np.arange(-.5, len(order), 1), minor=True)
         ax.grid(which="minor", color="white", linestyle="-", linewidth=1.2)
         ax.tick_params(which="minor", bottom=False, left=False)
+
+        # 퍼센트 주석
         for i in range(M.shape[0]):
             for j in range(M.shape[1]):
-                if not np.isnan(M[i,j]):
+                if np.isfinite(M[i,j]):
                     txt_color = "black" if M[i,j] > 0.6 else "white"
                     ax.text(j, i, f"{100*M[i,j]:.1f}%", ha="center", va="center",
                             color=txt_color, fontsize=11)
         fig.colorbar(im, ax=ax)
-        out_png = outdir / f"{safe_tag(model)}_{dataset}_mr_{suffix}.png"
+        out_png = base / f"{safe_tag(model)}_{dataset}_mr_{suffix}.png"
         fig.tight_layout(); fig.savefig(out_png, dpi=220); plt.close(fig)
+        print(f"[SAVE] {out_png}")
 
-    # ALL
-    _, M_all = mr_matrix(preds_by_tok, tok_order=order);    draw(M_all, "all")
-    # CORRECT-ONLY
-    both_correct = None
-    for t in order:
-        q_ok = {q for q,v in correct_by_tok[t].items() if v==1}
-        both_correct = q_ok if both_correct is None else (both_correct & q_ok)
-    _, M_c = mr_matrix(preds_by_tok, mask_qids=both_correct, tok_order=order);  draw(M_c, "correct")
-    # WRONG-ONLY
-    both_wrong = None
-    for t in order:
-        q_bad = {q for q,v in correct_by_tok[t].items() if v==0}
-        both_wrong = q_bad if both_wrong is None else (both_wrong & q_bad)
-    _, M_w = mr_matrix(preds_by_tok, mask_qids=both_wrong, tok_order=order);    draw(M_w, "wrong")
+    draw(M_all,  "all")
+    draw(M_corr, "correct")
+    draw(M_wrong,"wrong")
 
 # =========================
 #  메인
@@ -339,45 +406,66 @@ def parse_args():
     ap.add_argument("--root", required=True)
     ap.add_argument("--datasets", nargs="+", default=["arc","csqa"])
     ap.add_argument("--tokens",   nargs="+", default=["T0","T1","T2"])
-    ap.add_argument("--models",   nargs="*", default=None)
+    ap.add_argument("--models",   nargs="*", default=None,
+                    help="부분문자열 매칭. 비우면 자동 탐색.")
     ap.add_argument("--outdir",   default="viz_out/ece")
     ap.add_argument("--bins", type=int, default=20)
     ap.add_argument("--n_bins_ece", type=int, default=15)
+    ap.add_argument("--per_model_dir", action="store_true")
+    ap.add_argument("--xmin", type=float, default=0.0)
+    ap.add_argument("--xmax", type=float, default=1.0)
+    ap.add_argument("--skip_reliability", action="store_true")
+    ap.add_argument("--also_combined", action="store_true")
     return ap.parse_args()
 
 def main():
     args = parse_args()
     outdir = Path(args.outdir); ensure_dir(outdir)
+    xlim = (args.xmin, args.xmax)
 
     auto_models = collect_models(args.root, args.tokens, args.datasets)
     models = filter_models(auto_models, args.models)
     if not models:
-        print("[WARN] 모델 디렉토리 없음"); return
+        print("[WARN] 모델 디렉토리를 찾지 못했습니다."); return
 
+    # TSV 헤더
     tsv_lines = ["model\tdataset\ttoken\tn\tacc\tece\n"]
 
     for model in models:
         for ds in args.datasets:
-            conf_by_tok : Dict[str,np.ndarray] = {}
-            right_by_tok: Dict[str,np.ndarray] = {}
-            preds_by_tok   : Dict[str,Dict[str,int]] = {}
-            correct_by_tok : Dict[str,Dict[str,int]] = {}
+            conf_by_tok: Dict[str, np.ndarray] = {}
+            right_by_tok_arr: Dict[str, np.ndarray] = {}
+            preds_by_tok: Dict[str, Dict[str,int]] = {}
+            right_by_tok_qid: Dict[str, Dict[str,int]] = {}
 
             for t in args.tokens:
                 qid, pred, gold, conf, right = load_arrays_for_token(args.root, t, ds, model)
                 conf_by_tok[t]  = conf
-                right_by_tok[t] = right
+                right_by_tok_arr[t] = right
                 preds_by_tok[t]   = {q:int(pi) for q,pi in zip(qid, pred)}
-                correct_by_tok[t] = {q:int(r)  for q,r  in zip(qid, right)}
+                right_by_tok_qid[t] = {q:int(r) for q,r in zip(qid, right)}
 
                 if conf.size > 0:
                     ece_val = ece_from_conf(conf, right, n_bins=args.n_bins_ece)
                     tsv_lines.append(f"{model}\t{ds}\t{t}\t{len(conf)}\t{right.mean():.4f}\t{ece_val:.4f}\n")
 
-            plot_hist_separated(model, ds, conf_by_tok, right_by_tok, outdir, bins=args.bins)
-            plot_reliability(model, ds, conf_by_tok, right_by_tok, outdir, n_bins=args.n_bins_ece)
-            plot_mr(model, ds, args.tokens, preds_by_tok, correct_by_tok, outdir)
+            # 히스토그램(정답/오답 분리)
+            plot_hist_correct_wrong(model, ds, conf_by_tok, right_by_tok_arr, outdir,
+                                    bins=args.bins, per_model_dir=args.per_model_dir, xlim=xlim)
+            if args.also_combined:
+                plot_hist_combined_overlay(model, ds, conf_by_tok, right_by_tok_arr, outdir,
+                                           bins=args.bins, per_model_dir=args.per_model_dir, xlim=xlim)
 
+            # 리라이어빌리티
+            if not args.skip_reliability:
+                plot_reliability(model, ds, conf_by_tok, right_by_tok_arr, outdir,
+                                 n_bins=args.n_bins_ece, per_model_dir=args.per_model_dir)
+
+            # MR 히트맵(ALL/CORRECT/WRONG)
+            plot_mr_triplet(model, ds, args.tokens, preds_by_tok, right_by_tok_qid,
+                            outdir, per_model_dir=args.per_model_dir)
+
+            # 디버그: 완전 동일 경고
             if len(args.tokens) >= 2:
                 first = args.tokens[0]
                 for other in args.tokens[1:]:
@@ -385,8 +473,9 @@ def main():
                     if inter:
                         same = sum(1 for q in inter if preds_by_tok[first][q]==preds_by_tok[other][q])
                         if same == len(inter):
-                            print(f"[WARN] {model}/{ds}: {first} vs {other} 예측이 교집합 {len(inter)}개에서 100% 동일.")
+                            print(f"[WARN] {model}/{ds}: {first} vs {other} 교집합 {len(inter)}개에서 예측 100% 동일. (경로/파서 점검 권장)")
 
+    # TSV 저장
     tsv_path = outdir / "ece_summary.tsv"
     ensure_dir(tsv_path.parent)
     with tsv_path.open("w", encoding="utf-8") as w:
