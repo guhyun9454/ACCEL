@@ -11,7 +11,7 @@ ECE & Matching-Ratio visualizer (pretty palette, font tweaks OFF)
   - 히스토그램(정답/오답 완전 분리: 좌/우 패널, T0/T1/T2 고정색)
   - (옵션) 토큰별 오버레이 히스토그램
   - 리라이어빌리티 다이어그램(토큰별)
-  - 매칭비율 히트맵 3종: all / correct-only / wrong-only  (셀에 % 주석)
+  - 매칭비율 히트맵 3종: all / correct-only / wrong-only  (셀에 % 주석, 축=ABCD/abcd/1234)
   - ECE/정확도 요약 TSV
 
 예시:
@@ -107,7 +107,7 @@ def fold_probs(arr: np.ndarray, n_opts: int) -> np.ndarray:
 def locate_jsonl(root: str, token: str, dataset: str, model: str) -> Optional[Path]:
     base = Path(root) / token / dataset / model
     c1 = base / f"{dataset}.jsonl"
-    c2 = base / dataset / f"{dataset}.jsonl"
+       c2 = base / dataset / f"{dataset}.jsonl"
     if c1.is_file(): return c1
     if c2.is_file(): return c2
     return None
@@ -229,6 +229,13 @@ def ece_from_conf(conf: np.ndarray, correct: np.ndarray, n_bins: int = 15) -> fl
         e += (mask.sum()/N) * abs(correct[mask].mean() - conf[mask].mean())
     return float(e)
 
+def _hist(ax, vec, *, color, label, bins, xlim):
+    """막대 경계선(흰색)로 '잘라 보이게'"""
+    ax.hist(
+        vec, bins=bins, range=xlim, density=True, alpha=0.90,
+        color=color, label=label, edgecolor="white", linewidth=0.6
+    )
+
 def plot_hist_correct_wrong(model: str, dataset: str, conf_by_tok: Dict[str, np.ndarray],
                             right_by_tok: Dict[str, np.ndarray], outdir: Path,
                             bins=20, per_model_dir=False, xlim=(0.0,1.0)):
@@ -250,17 +257,15 @@ def plot_hist_correct_wrong(model: str, dataset: str, conf_by_tok: Dict[str, np.
     # 좌: 정답
     for t, vec in data_ok.items():
         if vec.size == 0: continue
-        axL.hist(vec, bins=bins, range=xlim, density=True, alpha=0.90,
-                 color=BASE_COL.get(t, "#808080"),
-                 label=f"{TOKEN_LABEL.get(t,t)} (n={len(vec)})")
+        _hist(axL, vec, color=BASE_COL.get(t, "#808080"),
+              label=f"{TOKEN_LABEL.get(t,t)} (n={len(vec)})", bins=bins, xlim=xlim)
     axL.set_title("Correct only"); axL.set_xlabel("Confidence (top-1 prob)"); axL.set_ylabel("Density"); axL.legend(fontsize=9)
 
     # 우: 오답
     for t, vec in data_bad.items():
         if vec.size == 0: continue
-        axR.hist(vec, bins=bins, range=xlim, density=True, alpha=0.90,
-                 color=lighten(BASE_COL.get(t, "#808080"), 0.55),
-                 label=f"{TOKEN_LABEL.get(t,t)} (n={len(vec)})")
+        _hist(axR, vec, color=lighten(BASE_COL.get(t, "#808080"), 0.55),
+              label=f"{TOKEN_LABEL.get(t,t)} (n={len(vec)})", bins=bins, xlim=xlim)
     axR.set_title("Wrong only"); axR.set_xlabel("Confidence (top-1 prob)"); axR.legend(fontsize=9)
 
     fig.suptitle(f"{model} — {dataset} | Confidence (correct vs wrong)", fontsize=14)
@@ -284,9 +289,9 @@ def plot_hist_combined_overlay(model: str, dataset: str, conf_by_tok: Dict[str, 
         base_col  = BASE_COL.get(t, "#808080")
         light_col = lighten(base_col, 0.55)
         plt.hist(bad, bins=bins, range=xlim, alpha=0.55, color=light_col, density=True,
-                 label=f"{TOKEN_LABEL.get(t,t)} wrong (n={len(bad)})")
+                 label=f"{TOKEN_LABEL.get(t,t)} wrong (n={len(bad)})", edgecolor="white", linewidth=0.6)
         plt.hist(ok,  bins=bins, range=xlim, alpha=0.85, color=base_col, density=True,
-                 label=f"{TOKEN_LABEL.get(t,t)} correct (n={len(ok)})")
+                 label=f"{TOKEN_LABEL.get(t,t)} correct (n={len(ok)})", edgecolor="white", linewidth=0.6)
     if any_data:
         plt.xlabel("Confidence (top-1 prob)"); plt.ylabel("Density")
         plt.title(f"{model} — {dataset} | Confidence distribution by token")
@@ -322,7 +327,7 @@ def plot_reliability(model: str, dataset: str, conf_by_tok: Dict[str, np.ndarray
     print(f"[SAVE] {out_png}")
 
 # =========================
-#  Matching Ratio (MR) — 네가 원하는 스타일
+#  Matching Ratio (MR)
 # =========================
 def mr_matrix(preds_by_tok: Dict[str, Dict[str,int]],
               mask_qids: Optional[set]=None,
@@ -344,6 +349,46 @@ def mr_matrix(preds_by_tok: Dict[str, Dict[str,int]],
                 M[i,j] = same / float(len(keys))
     return order, M
 
+def _plot_matrix(M: np.ndarray, order_tokens: List[str], title: str, out_png: Path,
+                 vmin=0.0, vmax=1.0, fmt="{:.1%}"):
+    """히트맵(축 레이블 = ABCD/abcd/1234), 경계선/그리드 제거"""
+    fig, ax = plt.subplots()
+
+    tick_labels = [TOKEN_LABEL.get(t, t) for t in order_tokens]
+    im = ax.imshow(
+        M, vmin=vmin, vmax=vmax, cmap="viridis", aspect="equal",
+        interpolation="none"  # 경계선/안티앨리어싱 seam 방지
+    )
+
+    ax.set_xticks(range(len(tick_labels))); ax.set_yticks(range(len(tick_labels)))
+    ax.set_xticklabels(tick_labels);       ax.set_yticklabels(tick_labels)
+    ax.set_xlabel("Token"); ax.set_ylabel("Token")
+    ax.set_title(title)
+
+    # 스파인/그리드 완전 제거
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    ax.grid(False)
+
+    # 셀 값(%) 표시
+    for i in range(M.shape[0]):
+        for j in range(M.shape[1]):
+            if np.isfinite(M[i, j]):
+                val = M[i, j]
+                ax.text(j, i, fmt.format(val),
+                        ha="center", va="center",
+                        color=("black" if val > 0.6 else "white"),
+                        fontsize=11)
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.outline.set_visible(False)
+
+    fig.tight_layout()
+    ensure_dir(out_png.parent)
+    fig.savefig(out_png, dpi=220)
+    plt.close(fig)
+    print(f"[SAVE] {out_png}")
+
 def plot_mr_triplet(model: str, dataset: str, tokens: List[str],
                     preds_by_tok: Dict[str, Dict[str,int]],
                     correct_by_tok: Dict[str, Dict[str,int]],
@@ -352,61 +397,29 @@ def plot_mr_triplet(model: str, dataset: str, tokens: List[str],
     ensure_dir(base)
     order = tokens
 
-    # 공통 집합 계산
     # ALL
     _, M_all = mr_matrix(preds_by_tok, tok_order=order)
-    # CORRECT
+
+    # CORRECT 교집합
     S_corr = None
     for t in order:
         cur = {q for q,v in correct_by_tok[t].items() if v==1}
         S_corr = cur if S_corr is None else (S_corr & cur)
     _, M_corr = mr_matrix(preds_by_tok, mask_qids=S_corr, tok_order=order)
-    # WRONG
+
+    # WRONG 교집합
     S_wrong = None
     for t in order:
         cur = {q for q,v in correct_by_tok[t].items() if v==0}
         S_wrong = cur if S_wrong is None else (S_wrong & cur)
     _, M_wrong = mr_matrix(preds_by_tok, mask_qids=S_wrong, tok_order=order)
 
-    def draw(M, suffix):
-        fig, ax = plt.subplots()
-
-        # grid/edge 없이 렌더링
-        im = ax.imshow(
-            M, vmin=0, vmax=1, cmap="viridis", aspect="equal",
-            interpolation="nearest"   # 안티앨리어싱 경계선 방지
-        )
-
-        # 축/라벨만 유지
-        ax.set_xticks(range(len(order))); ax.set_yticks(range(len(order)))
-        ax.set_xticklabels(order);       ax.set_yticklabels(order)
-        ax.set_xlabel("Token"); ax.set_ylabel("Token")
-        ax.set_title(f"Matching Ratio — {model} / {dataset} ({suffix})")
-
-        # ✅ 스파인과 그리드 전부 OFF
-        for sp in ax.spines.values():
-            sp.set_visible(False)
-        ax.grid(False)                    # 혹시 켜져 있으면 끄기
-        # (minor tick/그리드 설정 완전히 제거)
-
-        # 셀 안에 퍼센트 표기
-        for i in range(M.shape[0]):
-            for j in range(M.shape[1]):
-                if np.isfinite(M[i, j]):
-                    ax.text(j, i, f"{100*M[i, j]:.1f}%",
-                            ha="center", va="center",
-                            color=("black" if M[i, j] > 0.6 else "white"),
-                            fontsize=11)
-
-        fig.colorbar(im, ax=ax)
-        out_png = base / f"{safe_tag(model)}_{dataset}_mr_{suffix}.png"
-        fig.tight_layout(); fig.savefig(out_png, dpi=220); plt.close(fig)
-        print(f"[SAVE] {out_png}")
-
-
-    draw(M_all,  "all")
-    draw(M_corr, "correct")
-    draw(M_wrong,"wrong")
+    _plot_matrix(M_all,  order, f"Matching Ratio — {model} / {dataset} (all)",
+                 base / f"{safe_tag(model)}_{dataset}_mr_all.png")
+    _plot_matrix(M_corr, order, f"Matching Ratio — {model} / {dataset} (correct)",
+                 base / f"{safe_tag(model)}_{dataset}_mr_correct.png")
+    _plot_matrix(M_wrong,order, f"Matching Ratio — {model} / {dataset} (wrong)",
+                 base / f"{safe_tag(model)}_{dataset}_mr_wrong.png")
 
 # =========================
 #  메인
