@@ -370,29 +370,39 @@ def plot_mr_triplet(model: str, dataset: str, tokens: List[str],
 
     def draw(M, suffix):
         fig, ax = plt.subplots()
-        im = ax.imshow(M, vmin=0, vmax=1, cmap="viridis", aspect="equal")
+
+        # grid/edge 없이 렌더링
+        im = ax.imshow(
+            M, vmin=0, vmax=1, cmap="viridis", aspect="equal",
+            interpolation="nearest"   # 안티앨리어싱 경계선 방지
+        )
+
+        # 축/라벨만 유지
         ax.set_xticks(range(len(order))); ax.set_yticks(range(len(order)))
-        ax.set_xticklabels(order); ax.set_yticklabels(order)
+        ax.set_xticklabels(order);       ax.set_yticklabels(order)
         ax.set_xlabel("Token"); ax.set_ylabel("Token")
         ax.set_title(f"Matching Ratio — {model} / {dataset} ({suffix})")
 
-        # minor grid로 칸 경계 강조
-        ax.set_xticks(np.arange(-.5, len(order), 1), minor=True)
-        ax.set_yticks(np.arange(-.5, len(order), 1), minor=True)
-        ax.grid(which="minor", color="white", linestyle="-", linewidth=1.2)
-        ax.tick_params(which="minor", bottom=False, left=False)
+        # ✅ 스파인과 그리드 전부 OFF
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+        ax.grid(False)                    # 혹시 켜져 있으면 끄기
+        # (minor tick/그리드 설정 완전히 제거)
 
-        # 퍼센트 주석
+        # 셀 안에 퍼센트 표기
         for i in range(M.shape[0]):
             for j in range(M.shape[1]):
-                if np.isfinite(M[i,j]):
-                    txt_color = "black" if M[i,j] > 0.6 else "white"
-                    ax.text(j, i, f"{100*M[i,j]:.1f}%", ha="center", va="center",
-                            color=txt_color, fontsize=11)
+                if np.isfinite(M[i, j]):
+                    ax.text(j, i, f"{100*M[i, j]:.1f}%",
+                            ha="center", va="center",
+                            color=("black" if M[i, j] > 0.6 else "white"),
+                            fontsize=11)
+
         fig.colorbar(im, ax=ax)
         out_png = base / f"{safe_tag(model)}_{dataset}_mr_{suffix}.png"
         fig.tight_layout(); fig.savefig(out_png, dpi=220); plt.close(fig)
         print(f"[SAVE] {out_png}")
+
 
     draw(M_all,  "all")
     draw(M_corr, "correct")
