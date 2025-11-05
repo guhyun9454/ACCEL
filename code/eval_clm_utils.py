@@ -38,6 +38,8 @@ def parse_arguments():
                         help='eval tasks and settings')
     parser.add_argument("--option_id_set", type=str, default=None,
                         help='custom option ID string (e.g., ABCD / abcd / 1234). Length must match #options')
+    parser.add_argument("--print_prompt_example", action="store_true",
+                        help='Print exactly one example prompt (after applying option ids) and continue evaluation')
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]

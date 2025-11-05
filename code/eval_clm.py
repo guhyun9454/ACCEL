@@ -61,6 +61,7 @@ def main():
     )
     logging_cuda_memory_usage()
 
+    printed_example = False
     for eval_name in args.eval_names[::1]:
         (
             subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
@@ -74,6 +75,42 @@ def main():
             few_shot_samples = prepare_few_shot_samples(subject)
             eval_samples = prepare_eval_samples(subject)
             eval_fn = prepare_eval_fn(model, toker, few_shot_samples)
+
+            # Print one prompt example if requested
+            if getattr(args, 'print_prompt_example', False) and not printed_example and len(eval_samples) > 0:
+                try:
+                    first_input, _first_options, _first_ideal = eval_samples[0]
+                    # Build input_text similarly to eval fns for accuracy of display
+                    def build_input_text(pair):
+                        sys_msg, eval_sample = pair
+                        text = sys_msg + '\n\n'
+                        if args.num_few_shot > 0:
+                            for s in few_shot_samples[:args.num_few_shot]:
+                                text += s + '\n\n'
+                        text += eval_sample
+                        return text
+
+                    if isinstance(first_input, list) and len(first_input) > 0 and isinstance(first_input[0], list):
+                        # perm/cyclic case: list of [sys_msg, prompt] pairs; show the first
+                        input_text = build_input_text(first_input[0])
+                        # Match model-space behavior: add trailing space if tokenizer lacks space-prefix
+                        bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
+                        if not bpe_has_space_prefix:
+                            input_text += ' '
+                    else:
+                        # base/noid case
+                        input_text = build_input_text(first_input)
+                        if args.setting not in ['noid']:
+                            bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
+                            if not bpe_has_space_prefix:
+                                input_text += ' '
+
+                    logger.info(_purple("==== Prompt example (one only) ===="))
+                    logger.info("\n" + input_text)
+                    logger.info(_purple("==== End prompt example ===="))
+                    printed_example = True
+                except Exception as e:
+                    logger.warning(f"Failed to build prompt example: {e}")
 
             logger.info(_blue(f"Run started: {subject}"))
             results = eval_all_samples(
