@@ -394,7 +394,7 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
     ap.add_argument("--datasets", nargs="+", default=["arc","csqa"])
-    ap.add_argument("--tokens",   nargs="+", default=["T0","T1","T2"])
+    ap.add_argument("--tokens",   nargs="+", default=["T0_cyclic","T1_cyclic","T2_cyclic"])
     ap.add_argument("--models",   nargs="*", default=None)
     ap.add_argument("--outdir",   default="viz_out/ece")
     ap.add_argument("--bins", type=int, default=20)
