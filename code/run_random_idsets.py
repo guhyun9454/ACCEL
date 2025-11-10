@@ -14,8 +14,8 @@ def make_random_idset(n=4, allow_upper=True, allow_lower=True, allow_digits=Fals
     if allow_lower: pool += list(string.ascii_lowercase)
     if allow_digits: pool += list("12345")  # 4옵션 안전 범위
     choices = random.sample(pool, n)
-    label = "".join(choices)
-    arg = ",".join(choices)
+    label = "".join(choices)          # ← 콤마 없는 4글자 (eval_clm.py가 요구)
+    arg = ",".join(choices)           # 로그용/기록용
     return label, arg
 
 def main():
@@ -24,7 +24,8 @@ def main():
     ap.add_argument("--n_pairs", type=int, default=10)
     ap.add_argument("--base_set", type=str, default="ABCD")
     ap.add_argument("--eval_names", type=str, nargs="+", required=True)
-    ap.add_argument("--data_root", type=str, required=True)
+    # ▼ 필수 → 옵션으로 변경 (code/ 안에서 상대경로 쓰면 불필요)
+    ap.add_argument("--data_root", type=str, default=None)
     ap.add_argument("--save_path", type=str, default="out")
     ap.add_argument("--cache_dir", type=str, default="../models")
     ap.add_argument("--seed", type=int, default=0)
@@ -38,15 +39,13 @@ def main():
     # base_set 라벨/인자 정규화
     if "," in args.base_set:
         base_label = "".join([c for c in args.base_set if c.isalnum()])
-        base_arg = args.base_set
     else:
         base_label = "".join([c for c in args.base_set if c.isalnum()])
-        base_arg = ",".join(list(args.base_set))
 
     logs_dir = os.path.join(args.save_path, "logs")
     os.makedirs(logs_dir, exist_ok=True)
 
-    # ===== 핵심 변경: 라운드별 공통 랜덤 idset 목록을 먼저 뽑고 → 각 라운드에서 모든 모델을 동일 idset으로 실행 =====
+    # 라운드별 공통 랜덤 idset을 먼저 뽑음 → 각 라운드에서 모든 모델에 동일 적용
     idsets = []
     seen = set([base_label])  # base와 동일한 조합은 제외
     while len(idsets) < args.n_pairs:
@@ -58,13 +57,13 @@ def main():
         seen.add(mix_label)
         idsets.append((mix_label, mix_arg))
 
-    # 선택: 이번 실행에서 사용한 idset 기록
+    # 이번 실행에서 사용한 idset 기록(로그)
     run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
     with open(os.path.join(logs_dir, f"idsets_{run_tag}.txt"), "w", encoding="utf-8") as f:
         for i, (lab, arg) in enumerate(idsets):
             f.write(f"{i:04d}\tlabel={lab}\targ={arg}\n")
 
-    # 각 라운드 k의 idset을 4개(또는 N개) 모델 모두에 공통 적용
+    # 각 라운드 k의 idset을 모든 모델에 공통 적용
     for k, (mix_label, mix_arg) in enumerate(idsets):
         for model in args.models:
             model_name = sanitize_model_name(model)
@@ -75,11 +74,15 @@ def main():
                 "--model_name", model_name,
                 "--eval_names"
             ] + args.eval_names + [
-                "--option_id_sets", base_label, mix_arg,
+                # ★ 핵심: eval_clm.py는 '콤마 없는 4글자'를 받으므로 mix_label 사용
+                "--option_id_sets", base_label, mix_label,
                 "--save_path", args.save_path,
                 "--cache_dir", args.cache_dir,
-                "--data_root", args.data_root
             ]
+            # data_root가 있을 때만 전달 (없으면 code/ 기준 상대경로 사용)
+            if args.data_root:
+                cmd += ["--data_root", args.data_root]
+
             if args.print_prompt_example:
                 cmd.append("--print_prompt_example")
 
@@ -101,7 +104,7 @@ def main():
                     return
                 except Exception as e:
                     lf.write(f"\n[run_random_idsets] ERROR: {e}\n")
-            time.sleep(1.0)  # 로그 타임스탬프 충돌 방지용 간격
+            time.sleep(1.0)  # 로그 타임스탬프 충돌 방지
 
     print(f"[OK] Completed {args.n_pairs} random pairs (shared across {len(args.models)} models).")
 
