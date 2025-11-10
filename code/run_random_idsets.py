@@ -12,7 +12,7 @@ def make_random_idset(n=4, allow_upper=True, allow_lower=True, allow_digits=Fals
     pool = []
     if allow_upper: pool += list(string.ascii_uppercase)
     if allow_lower: pool += list(string.ascii_lowercase)
-    if allow_digits: pool += list("12345")  # keep 4 options safe
+    if allow_digits: pool += list("12345")  # 4옵션 안전 범위
     choices = random.sample(pool, n)
     label = "".join(choices)
     arg = ",".join(choices)
@@ -35,6 +35,7 @@ def main():
 
     random.seed(args.seed)
 
+    # base_set 라벨/인자 정규화
     if "," in args.base_set:
         base_label = "".join([c for c in args.base_set if c.isalnum()])
         base_arg = args.base_set
@@ -45,16 +46,28 @@ def main():
     logs_dir = os.path.join(args.save_path, "logs")
     os.makedirs(logs_dir, exist_ok=True)
 
-    for model in args.models:
-        model_name = sanitize_model_name(model)
-        for k in range(args.n_pairs):
-            mix_label, mix_arg = make_random_idset(
-                n=4, allow_upper=True, allow_lower=True, allow_digits=args.allow_digits
-            )
-            if mix_label == base_label:
-                mix_label, mix_arg = make_random_idset(
-                    n=4, allow_upper=True, allow_lower=True, allow_digits=args.allow_digits
-                )
+    # ===== 핵심 변경: 라운드별 공통 랜덤 idset 목록을 먼저 뽑고 → 각 라운드에서 모든 모델을 동일 idset으로 실행 =====
+    idsets = []
+    seen = set([base_label])  # base와 동일한 조합은 제외
+    while len(idsets) < args.n_pairs:
+        mix_label, mix_arg = make_random_idset(
+            n=4, allow_upper=True, allow_lower=True, allow_digits=args.allow_digits
+        )
+        if mix_label in seen:
+            continue
+        seen.add(mix_label)
+        idsets.append((mix_label, mix_arg))
+
+    # 선택: 이번 실행에서 사용한 idset 기록
+    run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    with open(os.path.join(logs_dir, f"idsets_{run_tag}.txt"), "w", encoding="utf-8") as f:
+        for i, (lab, arg) in enumerate(idsets):
+            f.write(f"{i:04d}\tlabel={lab}\targ={arg}\n")
+
+    # 각 라운드 k의 idset을 4개(또는 N개) 모델 모두에 공통 적용
+    for k, (mix_label, mix_arg) in enumerate(idsets):
+        for model in args.models:
+            model_name = sanitize_model_name(model)
 
             cmd = [
                 sys.executable, os.path.join(HERE, "eval_clm.py"),
@@ -75,7 +88,9 @@ def main():
                 env["CUDA_VISIBLE_DEVICES"] = args.cuda
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_path = os.path.join(logs_dir, f"{ts}_{model_name}_{base_label}_to_{mix_label}.log")
+            log_path = os.path.join(
+                logs_dir, f"{ts}_{k:04d}_{model_name}_{base_label}_to_{mix_label}.log"
+            )
             with open(log_path, "w", encoding="utf-8") as lf:
                 lf.write("# CMD: " + " ".join(shlex.quote(x) for x in cmd) + "\n")
                 lf.flush()
@@ -86,9 +101,9 @@ def main():
                     return
                 except Exception as e:
                     lf.write(f"\n[run_random_idsets] ERROR: {e}\n")
-            time.sleep(1.0)
+            time.sleep(1.0)  # 로그 타임스탬프 충돌 방지용 간격
 
-    print(f"[OK] Completed {args.n_pairs} random pairs for {len(args.models)} models.")
+    print(f"[OK] Completed {args.n_pairs} random pairs (shared across {len(args.models)} models).")
 
 if __name__ == "__main__":
     main()
