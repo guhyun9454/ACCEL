@@ -1,4 +1,3 @@
-
 import os
 import sys
 import json
@@ -38,6 +37,25 @@ def logging_cuda_memory_usage():
         logger.info("GPU {}: {:.2f} GB / {:.2f} GB".format(i, meminfo.used / 1024 ** 3, meminfo.total / 1024 ** 3))
 
 
+def _sanitize_idset_label(id_set):
+    """'A,B,C,D' -> 'ABCD', ['a','b','c','d'] -> 'abcd', keep only [a-zA-Z0-9]."""
+    if isinstance(id_set, (list, tuple)):
+        s = ",".join(map(str, id_set))
+    else:
+        s = str(id_set)
+    lab = "".join(ch for ch in s if ch.isalnum())
+    return lab or "IDSET"
+
+
+def _model_dir_name(args):
+    # 우선 args.model_name 사용, 없으면 pretrained path의 마지막 토큰을 정리
+    if hasattr(args, "model_name") and args.model_name:
+        base = args.model_name
+    else:
+        base = str(getattr(args, "pretrained_model_path", "model")).split("/")[-1]
+    return base.replace("/", "_").replace(" ", "_")
+
+
 def main():
     patch_open()
 
@@ -72,6 +90,9 @@ def main():
     # Comparative mode: run with two option ID sets and compute matching ratio and flip stats
     if getattr(args, 'option_id_sets', None) and len(args.option_id_sets) == 2:
         id_set_a, id_set_b = args.option_id_sets[0], args.option_id_sets[1]
+        label_a = _sanitize_idset_label(id_set_a)
+        label_b = _sanitize_idset_label(id_set_b)
+        model_dir = _model_dir_name(args)
 
         overall_total = 0
         overall_matches = 0
@@ -82,7 +103,7 @@ def main():
 
         def _read_results_file(file_path):
             try:
-                lines = [json.loads(line) for line in open(file_path)]
+                lines = [json.loads(line) for line in open(file_path, encoding="utf-8")]
                 lines = [e for e in lines if e.get('type') == 'result']
                 lines = sorted(lines, key=lambda x: int(x['data']['idx']))
                 return lines
@@ -95,8 +116,18 @@ def main():
             if setting in ['perm', 'cyclic']:
                 logger.info(_orange(f"Skipping compare for setting '{setting}' (not supported)."))
                 continue
-            args_a = SimpleNamespace(pretrained_model_path=args.pretrained_model_path, model_name=args.model_name, option_id_set=id_set_a)
-            args_b = SimpleNamespace(pretrained_model_path=args.pretrained_model_path, model_name=args.model_name, option_id_set=id_set_b)
+
+            # idset 별로 완전히 분리된 args (캐시/경로 충돌 방지)
+            args_a = SimpleNamespace(
+                pretrained_model_path=args.pretrained_model_path,
+                model_name=args.model_name,
+                option_id_set=id_set_a
+            )
+            args_b = SimpleNamespace(
+                pretrained_model_path=args.pretrained_model_path,
+                model_name=args.model_name,
+                option_id_set=id_set_b
+            )
 
             (subjects_a, prepare_fewshot_a, prepare_eval_samples_a, prepare_eval_fn_a) = prepare_eval(args_a, eval_name)
             (subjects_b, prepare_fewshot_b, prepare_eval_samples_b, prepare_eval_fn_b) = prepare_eval(args_b, eval_name)
@@ -141,9 +172,20 @@ def main():
                     except Exception as e:
                         logger.warning(f"Failed to build prompt example: {e}")
 
-                # Try cached results first
-                path_a = f'{args_a.save_path}/{subject}.jsonl'
-                path_b = f'{args_b.save_path}/{subject}.jsonl'
+                # ====== 경로 구성: <save_path>/<model>/idset_*  &  <save_path>/<model>/compare/ABCD_to_abcd ======
+                root_dir = os.path.join(args.save_path, model_dir)
+                dir_a = os.path.join(root_dir, f'idset_{label_a}')
+                dir_b = os.path.join(root_dir, f'idset_{label_b}')
+                os.makedirs(dir_a, exist_ok=True)
+                os.makedirs(dir_b, exist_ok=True)
+                path_a = f'{dir_a}/{subject}.jsonl'
+                path_b = f'{dir_b}/{subject}.jsonl'
+
+                cmp_dir = os.path.join(root_dir, 'compare', f'{label_a}_to_{label_b}')
+                os.makedirs(cmp_dir, exist_ok=True)
+                cmp_path = f'{cmp_dir}/{subject}.jsonl'
+
+                # Try cached results first (idset별 캐시 완전 분리)
                 results_a = _read_results_file(path_a)
                 results_b = _read_results_file(path_b)
 
@@ -182,6 +224,7 @@ def main():
                 i2c = 0
                 both_correct = 0
                 both_incorrect = 0
+                cmp_lines = []
 
                 for idx in common:
                     ra = map_a[idx]['data']
@@ -193,15 +236,35 @@ def main():
                         matches += 1
                     ca = bool(ra['correct'])
                     cb = bool(rb['correct'])
+                    flip = "match"
                     if ca and not cb:
                         c2i += 1
+                        flip = "c2i"
                     elif (not ca) and cb:
                         i2c += 1
+                        flip = "i2c"
                     elif ca and cb:
                         both_correct += 1
+                        flip = "both_correct"
                     elif (not ca) and (not cb):
                         both_incorrect += 1
+                        flip = "both_incorrect"
                     total += 1
+
+                    # paired 레코드 기록 (ABCD -> abcd)
+                    cmp_lines.append({
+                        "type": "pair_result",
+                        "data": {
+                            "idx": int(idx),
+                            "id_from": label_a,
+                            "id_to": label_b,
+                            "pred_from": pa,
+                            "pred_to": pb,
+                            "correct_from": ca,
+                            "correct_to": cb,
+                            "flip": flip
+                        }
+                    })
 
                 overall_total += total
                 overall_matches += matches
@@ -217,21 +280,66 @@ def main():
                 logger.info(f"accuracy_A({id_set_a})={acc_a:.4f}, accuracy_B({id_set_b})={acc_b:.4f}")
                 logger.info(f"flip correct->incorrect={c2i}, incorrect->correct={i2c}, both_correct={both_correct}, both_incorrect={both_incorrect}")
 
+                # 비교 파일 저장 (항상 최신으로 덮어쓰기)
+                try:
+                    with open(cmp_path, "w", encoding="utf-8") as wf:
+                        for rec in cmp_lines:
+                            wf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                        wf.write(json.dumps({
+                            "type": "pair_metric",
+                            "data": {
+                                "subject": subject,
+                                "matching_ratio": mr,
+                                "matches": matches,
+                                "total": total,
+                                "c2i": c2i,
+                                "i2c": i2c,
+                                "both_correct": both_correct,
+                                "both_incorrect": both_incorrect,
+                                "acc_from": acc_a,
+                                "acc_to": acc_b
+                            }
+                        }, ensure_ascii=False) + "\n")
+                    logger.info(_blue(f"Compare saved: {cmp_path}"))
+                except Exception as e:
+                    logger.warning(f"Failed to save compare file: {e}")
+
                 gc.collect()
                 torch.cuda.empty_cache()
 
-        # Overall summary
+        # Overall summary (idset 쌍 전체)
         if overall_total > 0:
             overall_mr = overall_matches / overall_total
             logger.info(_purple("==== Overall compare summary ====\n" +
                                 f"matching_ratio={overall_mr:.4f} (matches/total={overall_matches}/{overall_total})\n" +
                                 f"correct->incorrect={overall_c2i}, incorrect->correct={overall_i2c}, both_correct={overall_both_correct}, both_incorrect={overall_both_incorrect}"))
+            # 저장: <save_path>/<model>/compare/ABCD_to_abcd/__overall.json
+            try:
+                root_dir = os.path.join(args.save_path, _model_dir_name(args))
+                cmp_dir = os.path.join(root_dir, 'compare', f'{label_a}_to_{label_b}')
+                os.makedirs(cmp_dir, exist_ok=True)
+                overall_path = os.path.join(cmp_dir, "__overall.json")
+                with open(overall_path, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "id_from": label_a,
+                        "id_to": label_b,
+                        "matching_ratio": overall_mr,
+                        "matches": overall_matches,
+                        "total": overall_total,
+                        "c2i": overall_c2i,
+                        "i2c": overall_i2c,
+                        "both_correct": overall_both_correct,
+                        "both_incorrect": overall_both_incorrect
+                    }, f, indent=2, ensure_ascii=False)
+                logger.info(_blue(f"Overall compare saved: {overall_path}"))
+            except Exception as e:
+                logger.warning(f"Failed to save overall compare: {e}")
         return
 
     # Single-run mode (original)
     for eval_name in args.eval_names[::1]:
         (
-            subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
+            subjects, prepare_fewshot_samples, prepare_eval_samples, prepare_eval_fn
         ) = prepare_eval(args, eval_name)
         for subject in subjects[::1]:
             if os.path.exists(f'{args.save_path}/{subject}.jsonl'):
@@ -239,7 +347,7 @@ def main():
                 continue
 
             logger.info(_blue(f"Preparing: {subject}"))
-            few_shot_samples = prepare_few_shot_samples(subject)
+            few_shot_samples = prepare_fewshot_samples(subject)
             eval_samples = prepare_eval_samples(subject)
             eval_fn = prepare_eval_fn(model, toker, few_shot_samples)
 
@@ -306,4 +414,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
