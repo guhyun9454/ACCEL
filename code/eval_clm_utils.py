@@ -42,6 +42,8 @@ def parse_arguments():
                         help='Print exactly one example prompt (after applying option ids) and continue evaluation')
     parser.add_argument("--cache_dir", type=str, default=None,
                         help='Hugging Face cache directory for model/tokenizer downloads')
+    parser.add_argument("--data_root", type=str, default="data",
+                    help="Root directory that contains data_<task> folders")
     parser.add_argument("--option_id_sets", type=str, nargs='+', default=None,
                         help='Provide exactly two option ID sets to compare (e.g., "ABCD abcd")')
     parser.add_argument("--save_path", type=str, default="out",
