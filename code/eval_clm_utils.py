@@ -44,6 +44,10 @@ def parse_arguments():
                         help='Hugging Face cache directory for model/tokenizer downloads')
     parser.add_argument("--option_id_sets", type=str, nargs='+', default=None,
                         help='Provide exactly two option ID sets to compare (e.g., "ABCD abcd")')
+    parser.add_argument("--save_path", type=str, default="out",
+                    help="Base directory to save per-subject results and compare files.")
+    parser.add_argument("--model_name", type=str, default=None,
+                    help="Short name used for the output folder; falls back to the last token of pretrained_model_path.")
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]
