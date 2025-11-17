@@ -173,10 +173,12 @@ def main():
                     logger.info(_blue(f"Using cached results (A): {path_a}"))
                 else:
                     logger.info(_blue(f"Run started (A): {subject} [{id_set_a}]"))
+                    max_samples = 100 if getattr(args, 'test', False) else None
                     results_a = eval_all_samples(
                         eval_fn_a, eval_samples_a,
                         name=f'{args_a.task},{args_a.num_few_shot},{args_a.setting},{subject},{id_set_a}',
                         threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
+                        max_num_samples=max_samples,
                     )
                     save_results(path_a, results_a, metrics=None)
                     logger.info(f"Results saved (A): {subject}")
@@ -185,10 +187,12 @@ def main():
                     logger.info(_blue(f"Using cached results (B): {path_b}"))
                 else:
                     logger.info(_blue(f"Run started (B): {subject} [{id_set_b}]"))
+                    max_samples = 100 if getattr(args, 'test', False) else None
                     results_b = eval_all_samples(
                         eval_fn_b, eval_samples_b,
                         name=f'{args_b.task},{args_b.num_few_shot},{args_b.setting},{subject},{id_set_b}',
                         threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
+                        max_num_samples=max_samples,
                     )
                     save_results(path_b, results_b, metrics=None)
                     logger.info(f"Results saved (B): {subject}")
@@ -302,10 +306,12 @@ def main():
                     logger.warning(f"Failed to build prompt example: {e}")
 
             logger.info(_blue(f"Run started: {subject}"))
+            max_samples = 100 if getattr(args, 'test', False) else None
             results = eval_all_samples(
                 eval_fn, eval_samples,
                 name=f'{args.task},{args.num_few_shot},{args.setting},{subject}',
                 threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
+                max_num_samples=max_samples,
             )
             gc.collect()
             torch.cuda.empty_cache()

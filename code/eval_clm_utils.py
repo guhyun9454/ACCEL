@@ -45,6 +45,8 @@ def parse_arguments():
                         help='Hugging Face cache directory for model/tokenizer downloads')
     parser.add_argument("--option_id_sets", type=str, nargs='+', default=None,
                         help='Provide exactly two option ID sets to compare (e.g., "ABCD abcd")')
+    parser.add_argument("--test", action="store_true",
+                        help='Test mode: evaluate only 100 samples instead of all samples')
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]
