@@ -15,6 +15,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 from utils import (
     _norm,
@@ -62,7 +63,7 @@ def parse_arguments():
         if setting is not None and not (
             setting in [
                 'noid',
-                'perm', 'cyclic',
+                'perm', 'cyclic', 'full',
                 'shuffle_both',
             ] or (setting.startswith('move') and setting[-1] in ['a', 'b', 'c', 'd'])
         ):
@@ -158,7 +159,7 @@ def prepare_eval(args, eval_name):
         if setting is not None and setting.startswith('move'):
             df = df.apply(lambda x: move_answer(x, moved_answer), axis=1)
 
-        if setting in ['perm']:
+        if setting in ['perm', 'full']:
             inputs = df.apply(lambda x: [
                 [
                     sys_msg.format(subject.replace('_', ' ')),
@@ -184,7 +185,7 @@ def prepare_eval(args, eval_name):
     # prepare_eval_fn
     if setting in ['noid']:
         prepare_eval_fn = partial(prepare_eval_fn_noid, num_few_shot=num_few_shot, option_ids=option_ids)
-    elif setting in ['perm', 'cyclic']:
+    elif setting in ['perm', 'cyclic', 'full']:
         prepare_eval_fn = partial(prepare_eval_fn_perm, num_few_shot=num_few_shot, option_ids=option_ids)
     else:
         prepare_eval_fn = partial(prepare_eval_fn_base, num_few_shot=num_few_shot, option_ids=option_ids)
@@ -302,7 +303,10 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
 
     def eval_fn(sample, rng: random.Random):
         idx, (probing_inputs, options, ideal) = sample
-        assert len(probing_inputs) in [4, 24, 5]
+        # Allow either cyclic count (= #options) or full permutation count (= factorial(#options))
+        num_options = len(option_ids)
+        expected_counts = {num_options, math.factorial(num_options)}
+        assert len(probing_inputs) in expected_counts
 
         input_texts = []
         for probing_input in probing_inputs:

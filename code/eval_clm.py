@@ -20,6 +20,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import BitsAndBytesConfig
 import numpy as np
 from types import SimpleNamespace
+from itertools import permutations
 
 import gc
 
@@ -300,6 +301,90 @@ def main():
 
             save_results(f'{args.save_path}/{subject}.jsonl', results, metrics)
             logger.info(f"Results saved: {subject}")
+
+            # Derive cyclic and default (base) outputs automatically from FULL permutation runs
+            if args.setting == 'full':
+                try:
+                    # Determine option ids (respect custom option_id_set)
+                    if getattr(args, 'option_id_set', None):
+                        option_ids = list(args.option_id_set)
+                    else:
+                        # Fallback to infer from first result options length
+                        k = len(results[0]['data']['options']) if len(results) > 0 and results[0]['type'] == 'result' else 4
+                        option_ids = list('ABCDE' if k == 5 else 'ABCD')
+                    k = len(option_ids)
+
+                    # Build permutation index lookup (identity and cyclic rotations)
+                    perm_list = list(sorted(permutations(range(k))))
+                    identity_idx = perm_list.index(tuple(range(k)))
+                    cyclic_indices = [perm_list.index(tuple((i + s) % k for i in range(k))) for s in range(k)]
+
+                    # Build derived results
+                    cyclic_results = []
+                    base_results = []
+                    for r in results:
+                        if r.get('type') != 'result':
+                            continue
+                        data = r['data']
+                        probs_seq = data['probs']  # list of length (#perms) each with length k
+                        if not isinstance(probs_seq, list) or len(probs_seq) <= identity_idx:
+                            continue
+
+                        # Cyclic subset
+                        cyclic_probs = [probs_seq[idx] for idx in cyclic_indices]
+                        cyclic_results.append({
+                            'type': 'result',
+                            'data': {
+                                'idx': data['idx'],
+                                'prompt': data.get('prompt'),
+                                'options': data['options'],
+                                'probs': cyclic_probs,
+                                'ideal': data['ideal'],
+                            },
+                        })
+
+                        # Default (identity) subset -> base-style result
+                        base_probs = probs_seq[identity_idx]
+                        sampled = option_ids[int(np.argmax(np.array(base_probs)))]
+                        correct = (sampled == data['ideal'])
+                        base_results.append({
+                            'type': 'result',
+                            'data': {
+                                'idx': data['idx'],
+                                'prompt': data.get('prompt'),
+                                'options': data['options'],
+                                'probs': base_probs,
+                                'sampled': sampled,
+                                'ideal': data['ideal'],
+                                'correct': correct,
+                            },
+                        })
+
+                    # Save cyclic-derived results
+                    cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
+                    if getattr(args, 'option_id_set', None):
+                        cyclic_save_path += f'_id-{args.option_id_set}'
+                    os.makedirs(cyclic_save_path, exist_ok=True)
+                    save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results, metrics=None)
+                    logger.info(_orange(f"Derived and saved cyclic results: {subject}"))
+
+                    # Save base-derived results with metrics
+                    base_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}'
+                    if getattr(args, 'option_id_set', None):
+                        base_save_path += f'_id-{args.option_id_set}'
+                    os.makedirs(base_save_path, exist_ok=True)
+                    base_metrics = None
+                    if len(base_results) > 0:
+                        base_metrics = {'type': 'metric', 'data': {}}
+                        base_metrics['data']['accuracy'] = get_accuracy(base_results)
+                        base_metrics['data']['boostrap_std'] = get_bootstrap_accuracy_std(base_results)
+                        logger.info("Derived base report:")
+                        for key, value in base_metrics['data'].items():
+                            logger.info(f"{key}: {value}")
+                    save_results(f'{base_save_path}/{subject}.jsonl', base_results, base_metrics)
+                    logger.info(_orange(f"Derived and saved base results: {subject}"))
+                except Exception as e:
+                    logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
 
             logging_cuda_memory_usage()
 
