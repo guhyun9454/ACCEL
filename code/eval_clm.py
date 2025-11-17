@@ -21,6 +21,8 @@ from transformers import BitsAndBytesConfig
 import numpy as np
 from types import SimpleNamespace
 from itertools import permutations
+import matplotlib.pyplot as plt
+import math
 
 import gc
 
@@ -71,6 +73,23 @@ def main():
     args = parse_arguments()
     if len(args.eval_names) == 0:
         exit()
+
+    # Optional: W&B init
+    wandb_run = None
+    if getattr(args, 'wandb', False):
+        try:
+            import wandb
+            project = args.wandb_project 
+            run_name = args.wandb_run_name or f"{args.model_name}-{args.eval_names[0]}"
+            wandb_run = wandb.init(entity = "capde", project=project, name=run_name, config={
+                "pretrained_model_path": args.pretrained_model_path,
+                "model_name": args.model_name,
+                "eval_names": args.eval_names,
+                "option_id_set": args.option_id_set,
+            })
+        except Exception as e:
+            logger.warning(f"W&B init failed: {e}")
+            wandb_run = None
 
     toker = AutoTokenizer.from_pretrained(
         args.pretrained_model_path,
@@ -492,7 +511,7 @@ def main():
                         # Cost per sample: beta*C + (1-beta)*1 (C = k or k!)
                         C_cyc = float(k)
                         # factorial for k
-                        C_full = float(np.math.factorial(k))
+                        C_full = float(math.factorial(k))
                         curve_cyc = []
                         curve_full = []
                         # Deterministic subset: use first n indices (results already sorted by idx)
@@ -536,11 +555,74 @@ def main():
                             },
                         }
                         save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', [curve_obj], metrics=None)
+
+                        # W&B logging: one sample's prompts + per-permutation probs, and the beta curve figure
+                        if wandb_run is not None:
+                            try:
+                                import wandb
+
+                                # Choose sample to log
+                                target_idx = args.wandb_sample_idx
+                                chosen = None
+                                for r in results:
+                                    if r.get('type') != 'result':
+                                        continue
+                                    if target_idx is None or int(r['data']['idx']) == int(target_idx):
+                                        chosen = r['data']
+                                        break
+                                if chosen is None and len(results) > 0 and results[0].get('type') == 'result':
+                                    chosen = results[0]['data']
+
+                                # Log prompts/probs table
+                                if chosen is not None and 'prompts' in chosen and 'probs' in chosen:
+                                    prompts_list = chosen['prompts']
+                                    probs_seq = chosen['probs']
+                                    cols = ['perm_idx', 'ideal', 'prompt'] + [f'prob_{oid}' for oid in option_ids]
+                                    rows = []
+                                    for pi, (ptext, pvec) in enumerate(zip(prompts_list, probs_seq)):
+                                        rows.append([pi, chosen['ideal'], ptext] + [float(x) for x in pvec])
+                                    table = wandb.Table(columns=cols, data=rows)
+                                    wandb.log({f"{subject}/sample_prompts": table})
+
+                                # Build and log beta curve figure
+                                fig = plt.figure(figsize=(7.5, 5.0), dpi=160)
+                                cyc_costs = [c for c, _ in curve_cyc]
+                                cyc_accs = [a for _, a in curve_cyc]
+                                full_costs = [c for c, _ in curve_full]
+                                full_accs = [a for _, a in curve_full]
+                                plt.plot(cyc_costs, cyc_accs, marker='o', label='Cyclic (k rotations)')
+                                plt.plot(full_costs, full_accs, marker='o', label='Full (k! permutations)')
+                                plt.scatter([1.0], [summary_base], marker='*', s=180, c='black', label='Default')
+                                plt.xlabel("Computational Cost (× of default)")
+                                plt.ylabel("Accuracy")
+                                plt.title(f"Accuracy vs. Cost — {subject}")
+                                plt.grid(True, linestyle='--', alpha=0.4)
+                                plt.legend()
+                                plt.tight_layout()
+                                wandb.log({f"{subject}/beta_curve": wandb.Image(fig)})
+                                plt.close(fig)
+
+                                # Log scalar metrics as well
+                                payload = {
+                                    f"{subject}/acc_full": summary_full,
+                                    f"{subject}/acc_cyclic": summary_cyc,
+                                    f"{subject}/acc_default": summary_base,
+                                }
+                                wandb.log(payload)
+                            except Exception as e:
+                                logger.warning(f"W&B logging failed: {e}")
                 except Exception as e:
                     logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
 
             logging_cuda_memory_usage()
 
+    # Finalize W&B
+    try:
+        if wandb_run is not None:
+            import wandb
+            wandb.finish()
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     main()

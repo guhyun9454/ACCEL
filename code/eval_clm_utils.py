@@ -47,6 +47,15 @@ def parse_arguments():
                         help='Provide exactly two option ID sets to compare (e.g., "ABCD abcd")')
     parser.add_argument("--test", action="store_true",
                         help='Test mode: evaluate only 100 samples instead of all samples')
+    # W&B logging flags
+    parser.add_argument("--wandb", action="store_true",
+                        help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_project", type=str, default=None,
+                        help="W&B project name")
+    parser.add_argument("--wandb_run_name", type=str, default=None,
+                        help="W&B run name")
+    parser.add_argument("--wandb_sample_idx", type=int, default=None,
+                        help="Sample idx to log detailed prompts/probs; default: first sample")
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]
@@ -344,6 +353,7 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
             'data': {
                 'idx': idx,
                 'prompt': input_texts[0],
+                'prompts': input_texts,
                 'options': options,
                 'probs': all_probs,
                 'ideal': ideal,
