@@ -56,6 +56,9 @@ def parse_arguments():
                         help="W&B run name")
     parser.add_argument("--wandb_sample_idx", type=int, default=None,
                         help="Sample idx to log detailed prompts/probs; default: first sample")
+    # Ours method hyperparameters
+    parser.add_argument("--ours_low_conf_percent", type=float, default=10.0,
+                        help="Bottom percentile (e.g., 10.0) of confidence (from beta subset) to trigger cascading ensemble")
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]

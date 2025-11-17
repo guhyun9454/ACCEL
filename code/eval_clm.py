@@ -534,6 +534,87 @@ def main():
                         logger.info(_purple(f"[{subject}] Beta curve (Cyclic): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_cyc])))
                         logger.info(_purple(f"[{subject}] Beta curve (Full): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_full])))
 
+                        # Ours (dynamic cascading ensemble)
+                        curve_ours = []
+                        try:
+                            # Build deterministic permutation order (identity first)
+                            order_indices = list(range(len(perm_list)))
+                            if identity_idx != 0:
+                                order_indices = [identity_idx] + [i for i in order_indices if i != identity_idx]
+                            # Precompute per-sample probs and identity probs
+                            per_sample_probs = []
+                            base_probs_list = []
+                            ideals = []
+                            for r in results:
+                                if r.get('type') != 'result':
+                                    continue
+                                data = r['data']
+                                probs_seq = np.asarray(data['probs'], dtype=np.float64)
+                                per_sample_probs.append(probs_seq)
+                                base_probs_list.append(probs_seq[identity_idx])
+                                ideals.append(data['ideal'])
+
+                            def _conf_gap(pvec: np.ndarray) -> float:
+                                vals = np.sort(pvec)[::-1]
+                                if vals.shape[0] < 2:
+                                    return 0.0
+                                return float(vals[0] - vals[1])
+
+                            default_conf = np.array([_conf_gap(bp) for bp in base_probs_list], dtype=np.float64)
+                            perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
+
+                            for beta in betas:
+                                n = int(N * beta + 1e-9)
+                                if n > 0:
+                                    thresh = float(np.quantile(default_conf[:n], perc))
+                                else:
+                                    thresh = float(np.quantile(default_conf, perc))
+
+                                total_cost = 0.0
+                                corrects = 0
+
+                                # beta subset: use default only
+                                for i in range(0, n):
+                                    bp = base_probs_list[i]
+                                    pred_letter = option_ids[int(np.argmax(bp))]
+                                    if pred_letter == ideals[i]:
+                                        corrects += 1
+                                    total_cost += 1.0
+
+                                # (1-beta) subset: cascade if low confidence
+                                for i in range(n, N):
+                                    probs_seq = per_sample_probs[i]
+                                    selected = [order_indices[0]]
+                                    agg = _aggregate_probs_over_permutations(
+                                        [probs_seq[j].tolist() for j in selected],
+                                        [perm_list[j] for j in selected],
+                                        k,
+                                    )
+                                    current_conf = _conf_gap(agg)
+                                    t = 1
+                                    while (current_conf < thresh) and (t < len(order_indices)):
+                                        selected.append(order_indices[t])
+                                        agg = _aggregate_probs_over_permutations(
+                                            [probs_seq[j].tolist() for j in selected],
+                                            [perm_list[j] for j in selected],
+                                            k,
+                                        )
+                                        current_conf = _conf_gap(agg)
+                                        t += 1
+                                    pred_letter = option_ids[int(np.argmax(agg))]
+                                    if pred_letter == ideals[i]:
+                                        corrects += 1
+                                    total_cost += float(len(selected))
+
+                                acc_ours = (corrects / float(N)) if N > 0 else float('nan')
+                                cost_ours = (total_cost / float(N)) if N > 0 else float('nan')
+                                curve_ours.append((cost_ours, acc_ours))
+
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours])))
+                        except Exception as e:
+                            logger.warning(f"Failed to compute Ours curve: {e}")
+                            curve_ours = []
+
                         # Save curve data
                         curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
                         if getattr(args, 'option_id_set', None):
@@ -553,6 +634,11 @@ def main():
                                 'accuracies': [a for _, a in curve_full],
                             },
                         }
+                        if len(curve_ours) == len(betas):
+                            curve_obj['ours'] = {
+                                'costs': [c for c, _ in curve_ours],
+                                'accuracies': [a for _, a in curve_ours],
+                            }
                         save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', [curve_obj], metrics=None)
 
                         # W&B logging: one sample's prompts + per-permutation probs, and the beta curve figure
@@ -591,6 +677,10 @@ def main():
                                 full_accs = [a for _, a in curve_full]
                                 plt.plot(cyc_costs, cyc_accs, marker='o', label='Cyclic (k rotations)')
                                 plt.plot(full_costs, full_accs, marker='o', label='Full (k! permutations)')
+                                if len(curve_ours) == len(betas):
+                                    ours_costs = [c for c, _ in curve_ours]
+                                    ours_accs = [a for _, a in curve_ours]
+                                    plt.plot(ours_costs, ours_accs, marker='o', label='Ours (cascading)')
                                 plt.scatter([1.0], [summary_base], marker='*', s=180, c='black', label='Default')
                                 plt.xlabel("Computational Cost (× of default)")
                                 plt.ylabel("Accuracy")
