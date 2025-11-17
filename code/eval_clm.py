@@ -465,6 +465,12 @@ def main():
                     if full_total > 0:
                         full_acc = full_corrects / full_total
                         logger.info(_purple(f"[{subject}] Full permutation ensemble accuracy: {full_acc:.4f}"))
+
+                    # Unified 3-accuracy summary (Full, Cyclic, Default)
+                    summary_full = full_acc if full_total > 0 else float('nan')
+                    summary_cyc = cyclic_acc if cyclic_total > 0 else float('nan')
+                    summary_base = base_metrics['data']['accuracy'] if (base_metrics is not None and 'accuracy' in base_metrics['data']) else float('nan')
+                    logger.info(_purple(f"[{subject}] Accuracies — Full: {summary_full:.4f}, Cyclic: {summary_cyc:.4f}, Default: {summary_base:.4f}"))
                 except Exception as e:
                     logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
 
