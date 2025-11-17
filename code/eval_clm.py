@@ -585,6 +585,8 @@ def main():
                                     wandb.log({f"{subject}/sample_prompts": table})
 
                                 # Build and log beta curve figure
+                                import io
+                                from PIL import Image
                                 fig = plt.figure(figsize=(7.5, 5.0), dpi=160)
                                 cyc_costs = [c for c, _ in curve_cyc]
                                 cyc_accs = [a for _, a in curve_cyc]
@@ -599,7 +601,14 @@ def main():
                                 plt.grid(True, linestyle='--', alpha=0.4)
                                 plt.legend()
                                 plt.tight_layout()
-                                wandb.log({f"{subject}/beta_curve": wandb.Image(fig)})
+                                
+                                # Save to BytesIO buffer to avoid file I/O conflicts with patch_open()
+                                buf = io.BytesIO()
+                                fig.savefig(buf, format='png', dpi=160, bbox_inches='tight')
+                                buf.seek(0)
+                                img = Image.open(buf)
+                                wandb.log({f"{subject}/beta_curve": wandb.Image(img)})
+                                buf.close()
                                 plt.close(fig)
 
                                 # Log scalar metrics as well
