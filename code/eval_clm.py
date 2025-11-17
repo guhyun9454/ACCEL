@@ -387,6 +387,10 @@ def main():
                     full_corrects = 0
                     cyclic_total = 0
                     cyclic_corrects = 0
+                    # Per-sample correctness lists for beta curves
+                    base_correct_list = []
+                    cyclic_correct_list = []
+                    full_correct_list = []
                     for r in results:
                         if r.get('type') != 'result':
                             continue
@@ -410,6 +414,7 @@ def main():
                         # Cyclic ensemble vote for this sample
                         agg_cyc = _aggregate_probs_over_permutations(cyclic_probs, [tuple((i + s) % k for i in range(k)) for s in range(k)], k)
                         pred_cyc = option_ids[int(np.argmax(agg_cyc))]
+                        cyclic_correct_list.append(pred_cyc == data['ideal'])
                         if pred_cyc == data['ideal']:
                             cyclic_corrects += 1
                         cyclic_total += 1
@@ -418,6 +423,7 @@ def main():
                         base_probs = probs_seq[identity_idx]
                         sampled = option_ids[int(np.argmax(np.array(base_probs)))]
                         correct = (sampled == data['ideal'])
+                        base_correct_list.append(correct)
                         base_results.append({
                             'type': 'result',
                             'data': {
@@ -434,6 +440,7 @@ def main():
                         # Full ensemble vote for this sample
                         agg_full = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
                         pred_full = option_ids[int(np.argmax(agg_full))]
+                        full_correct_list.append(pred_full == data['ideal'])
                         if pred_full == data['ideal']:
                             full_corrects += 1
                         full_total += 1
@@ -477,6 +484,58 @@ def main():
                     summary_cyc = cyclic_acc if cyclic_total > 0 else float('nan')
                     summary_base = base_metrics['data']['accuracy'] if (base_metrics is not None and 'accuracy' in base_metrics['data']) else float('nan')
                     logger.info(_purple(f"[{subject}] Accuracies — Full: {summary_full:.4f}, Cyclic: {summary_cyc:.4f}, Default: {summary_base:.4f}"))
+
+                    # Compute beta curves (0.0, 0.1, ..., 1.0) with cost on x-axis
+                    if len(base_correct_list) == len(cyclic_correct_list) == len(full_correct_list) and len(base_correct_list) > 0:
+                        N = len(base_correct_list)
+                        betas = [i / 10.0 for i in range(11)]
+                        # Cost per sample: beta*C + (1-beta)*1 (C = k or k!)
+                        C_cyc = float(k)
+                        # factorial for k
+                        C_full = float(np.math.factorial(k))
+                        curve_cyc = []
+                        curve_full = []
+                        # Deterministic subset: use first n indices (results already sorted by idx)
+                        for beta in betas:
+                            n = int(N * beta + 1e-9)
+                            # Cyclic mix accuracy
+                            if n > 0:
+                                acc_cyc = (sum(cyclic_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
+                            else:
+                                acc_cyc = sum(base_correct_list) / float(N)
+                            cost_cyc = (beta * C_cyc) + ((1.0 - beta) * 1.0)
+                            curve_cyc.append((cost_cyc, acc_cyc))
+                            # Full mix accuracy
+                            if n > 0:
+                                acc_full_mix = (sum(full_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
+                            else:
+                                acc_full_mix = sum(base_correct_list) / float(N)
+                            cost_full = (beta * C_full) + ((1.0 - beta) * 1.0)
+                            curve_full.append((cost_full, acc_full_mix))
+
+                        logger.info(_purple(f"[{subject}] Beta curve (Cyclic): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_cyc])))
+                        logger.info(_purple(f"[{subject}] Beta curve (Full): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_full])))
+
+                        # Save curve data
+                        curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
+                        if getattr(args, 'option_id_set', None):
+                            curve_save_path += f'_id-{args.option_id_set}'
+                        os.makedirs(curve_save_path, exist_ok=True)
+                        curve_obj = {
+                            'subject': subject,
+                            'k': k,
+                            'betas': betas,
+                            'default_accuracy': summary_base,
+                            'cyclic': {
+                                'costs': [c for c, _ in curve_cyc],
+                                'accuracies': [a for _, a in curve_cyc],
+                            },
+                            'full': {
+                                'costs': [c for c, _ in curve_full],
+                                'accuracies': [a for _, a in curve_full],
+                            },
+                        }
+                        save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', [curve_obj], metrics=None)
                 except Exception as e:
                     logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
 
