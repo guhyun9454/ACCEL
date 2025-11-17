@@ -39,6 +39,27 @@ def logging_cuda_memory_usage():
         logger.info("GPU {}: {:.2f} GB / {:.2f} GB".format(i, meminfo.used / 1024 ** 3, meminfo.total / 1024 ** 3))
 
 
+def _rotations(k: int):
+    return [tuple((i + s) % k for i in range(k)) for s in range(k)]
+
+
+def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
+    """
+    Map letter-indexed probs from each permutation to content-indexed probs,
+    then average across permutations.
+    probs_seq: list of length (#perms), each a length-k list of probs for letters
+    permuted_indices: list of tuples, permutation p: letter j corresponds to content index p[j]
+    """
+    agg = np.zeros(k, dtype=np.float64)
+    for perm_idx, p in enumerate(permuted_indices):
+        letter_probs = np.asarray(probs_seq[perm_idx], dtype=np.float64)
+        for j in range(k):
+            agg[p[j]] += letter_probs[j]
+    if len(permuted_indices) > 0:
+        agg /= float(len(permuted_indices))
+    return agg
+
+
 def main():
     patch_open()
 
@@ -290,13 +311,46 @@ def main():
             torch.cuda.empty_cache()
 
             metrics = None
-            if args.setting not in ['perm', 'cyclic'] and len(results) > 0:
-                metrics = {'type': 'metric', 'data': {}}
-                metrics['data']['accuracy'] = get_accuracy(results)
-                metrics['data']['boostrap_std'] = get_bootstrap_accuracy_std(results)
-                logger.info("Final report:")
-                for key, value in metrics['data'].items():
-                    logger.info(f"{key}: {value}")
+            if len(results) > 0:
+                if args.setting in ['perm', 'full', 'cyclic']:
+                    # Ensemble over permutations/cycles with content mapping
+                    if getattr(args, 'option_id_set', None):
+                        option_ids = list(args.option_id_set)
+                    else:
+                        k_guess = len(results[0]['data']['options'])
+                        option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
+                    k = len(option_ids)
+
+                    if args.setting in ['perm', 'full']:
+                        perm_list = list(sorted(permutations(range(k))))
+                    else:
+                        perm_list = _rotations(k)
+
+                    total = 0
+                    corrects = 0
+                    for r in results:
+                        if r.get('type') != 'result':
+                            continue
+                        data = r['data']
+                        probs_seq = data.get('probs', None)
+                        if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
+                            continue
+                        agg = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
+                        pred_letter = option_ids[int(np.argmax(agg))]
+                        if pred_letter == data['ideal']:
+                            corrects += 1
+                        total += 1
+                    acc = (corrects / total) if total > 0 else float('nan')
+                    metrics = {'type': 'metric', 'data': {'accuracy': acc}}
+                    logger.info(_purple(f"==== Ensemble report ({args.setting}) ===="))
+                    logger.info(f"accuracy: {acc:.4f}")
+                else:
+                    metrics = {'type': 'metric', 'data': {}}
+                    metrics['data']['accuracy'] = get_accuracy(results)
+                    metrics['data']['boostrap_std'] = get_bootstrap_accuracy_std(results)
+                    logger.info("Final report:")
+                    for key, value in metrics['data'].items():
+                        logger.info(f"{key}: {value}")
             logger.info(_orange(f"Run completed: {subject}"))
 
             save_results(f'{args.save_path}/{subject}.jsonl', results, metrics)
@@ -322,6 +376,11 @@ def main():
                     # Build derived results
                     cyclic_results = []
                     base_results = []
+                    # For reporting ensemble accuracies
+                    full_total = 0
+                    full_corrects = 0
+                    cyclic_total = 0
+                    cyclic_corrects = 0
                     for r in results:
                         if r.get('type') != 'result':
                             continue
@@ -342,6 +401,12 @@ def main():
                                 'ideal': data['ideal'],
                             },
                         })
+                        # Cyclic ensemble vote for this sample
+                        agg_cyc = _aggregate_probs_over_permutations(cyclic_probs, [tuple((i + s) % k for i in range(k)) for s in range(k)], k)
+                        pred_cyc = option_ids[int(np.argmax(agg_cyc))]
+                        if pred_cyc == data['ideal']:
+                            cyclic_corrects += 1
+                        cyclic_total += 1
 
                         # Default (identity) subset -> base-style result
                         base_probs = probs_seq[identity_idx]
@@ -360,13 +425,25 @@ def main():
                             },
                         })
 
+                        # Full ensemble vote for this sample
+                        agg_full = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
+                        pred_full = option_ids[int(np.argmax(agg_full))]
+                        if pred_full == data['ideal']:
+                            full_corrects += 1
+                        full_total += 1
+
                     # Save cyclic-derived results
                     cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
                     if getattr(args, 'option_id_set', None):
                         cyclic_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(cyclic_save_path, exist_ok=True)
-                    save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results, metrics=None)
-                    logger.info(_orange(f"Derived and saved cyclic results: {subject}"))
+                    cyclic_metrics = None
+                    if cyclic_total > 0:
+                        cyclic_acc = cyclic_corrects / cyclic_total
+                        cyclic_metrics = {'type': 'metric', 'data': {'accuracy': cyclic_acc}}
+                        logger.info(_purple(f"[{subject}] Cyclic ensemble accuracy: {cyclic_acc:.4f}"))
+                    save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results, metrics=cyclic_metrics)
+                    logger.info(_orange(f"Derived and saved cyclic results (with metrics): {subject}"))
 
                     # Save base-derived results with metrics
                     base_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}'
@@ -382,7 +459,12 @@ def main():
                         for key, value in base_metrics['data'].items():
                             logger.info(f"{key}: {value}")
                     save_results(f'{base_save_path}/{subject}.jsonl', base_results, base_metrics)
-                    logger.info(_orange(f"Derived and saved base results: {subject}"))
+                    logger.info(_orange(f"Derived and saved base results (with metrics): {subject}"))
+
+                    # Report FULL ensemble accuracy
+                    if full_total > 0:
+                        full_acc = full_corrects / full_total
+                        logger.info(_purple(f"[{subject}] Full permutation ensemble accuracy: {full_acc:.4f}"))
                 except Exception as e:
                     logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
 
