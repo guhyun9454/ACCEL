@@ -61,6 +61,18 @@ def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
     return agg
 
 
+def _read_results_file(file_path):
+    try:
+        lines = [json.loads(line) for line in open(file_path)]
+        lines = [e for e in lines if e.get('type') == 'result']
+        lines = sorted(lines, key=lambda x: int(x['data']['idx']))
+        return lines
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
 def main():
     patch_open()
 
@@ -278,9 +290,8 @@ def main():
             subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
         ) = prepare_eval(args, eval_name)
         for subject in subjects[::1]:
-            if not getattr(args, 'force', False) and os.path.exists(f'{args.save_path}/{subject}.jsonl'):
-                logger.info(f"Results already exist: {args.save_path}/{subject}.jsonl")
-                continue
+            cached_path = f'{args.save_path}/{subject}.jsonl'
+            use_cached = (not getattr(args, 'force', False)) and os.path.exists(cached_path)
 
             logger.info(_blue(f"Preparing: {subject}"))
             few_shot_samples = prepare_few_shot_samples(subject)
@@ -323,16 +334,22 @@ def main():
                 except Exception as e:
                     logger.warning(f"Failed to build prompt example: {e}")
 
-            logger.info(_blue(f"Run started: {subject}"))
-            max_samples = 100 if getattr(args, 'test', False) else None
-            results = eval_all_samples(
-                eval_fn, eval_samples,
-                name=f'{args.task},{args.num_few_shot},{args.setting},{subject}',
-                threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
-                max_num_samples=max_samples,
-            )
-            gc.collect()
-            torch.cuda.empty_cache()
+            if use_cached:
+                logger.info(_blue(f"Using cached results: {cached_path}"))
+                results = _read_results_file(cached_path) or []
+                ran_eval = False
+            else:
+                logger.info(_blue(f"Run started: {subject}"))
+                max_samples = 100 if getattr(args, 'test', False) else None
+                results = eval_all_samples(
+                    eval_fn, eval_samples,
+                    name=f'{args.task},{args.num_few_shot},{args.setting},{subject}',
+                    threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
+                    max_num_samples=max_samples,
+                )
+                gc.collect()
+                torch.cuda.empty_cache()
+                ran_eval = True
 
             metrics = None
             if len(results) > 0:
@@ -377,8 +394,9 @@ def main():
                         logger.info(f"{key}: {value}")
             logger.info(_orange(f"Run completed: {subject}"))
 
-            save_results(f'{args.save_path}/{subject}.jsonl', results, metrics)
-            logger.info(f"Results saved: {subject}")
+            if not use_cached:
+                save_results(f'{args.save_path}/{subject}.jsonl', results, metrics)
+                logger.info(f"Results saved: {subject}")
 
             # Derive cyclic and default (base) outputs automatically from FULL permutation runs
             if args.setting == 'full':
@@ -747,6 +765,46 @@ def main():
                                 'costs': [c for c, _ in curve_ours_switch_cyc],
                                 'accuracies': [a for _, a in curve_ours_switch_cyc],
                             }
+
+                        # Oracle analysis: bottom-p% (by default confidence) subset accuracy (1% steps)
+                        try:
+                            # Build default confidence and correctness
+                            def _conf_gap_oracle(pvec: np.ndarray) -> float:
+                                vals = np.sort(pvec)[::-1]
+                                if vals.shape[0] < 2:
+                                    return 0.0
+                                return float(vals[0] - vals[1])
+                            default_confs = []
+                            default_corrects = []
+                            for r in results:
+                                if r.get('type') != 'result':
+                                    continue
+                                data = r['data']
+                                probs_seq = np.asarray(data['probs'], dtype=np.float64)
+                                base_probs = probs_seq[identity_idx]
+                                default_confs.append(_conf_gap_oracle(base_probs))
+                                pred_letter = option_ids[int(np.argmax(base_probs))]
+                                default_corrects.append(int(pred_letter == data['ideal']))
+                            default_confs = np.asarray(default_confs, dtype=np.float64)
+                            default_corrects = np.asarray(default_corrects, dtype=np.int32)
+                            order = np.argsort(default_confs)  # ascending = low confidence first
+                            oracle_percentiles = list(range(1, 101))
+                            oracle_bottom_accs = []
+                            for p in oracle_percentiles:
+                                n = max(1, int(N * (p / 100.0) + 1e-9))
+                                sel = order[:n]
+                                acc_bottom = float(default_corrects[sel].mean())
+                                oracle_bottom_accs.append(acc_bottom)
+                            bottom10 = oracle_bottom_accs[9] if len(oracle_bottom_accs) >= 10 else float('nan')
+                            logger.info(_purple(f"[{subject}] Oracle bottom-10% accuracy (default): {bottom10:.4f}"))
+                            curve_obj['oracle_low_conf'] = {
+                                'percentiles': oracle_percentiles,
+                                'accuracies': oracle_bottom_accs,
+                                'bottom10_acc': bottom10,
+                            }
+                        except Exception as e:
+                            logger.warning(f"Failed to compute oracle low-confidence accuracy curve: {e}")
+
                         save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', [curve_obj], metrics=None)
 
                         # W&B logging: one sample's prompts + per-permutation probs, and the beta curve figure
@@ -808,6 +866,23 @@ def main():
                                 fig.savefig(out_png, dpi=160, bbox_inches='tight')
                                 wandb.log({f"{subject}/beta_curve": wandb.Image(out_png)})
                                 plt.close(fig)
+
+                                # Oracle low-confidence accuracy figure
+                                if 'oracle_low_conf' in curve_obj:
+                                    fig2 = plt.figure(figsize=(7.5, 5.0), dpi=160)
+                                    xs = curve_obj['oracle_low_conf']['percentiles']
+                                    ys = curve_obj['oracle_low_conf']['accuracies']
+                                    plt.plot(xs, ys, marker='o', label='Bottom-p% (default acc)')
+                                    plt.xlabel("p (Bottom p% by default confidence)")
+                                    plt.ylabel("Accuracy on bottom-p% subset")
+                                    plt.title(f"Oracle: Low-confidence subset accuracy — {subject}")
+                                    plt.grid(True, linestyle='--', alpha=0.4)
+                                    plt.legend()
+                                    plt.tight_layout()
+                                    out_png2 = f"{curve_save_path}/{subject}_oracle_low_conf_acc.png"
+                                    fig2.savefig(out_png2, dpi=160, bbox_inches='tight')
+                                    wandb.log({f"{subject}/oracle_low_conf_curve": wandb.Image(out_png2)})
+                                    plt.close(fig2)
 
                                 # Log scalar metrics as well
                                 payload = {
