@@ -184,8 +184,8 @@ def main():
                 # Try cached results first
                 path_a = f'{args_a.save_path}/{subject}.jsonl'
                 path_b = f'{args_b.save_path}/{subject}.jsonl'
-                results_a = _read_results_file(path_a)
-                results_b = _read_results_file(path_b)
+                results_a = None if getattr(args, 'force', False) else _read_results_file(path_a)
+                results_b = None if getattr(args, 'force', False) else _read_results_file(path_b)
 
                 if results_a is not None:
                     logger.info(_blue(f"Using cached results (A): {path_a}"))
@@ -278,7 +278,7 @@ def main():
             subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
         ) = prepare_eval(args, eval_name)
         for subject in subjects[::1]:
-            if os.path.exists(f'{args.save_path}/{subject}.jsonl'):
+            if not getattr(args, 'force', False) and os.path.exists(f'{args.save_path}/{subject}.jsonl'):
                 logger.info(f"Results already exist: {args.save_path}/{subject}.jsonl")
                 continue
 

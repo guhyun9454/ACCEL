@@ -59,6 +59,8 @@ def parse_arguments():
     # Ours method hyperparameters
     parser.add_argument("--ours_low_conf_percent", type=float, default=10.0,
                         help="Bottom percentile (e.g., 10.0) of confidence (from beta subset) to trigger cascading ensemble")
+    parser.add_argument("--force", action="store_true",
+                        help="Overwrite existing results files if they exist")
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]
