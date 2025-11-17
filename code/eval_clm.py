@@ -554,6 +554,8 @@ def main():
 
                         # Ours (dynamic cascading ensemble)
                         curve_ours = []
+                        # For W&B: per-beta cascade counts (number of permutations aggregated per sample)
+                        ours_cascade_counts_list = []
                         try:
                             # Build deterministic permutation order (identity first)
                             order_indices = list(range(len(perm_list)))
@@ -590,6 +592,7 @@ def main():
 
                                 total_cost = 0.0
                                 corrects = 0
+                                cascade_counts = []
 
                                 # beta subset: use default only
                                 for i in range(0, n):
@@ -598,6 +601,7 @@ def main():
                                     if pred_letter == ideals[i]:
                                         corrects += 1
                                     total_cost += 1.0
+                                    cascade_counts.append(1)
 
                                 # (1-beta) subset: cascade if low confidence
                                 for i in range(n, N):
@@ -623,15 +627,18 @@ def main():
                                     if pred_letter == ideals[i]:
                                         corrects += 1
                                     total_cost += float(len(selected))
+                                    cascade_counts.append(int(len(selected)))
 
                                 acc_ours = (corrects / float(N)) if N > 0 else float('nan')
                                 cost_ours = (total_cost / float(N)) if N > 0 else float('nan')
                                 curve_ours.append((cost_ours, acc_ours))
+                                ours_cascade_counts_list.append(cascade_counts)
 
                             logger.info(_purple(f"[{subject}] Beta curve (Ours): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours])))
                         except Exception as e:
                             logger.warning(f"Failed to compute Ours curve: {e}")
                             curve_ours = []
+                            ours_cascade_counts_list = []
 
                         # Ablations: switch-full and switch-cyclic (no cascading)
                         curve_ours_switch_full = []
@@ -883,6 +890,17 @@ def main():
                                     fig2.savefig(out_png2, dpi=160, bbox_inches='tight')
                                     wandb.log({f"{subject}/oracle_low_conf_curve": wandb.Image(out_png2)})
                                     plt.close(fig2)
+
+                                # Histogram(s): per-beta cascade counts for Ours
+                                if len(curve_ours) == len(betas) and isinstance(ours_cascade_counts_list, list) and len(ours_cascade_counts_list) == len(betas):
+                                    try:
+                                        # Log a histogram for each beta; tag with beta value
+                                        for bi, beta in enumerate(betas):
+                                            counts = ours_cascade_counts_list[bi]
+                                            if isinstance(counts, list) and len(counts) > 0:
+                                                wandb.log({f"{subject}/ours_cascade_hist_beta_{beta:.1f}": wandb.Histogram(counts)})
+                                    except Exception as e:
+                                        logger.warning(f"W&B cascade histogram logging failed: {e}")
 
                                 # Log scalar metrics as well
                                 payload = {
