@@ -1,4 +1,3 @@
-
 import os
 import sys
 import json
@@ -584,9 +583,7 @@ def main():
                                     table = wandb.Table(columns=cols, data=rows)
                                     wandb.log({f"{subject}/sample_prompts": table})
 
-                                # Build and log beta curve figure
-                                import io
-                                from PIL import Image
+                                # Build and log beta curve figure (save then upload)
                                 fig = plt.figure(figsize=(7.5, 5.0), dpi=160)
                                 cyc_costs = [c for c, _ in curve_cyc]
                                 cyc_accs = [a for _, a in curve_cyc]
@@ -601,26 +598,9 @@ def main():
                                 plt.grid(True, linestyle='--', alpha=0.4)
                                 plt.legend()
                                 plt.tight_layout()
-                                
-                                # Save to BytesIO buffer to avoid file I/O conflicts with patch_open()
-                                buf = io.BytesIO()
-                                fig.savefig(buf, format='png', dpi=160, bbox_inches='tight')
-                                data_bytes = buf.getvalue()
-                                buf.seek(0)
-                                img = Image.open(buf)
-                                # Log from memory
-                                wandb.log({f"{subject}/beta_curve": wandb.Image(img)})
-                                # Also persist image to disk without using builtins.open (avoid patch_open)
-                                try:
-                                    out_png = f"{curve_save_path}/{subject}_beta_curve.png"
-                                    import os
-                                    fd = os.open(out_png, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-                                    os.write(fd, data_bytes)
-                                    os.close(fd)
-                                except Exception as _e:
-                                    logger.warning(f"Saving beta curve PNG failed: {_e}")
-                                finally:
-                                    buf.close()
+                                out_png = f"{curve_save_path}/{subject}_beta_curve.png"
+                                fig.savefig(out_png, dpi=160, bbox_inches='tight')
+                                wandb.log({f"{subject}/beta_curve": wandb.Image(out_png)})
                                 plt.close(fig)
 
                                 # Log scalar metrics as well

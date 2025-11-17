@@ -247,8 +247,7 @@ def patch_open():
     prev_open = open
 
     def new_open(*args, **kwargs):
-        buffer_size = kwargs.pop("buffering", io.DEFAULT_BUFFER_SIZE)
-        kwargs["buffering"] = min(io.DEFAULT_BUFFER_SIZE, buffer_size)
+        # Do not alter buffering; pass through to avoid conflicts with libraries (e.g., wandb, PIL).
         return prev_open(*args, **kwargs)
 
     builtins.open = new_open
