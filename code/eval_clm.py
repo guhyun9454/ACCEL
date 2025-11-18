@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import math
 import gc
 import pynvml
+from collections import Counter
 
 pynvml.nvmlInit()
 logger = logging.getLogger(__name__)
@@ -69,6 +70,28 @@ def _read_results_file(file_path):
         return None
     except Exception:
         return None
+
+
+def _conf_gap(pvec: np.ndarray) -> float:
+    vals = np.sort(pvec)[::-1]
+    return float(vals[0] - vals[1]) if vals.shape[0] >= 2 else 0.0
+
+
+def _warn_and_clamp_beta(beta_raw: float) -> float:
+    if beta_raw < 0.0 or beta_raw > 1.0:
+        logger.warning(_orange(f"[cascade_beta] expected 0.0~1.0, got {beta_raw}. Clamping into range."))
+    return max(0.0, min(1.0, float(beta_raw)))
+
+
+def _log_conf_stats(tag: str, confs: np.ndarray):
+    if confs.size == 0:
+        return
+    q = np.quantile(confs, [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0])
+    logger.info(_purple(
+        f"[{tag}] conf_gap stats — "
+        f"min={q[0]:.4f}, p10={q[1]:.4f}, p25={q[2]:.4f}, "
+        f"p50={q[3]:.4f}, p75={q[4]:.4f}, p90={q[5]:.4f}, max={q[6]:.4f}"
+    ))
 
 
 def main():
@@ -158,7 +181,7 @@ def main():
                 eval_samples_a = prepare_eval_samples_a(subject)
                 eval_samples_b = prepare_eval_samples_b(subject)
 
-                # noise 관련 파라미터 전달을 위해 래핑
+                # noise 전달 래핑
                 def make_eval_fn(fn_base, few):
                     def f(model_, toker_, few_):
                         base = fn_base(model_, toker_, few_)
@@ -435,8 +458,10 @@ def main():
                                 'ideal': data['ideal'],
                             },
                         })
-                        agg_cyc = _aggregate_probs_over_permutations(cyclic_probs,
-                                                                     [tuple((i + s) % k for i in range(k)) for s in range(k)], k)
+                        agg_cyc = _aggregate_probs_over_permutations(
+                            cyclic_probs,
+                            [tuple((i + s) % k for i in range(k)) for s in range(k)], k
+                        )
                         pred_cyc = option_ids[int(np.argmax(agg_cyc))]
                         ok = (pred_cyc == data['ideal'])
                         cyclic_correct_list.append(ok);  cyclic_corrects += int(ok);  cyclic_total += 1
@@ -503,7 +528,7 @@ def main():
                     summary_base = base_metrics['data']['accuracy'] if (base_metrics is not None and 'accuracy' in base_metrics['data']) else float('nan')
                     logger.info(_purple(f"[{subject}] Accuracies — Full: {summary_full:.4f}, Cyclic: {summary_cyc:.4f}, Default: {summary_base:.4f}"))
 
-                    # ---- Beta curves (생략없이 원본 유지) ----
+                    # ---- Beta curves ----
                     if len(base_correct_list) == len(cyclic_correct_list) == len(full_correct_list) and len(base_correct_list) > 0:
                         N = len(base_correct_list)
                         betas = [i / 10.0 for i in range(11)]
@@ -521,7 +546,7 @@ def main():
                         logger.info(_purple(f"[{subject}] Beta curve (Cyclic): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_cyc])))
                         logger.info(_purple(f"[{subject}] Beta curve (Full): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_full])))
 
-                        # Ours (dynamic cascading) - 원본 유지
+                        # Ours (dynamic cascading) — 임계치를 (n..N-1) 구간에서 산출하도록 수정
                         curve_ours = []
                         ours_cascade_counts_list = []
                         try:
@@ -539,21 +564,26 @@ def main():
                                 base_probs_list.append(probs_seq[identity_idx])
                                 ideals.append(data['ideal'])
 
-                            def _conf_gap(pvec: np.ndarray) -> float:
-                                vals = np.sort(pvec)[::-1]
-                                return float(vals[0] - vals[1]) if vals.shape[0] >= 2 else 0.0
-
                             default_conf = np.array([_conf_gap(bp) for bp in base_probs_list], dtype=np.float64)
+                            _log_conf_stats(f"{subject}/default_conf_all", default_conf)
+
                             perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
-                                thresh = float(np.quantile(default_conf[:n], perc)) if n > 0 else float(np.quantile(default_conf, perc))
+
+                                # 수정: 임계치는 “캐스케이드 후보 집합”에서 측정
+                                eval_confs = default_conf[n:] if n < N else default_conf
+                                if eval_confs.size == 0:
+                                    thresh = float(np.quantile(default_conf, perc))
+                                else:
+                                    thresh = float(np.quantile(eval_confs, perc))
 
                                 total_cost = 0.0
                                 corrects = 0
                                 cascade_counts = []
 
+                                # 앞쪽 n개는 1스텝 고정
                                 for i in range(0, n):
                                     bp = base_probs_list[i]
                                     pred_letter = option_ids[int(np.argmax(bp))]
@@ -562,6 +592,7 @@ def main():
                                     total_cost += 1.0
                                     cascade_counts.append(1)
 
+                                # 나머지는 컨피던스 기준 캐스케이드
                                 for i in range(n, N):
                                     probs_seq = per_sample_probs[i]
                                     selected = [order_indices[0]]
@@ -597,7 +628,7 @@ def main():
                             curve_ours = []
                             ours_cascade_counts_list = []
 
-                        # Ablations
+                        # Ablations (switch-full / switch-cyclic)
                         curve_ours_switch_full = []
                         curve_ours_switch_cyc = []
                         try:
@@ -611,15 +642,17 @@ def main():
                                     per_sample_probs.append(probs_seq)
                                     base_probs_list.append(probs_seq[identity_idx])
                                     ideals.append(data['ideal'])
-                            def _conf_gap2(pvec: np.ndarray) -> float:
-                                vals = np.sort(pvec)[::-1]
-                                return float(vals[0] - vals[1]) if vals.shape[0] >= 2 else 0.0
-                            default_conf = np.array([_conf_gap2(bp) for bp in base_probs_list], dtype=np.float64)
+
+                            default_conf = np.array([_conf_gap(bp) for bp in base_probs_list], dtype=np.float64)
                             perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
-                                thresh = float(np.quantile(default_conf[:n], perc)) if n > 0 else float(np.quantile(default_conf, perc))
+                                eval_confs = default_conf[n:] if n < N else default_conf
+                                if eval_confs.size == 0:
+                                    thresh = float(np.quantile(default_conf, perc))
+                                else:
+                                    thresh = float(np.quantile(eval_confs, perc))
 
                                 # switch-full
                                 total_cost_sf = corrects_sf = 0.0
@@ -683,7 +716,7 @@ def main():
                             curve_ours_switch_full = []
                             curve_ours_switch_cyc = []
 
-                        # Save curve data (원본 유지)
+                        # Save curve data
                         curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
                         if getattr(args, 'option_id_set', None):
                             curve_save_path += f'_id-{args.option_id_set}'
@@ -712,11 +745,8 @@ def main():
                             curve_obj['ours_switch_cyclic'] = {'costs': [c for c, _ in curve_ours_switch_cyc],
                                                                'accuracies': [a for _, a in curve_ours_switch_cyc]}
 
-                        # Oracle (원본 유지)
+                        # Oracle
                         try:
-                            def _conf_gap_oracle(pvec: np.ndarray) -> float:
-                                vals = np.sort(pvec)[::-1]
-                                return float(vals[0] - vals[1]) if vals.shape[0] >= 2 else 0.0
                             default_confs, default_corrects = [], []
                             for r in results:
                                 if r.get('type') != 'result':
@@ -724,7 +754,7 @@ def main():
                                 data = r['data']
                                 probs_seq = np.asarray(data['probs'], dtype=np.float64)
                                 base_probs = probs_seq[identity_idx]
-                                default_confs.append(_conf_gap_oracle(base_probs))
+                                default_confs.append(_conf_gap(base_probs))
                                 pred_letter = option_ids[int(np.argmax(base_probs))]
                                 default_corrects.append(int(pred_letter == data['ideal']))
                             default_confs = np.asarray(default_confs, dtype=np.float64)
@@ -749,7 +779,7 @@ def main():
 
                         save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', [curve_obj], metrics=None)
 
-                        # W&B figures (원본 유지)
+                        # W&B figures
                         if wandb_run is not None:
                             try:
                                 import wandb
@@ -815,20 +845,31 @@ def main():
                         ideals.append(data['ideal'])
                     N = len(base_probs_list)
 
-                    def _conf_gap(pvec: np.ndarray) -> float:
-                        vals = np.sort(pvec)[::-1]
-                        return float(vals[0] - vals[1]) if vals.shape[0] >= 2 else 0.0
-
                     default_conf = np.array([_conf_gap(bp) for bp in base_probs_list], dtype=np.float64)
-                    beta = max(0.0, min(1.0, float(getattr(args, 'cascade_beta', 0.0))))
+                    _log_conf_stats(f"{subject}/cascade_default_conf_all", default_conf)
+
+                    beta = _warn_and_clamp_beta(float(getattr(args, 'cascade_beta', 0.0)))
                     n = int(N * beta + 1e-9)
                     perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
-                    thresh = float(np.quantile(default_conf[:n], perc)) if n > 0 else float(np.quantile(default_conf, perc))
+
+                    # 수정: 임계치는 “후반(n..N-1)” 집합에서 산출
+                    eval_confs = default_conf[n:] if n < N else default_conf
+                    if eval_confs.size == 0:
+                        thresh = float(np.quantile(default_conf, perc))
+                    else:
+                        thresh = float(np.quantile(eval_confs, perc))
                     policy = str(getattr(args, 'cascade_policy', 'ours'))
+
+                    logger.info(_purple(
+                        f"[{subject}] Cascade params — beta={beta:.3f} (n={n}/{N}), "
+                        f"low_conf_percent={perc*100:.1f}%, thresh={thresh:.5f}, policy={policy}"
+                    ))
 
                     cascade_results = []
                     corrects = 0
                     total_cost = 0.0
+                    escalated = 0
+                    step_hist = Counter()
 
                     for i in range(N):
                         probs_seq = per_sample_probs[i]
@@ -845,6 +886,7 @@ def main():
                                     k,
                                 )
                                 steps = len(selected)
+                                escalated += 1
                             elif policy == 'switch_cyclic':
                                 if args.setting == 'full':
                                     selected = cyclic_indices
@@ -858,6 +900,7 @@ def main():
                                     k,
                                 )
                                 steps = len(selected)
+                                escalated += 1
                             else:
                                 selected = [order_indices[0]]
                                 agg = _aggregate_probs_over_permutations(
@@ -875,12 +918,15 @@ def main():
                                     )
                                     t += 1
                                 steps = len(selected)
+                                if steps > 1:
+                                    escalated += 1
 
                         pred_letter = option_ids[int(np.argmax(agg))]
                         correct = (pred_letter == ideals[i])
                         if correct:
                             corrects += 1
                         total_cost += float(steps)
+                        step_hist[steps] += 1
 
                         cascade_results.append({
                             'type': 'result',
@@ -903,6 +949,8 @@ def main():
                         'beta': beta,
                         'low_conf_percent': float(getattr(args, 'ours_low_conf_percent', 10.0)),
                         'policy': policy,
+                        'escalation_rate': (escalated / float(N)) if N > 0 else 0.0,
+                        'step_hist': dict(sorted(step_hist.items())),
                     }}
 
                     base_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}"
@@ -912,8 +960,12 @@ def main():
                     save_dir = os.path.join(base_dir, sub)
                     os.makedirs(save_dir, exist_ok=True)
                     save_results(os.path.join(save_dir, f"{subject}.jsonl"), cascade_results, metrics=cascade_metrics)
-                    logger.info(_purple(f"[{subject}] Cascade ({policy}, beta={beta:.1f}, p={int(getattr(args,'ours_low_conf_percent',10.0))}): "
-                                        f"acc={acc:.4f}, avg_cost={avg_cost:.2f}x, saved → {save_dir}/{subject}.jsonl"))
+                    logger.info(_purple(
+                        f"[{subject}] Cascade ({policy}, beta={beta:.1f}, p={int(getattr(args,'ours_low_conf_percent',10.0))}): "
+                        f"acc={acc:.4f}, avg_cost={avg_cost:.2f}x, escalated={escalated}/{N} "
+                        f"({(escalated/float(N) if N>0 else 0.0):.3f}), steps={dict(sorted(step_hist.items()))}, "
+                        f"saved → {save_dir}/{subject}.jsonl"
+                    ))
             except Exception as e:
                 logger.warning(f"Cascade export failed: {e}")
             # ===== [END PATCH] =====
