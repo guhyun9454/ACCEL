@@ -169,41 +169,11 @@ def parse_arguments():
                         help="(선택) 결과 저장 루트. 기본은 results_<task>/...")
     parser.add_argument("--model_name", type=str, default=None,
                         help="출력 폴더 이름. 기본값은 pretrained 경로의 마지막 토큰")
-
-    # confidence / reduce
     parser.add_argument("--lowconf_threshold", type=float, default=0.0,
-                        help="top 확률이 이 값보다 낮으면 low_confidence=True (0~1 범위 추천)")
+                        help="top 확률이 이 값보다 낮으면 low_confidence=True")
     parser.add_argument("--perm_reduce", type=str, default="mean",
                         choices=["mean", "max", "vote", "first"],
                         help="perm/cyclic에서 여러 변형의 확률을 합치는 방법")
-
-    # --- NEW: global noise baseline ---
-    parser.add_argument(
-        "--noise_mode",
-        type=str,
-        default="none",
-        choices=["none", "global_nonmax_avg", "global_min"],
-        help=(
-            "Global noise 보정 모드:\n"
-            "  none              : 보정 안 함\n"
-            "  global_nonmax_avg : 각 문제에서 정답이 아닌 옵션들의 평균 확률을 noise로 사용 후, 전체 평균을 global noise로 사용\n"
-            "  global_min        : 각 문제에서 min_k p_k 를 noise로 사용 후, 전체 평균을 global noise로 사용"
-        ),
-    )
-    parser.add_argument(
-        "--noise_alpha",
-        type=float,
-        default=1.0,
-        help="p' = max(p - alpha * global_noise, 0) 에서 alpha 스케일 팩터 (기본 1.0)",
-    )
-
-    # convenience: overwrite
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="기존 결과 파일이 있어도 덮어쓰기"
-    )
-
     args = parser.parse_args()
 
     # validate eval_names entries
@@ -218,7 +188,7 @@ def parse_arguments():
         setting = parts[2] if len(parts) > 2 and parts[2] else None
         if setting is not None and not (
             setting in ["noid", "perm", "cyclic", "shuffle_both", "full"] or
-            (setting.startswith("move") and setting[-1] in ["a", "b", "c", "d"])
+            (setting.startswith("move") and setting[-1] in ["a", "b", "c", "d"]) 
         ):
             raise ValueError(f"Unknown setting: {setting}")
     return args
@@ -367,8 +337,6 @@ def prepare_eval(args, eval_name):
             printed_ids=printed_ids,
             lowconf_threshold=float(getattr(args, 'lowconf_threshold', 0.0)),
             reduce_mode=str(getattr(args, 'perm_reduce', 'mean')),
-            noise_mode=str(getattr(args, 'noise_mode', 'none')),
-            noise_alpha=float(getattr(args, 'noise_alpha', 1.0)),
         )
 
     return subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn, save_path
@@ -378,108 +346,21 @@ def prepare_eval(args, eval_name):
 # Evaluation functions
 # ----------------------------------------------------
 
-def prepare_eval_fn_tokenpick(
-    model, toker, few_shot_samples, num_few_shot,
-    id_groups: List[List[str]],
-    printed_ids: List[str],
-    lowconf_threshold: float,
-    reduce_mode: str = "mean",
-    noise_mode: str = "none",
-    noise_alpha: float = 1.0,
-):
+def prepare_eval_fn_tokenpick(model, toker, few_shot_samples, num_few_shot,
+                              id_groups: List[List[str]],
+                              printed_ids: List[str],
+                              lowconf_threshold: float,
+                              reduce_mode: str = "mean"):
     """
     Token aggregation over alias buckets for each option.
     Supports base / shuffle_both / full / perm / cyclic.
 
     perm/cyclic의 경우:
       - 각 변형별 라벨(A/B/C/D) 확률을 "원래 보기 순서(정답 축)"로 역정렬(canonicalize)하여 모음
-      - reduce_mode(mean/max/vote/first)로 합친 뒤,
-      - (선택) global noise 보정을 적용하여 최종 pred/acc 계산
+      - reduce_mode(mean/max/vote/first)로 합친 뒤 최종 pred/acc 계산
     """
     bpe_has_space_prefix = (toker(': A').input_ids[-1] != toker(':A').input_ids[-1])
     _, flat_ids, spans = _group_token_id_buckets(toker, id_groups)
-
-    # ----- Global noise state (subject 단위) -----
-    noise_mode = noise_mode or "none"
-    noise_alpha = float(noise_alpha)
-    noise_sum = 0.0
-    noise_count = 0
-    debug_counter = 0
-    debug_limit = 20  # 처음 몇 개만 로그
-
-    def _compute_local_noise(dist: np.ndarray, ideal_index: Optional[int]) -> Optional[float]:
-        """각 문제에서 사용할 로컬 noise 스칼라를 계산 (보정 전 분포 기준)."""
-        if noise_mode == "none":
-            return None
-        dist = np.asarray(dist, dtype=np.float32)
-        if dist.size == 0:
-            return None
-
-        if noise_mode == "global_nonmax_avg":
-            # 정답이 아닌 옵션들의 평균 확률
-            if ideal_index is None or ideal_index < 0 or ideal_index >= dist.size:
-                # ideal을 모르면 min으로 fallback
-                return float(dist.min())
-            mask = np.ones_like(dist, dtype=bool)
-            mask[ideal_index] = False
-            wrong = dist[mask]
-            if wrong.size == 0:
-                return None
-            return float(wrong.mean())
-
-        if noise_mode == "global_min":
-            # 각 문제에서 min_k p_k
-            return float(dist.min())
-
-        return None
-
-    def _apply_global_noise(dist: np.ndarray, ideal_index: Optional[int]) -> np.ndarray:
-        """
-        1) 지금까지 쌓인 global noise로 현재 분포 dist를 보정
-        2) dist(보정 전)로부터 로컬 noise를 계산해서 global 통계 업데이트
-        """
-        nonlocal noise_sum, noise_count, debug_counter
-        dist = np.asarray(dist, dtype=np.float32)
-        if dist.size == 0:
-            return dist
-
-        # 1) 지금까지의 global noise로 보정
-        if noise_mode != "none" and noise_count > 0:
-            global_noise = noise_sum / float(noise_count)
-            noise_val = float(noise_alpha) * float(global_noise)
-            adj = np.clip(dist - noise_val, 0.0, None)
-            s = float(adj.sum())
-            if s > 0.0:
-                dist_adj = adj / s
-            else:
-                # 모두 0이면 uniform fallback
-                dist_adj = np.full_like(dist, 1.0 / float(dist.size))
-        else:
-            dist_adj = dist.copy()
-
-        # 2) 원본 dist 로부터 로컬 noise를 계산해서 통계 업데이트
-        local_noise = _compute_local_noise(dist, ideal_index)
-        if local_noise is not None:
-            noise_sum += float(local_noise)
-            noise_count += 1
-
-        # 디버그 로그 (처음 몇 개만)
-        if noise_mode != "none" and debug_counter < debug_limit:
-            debug_counter += 1
-            global_noise_now = (noise_sum / float(noise_count)) if noise_count > 0 else 0.0
-            raw_str = ", ".join(f"{printed_ids[i]}={p:.6f}" for i, p in enumerate(dist))
-            adj_str = ", ".join(f"{printed_ids[i]}={p:.6f}" for i, p in enumerate(dist_adj))
-            logger.info(
-                "[noise-debug] mode=%s, alpha=%.3f, global_noise=%.6f | raw=[%s] | adj=[%s] | ideal_idx=%s",
-                noise_mode,
-                noise_alpha,
-                global_noise_now,
-                raw_str,
-                adj_str,
-                str(ideal_index),
-            )
-
-        return dist_adj
 
     def _pick_for_single_text(input_text: str):
         input_ids = toker(input_text, truncation=False, return_tensors="pt").input_ids.to(model.device)
@@ -495,24 +376,18 @@ def prepare_eval_fn_tokenpick(
         group_probs = np.asarray(group_probs, dtype=np.float32)
         denom = float(group_probs.sum()) + 1e-10
         group_probs = group_probs / denom
-        # 여기서는 아직 global noise 보정 X (raw 분포만 반환)
         pred_idx = int(np.argmax(group_probs))
         conf = float(group_probs[pred_idx])
         return group_probs, pred_idx, conf
 
     def _reduce(arrs: List[np.ndarray]) -> np.ndarray:
         # arrs: list of [K] canonical probs (원래 보기 순서 축)
-        if len(arrs) == 0:
-            return np.array([], dtype=np.float32)
         if reduce_mode == "mean":
             return np.mean(arrs, axis=0)
         if reduce_mode == "max":
             return np.max(arrs, axis=0)
         if reduce_mode == "vote":
-            votes = np.bincount(
-                [int(np.argmax(a)) for a in arrs],
-                minlength=arrs[0].shape[0]
-            ).astype(np.float32)
+            votes = np.bincount([int(np.argmax(a)) for a in arrs], minlength=len(arrs[0])).astype(np.float32)
             return votes / (votes.sum() + 1e-10)
         # "first"
         return arrs[0]
@@ -546,10 +421,9 @@ def prepare_eval_fn_tokenpick(
                     canonical /= s
                 canonical_lists.append(canonical)
 
-            agg_raw = _reduce(canonical_lists)                 # [K] 원래 보기 순서 기준 (보정 전)
-            probs = _apply_global_noise(agg_raw, ideal_idx)    # global noise 보정 적용
-            pred_idx = int(np.argmax(probs))
-            conf = float(probs[pred_idx] / (probs.sum() + 1e-10))
+            agg = _reduce(canonical_lists)                 # [K] 원래 보기 순서 기준
+            pred_idx = int(np.argmax(agg))
+            conf = float(agg[pred_idx] / (agg.sum() + 1e-10))
             correct = (pred_idx == int(ideal_idx))
             low_conf = bool(conf < float(lowconf_threshold))
             return {
@@ -558,15 +432,13 @@ def prepare_eval_fn_tokenpick(
                     'idx': idx,
                     'prompt': shown_prompt,
                     'options': options,
-                    'agg_probs': probs.tolist(),
+                    'agg_probs': agg.tolist(),
                     'sampled': printed_ids[pred_idx],
                     'ideal': printed_ids[ideal_idx],
                     'correct': bool(correct),
                     'conf': float(conf),
                     'low_confidence': low_conf,
                     'perm_reduce': reduce_mode,
-                    'noise_mode': noise_mode,
-                    'noise_alpha': noise_alpha,
                 },
             }
 
@@ -580,13 +452,9 @@ def prepare_eval_fn_tokenpick(
         if not bpe_has_space_prefix:
             text += ' '
 
-        probs_raw, _, _ = _pick_for_single_text(text)             # [K], 보정 전
-        probs = _apply_global_noise(probs_raw, ideal_idx)          # [K], 보정 후
-        pred_idx = int(np.argmax(probs))
-        conf = float(probs[pred_idx])
+        probs, pred_idx, conf = _pick_for_single_text(text)
         correct = (pred_idx == int(ideal_idx))
         low_conf = bool(conf < float(lowconf_threshold))
-
         return {
             'type': 'result',
             'data': {
@@ -599,8 +467,6 @@ def prepare_eval_fn_tokenpick(
                 'correct': bool(correct),
                 'conf': float(conf),
                 'low_confidence': low_conf,
-                'noise_mode': noise_mode,
-                'noise_alpha': noise_alpha,
             },
         }
 
@@ -608,7 +474,7 @@ def prepare_eval_fn_tokenpick(
 
 
 def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot):
-    """no-id: choose by option-wise NLL (global noise 보정 없음)."""
+    """no-id: choose by option-wise NLL."""
     toker.padding_side = 'right'
 
     def eval_fn(sample, rng: random.Random):
@@ -622,7 +488,6 @@ def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot):
 
         prefix_input_ids = toker(input_text, truncation=False, return_tensors="pt").input_ids
         losses, lengths = [], []
-
         for option in options:
             text = input_text + ' ' + option.strip()
             input_ids = toker(text, truncation=False, return_tensors="pt").input_ids.to(model.device)
@@ -721,11 +586,9 @@ def main():
 
         for subject in subjects:
             out_path = f"{save_path}/{subject}.jsonl"
-            if os.path.exists(out_path) and not args.force:
-                logger.info("Results already exist, skip: %s (use --force to overwrite)", out_path)
+            if os.path.exists(out_path):
+                logger.info("Results already exist, skip: %s", out_path)
                 continue
-            elif os.path.exists(out_path) and args.force:
-                logger.info("Overwriting existing results due to --force: %s", out_path)
 
             logger.info(_blue(f"Preparing subject: {subject}"))
             few_shot_samples = prepare_few_shot_samples(subject)
@@ -772,7 +635,7 @@ def main():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            # metric 계산
+            # 이제 perm/cyclic도 성능 계산을 수행 (우리가 'correct'를 채워줌)
             metrics = None
             if len(results) > 0:
                 metrics = {'type': 'metric', 'data': {}}
