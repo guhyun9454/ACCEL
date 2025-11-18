@@ -518,8 +518,8 @@ def main():
                             acc_full_mix = (sum(full_correct_list[:n]) + sum(base_correct_list[n:])) / float(N) if n > 0 else sum(base_correct_list) / float(N)
                             cost_full = (beta * C_full) + ((1.0 - beta) * 1.0)
                             curve_full.append((cost_full, acc_full_mix))
-                        logger.info(_purple(f"[{subject}] Beta curve (Cyclic): " + ", ".join([f\"(cost={c:.2f}, acc={a:.4f})\" for c, a in curve_cyc])))
-                        logger.info(_purple(f"[{subject}] Beta curve (Full): " + ", ".join([f\"(cost={c:.2f}, acc={a:.4f})\" for c, a in curve_full])))
+                        logger.info(_purple(f"[{subject}] Beta curve (Cyclic): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_cyc])))
+                        logger.info(_purple(f"[{subject}] Beta curve (Full): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_full])))
 
                         # Ours (dynamic cascading) - 원본 유지
                         curve_ours = []
@@ -591,7 +591,7 @@ def main():
                                 cost_ours = (total_cost / float(N)) if N > 0 else float('nan')
                                 curve_ours.append((cost_ours, acc_ours))
                                 ours_cascade_counts_list.append(cascade_counts)
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours): " + ", ".join([f\"(cost={c:.2f}, acc={a:.4f})\" for c, a in curve_ours])))
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours])))
                         except Exception as e:
                             logger.warning(f"Failed to compute Ours curve: {e}")
                             curve_ours = []
@@ -676,8 +676,8 @@ def main():
                                 cost_sc = (total_cost_sc / float(N)) if N > 0 else float('nan')
                                 curve_ours_switch_cyc.append((cost_sc, acc_sc))
 
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-full): " + ", ".join([f\"(cost={c:.2f}, acc={a:.4f})\" for c, a in curve_ours_switch_full])))
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-cyclic): " + ", ".join([f\"(cost={c:.2f}, acc={a:.4f})\" for c, a in curve_ours_switch_cyc])))
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-full): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_full])))
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-cyclic): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_cyc])))
                         except Exception as e:
                             logger.warning(f"Failed to compute Ours ablation curves: {e}")
                             curve_ours_switch_full = []
