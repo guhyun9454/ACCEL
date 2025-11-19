@@ -1,8 +1,21 @@
 # eval_clm.py
+# -*- coding: utf-8 -*-
+
 import os
 import sys
 import json
 import logging
+from types import SimpleNamespace
+from itertools import permutations
+from collections import Counter
+import math
+import gc
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+import pynvml
+
 from eval_clm_utils import (
     parse_arguments,
     prepare_eval,
@@ -15,17 +28,6 @@ from utils import (
     save_results,
     patch_open,
 )
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers import BitsAndBytesConfig  # (optional import)
-import numpy as np
-from types import SimpleNamespace
-from itertools import permutations
-import matplotlib.pyplot as plt
-import math
-import gc
-import pynvml
-from collections import Counter
 
 pynvml.nvmlInit()
 logger = logging.getLogger(__name__)
@@ -94,6 +96,117 @@ def _log_conf_stats(tag: str, confs: np.ndarray):
     ))
 
 
+# ==============================
+# Token-bias offset helpers
+# ==============================
+
+def _get_option_ids_from_results(args, results):
+    """
+    결과에서 options 길이를 보고 ABCD/ABCDE를 추론.
+    args.option_id_set이 있으면 그걸 우선 사용.
+    """
+    if getattr(args, 'option_id_set', None):
+        return list(args.option_id_set)
+    for r in results:
+        if r.get('type') == 'result':
+            try:
+                k_guess = len(r['data']['options'])
+            except Exception:
+                continue
+            if k_guess == 5:
+                return list('ABCDE')
+            else:
+                return list('ABCD')
+    return list('ABCD')
+
+
+def _compute_token_bias_mu(results, k: int) -> np.ndarray:
+    """
+    μ_k = mean log-prob per option index k.
+    - base: probs shape (k,)
+    - perm/cyclic/full: probs shape (num_perm, k)
+    """
+    logs_sum = np.zeros(k, dtype=np.float64)
+    count = 0
+    for r in results:
+        if r.get('type') != 'result':
+            continue
+        p = np.asarray(r['data']['probs'], dtype=np.float64)
+
+        if p.ndim == 1:
+            if p.shape[0] != k:
+                continue
+            logp = np.log(p + 1e-12)
+            logs_sum += logp
+            count += 1
+
+        elif p.ndim == 2:
+            if p.shape[1] != k:
+                continue
+            logp = np.log(p + 1e-12)          # (num_perm, k)
+            logs_sum += logp.sum(axis=0)
+            count += p.shape[0]
+
+    if count == 0:
+        return np.zeros(k, dtype=np.float64)
+    return logs_sum / float(count)
+
+
+def _apply_token_bias_offset_inplace(results, option_ids, lam: float):
+    """
+    log p'_k = log p_k - λ * μ_k  적용 후, 다시 softmax해서 probs 업데이트.
+    - base/run: probs shape (k,)
+    - perm/full/cyclic: probs shape (num_perm, k)
+    """
+    if lam <= 0.0:
+        return
+
+    k = len(option_ids)
+    mu = _compute_token_bias_mu(results, k)
+    logger.info(_purple(f"[token_bias] lambda={lam:.3f}, mu={mu.tolist()}"))
+
+    for r in results:
+        if r.get('type') != 'result':
+            continue
+        data = r['data']
+        p = np.asarray(data['probs'], dtype=np.float64)
+
+        # 단일 벡터 (base / cascade export 등)
+        if p.ndim == 1:
+            if p.shape[0] != k:
+                logger.warning(f"[token_bias] unexpected prob length {p.shape[0]} (k={k})")
+                continue
+            logp = np.log(p + 1e-12) - lam * mu
+            logp = logp - logp.max()
+            new_p = np.exp(logp)
+            new_p = new_p / (new_p.sum() + 1e-12)
+            data['probs'] = new_p.tolist()
+
+            if 'ideal' in data:
+                idx_max = int(np.argmax(new_p))
+                sampled = option_ids[idx_max]
+                data['sampled'] = sampled
+                data['correct'] = (sampled == data['ideal'])
+
+        # perm/cyclic/full: probs shape (num_perm, k)
+        elif p.ndim == 2:
+            if p.shape[1] != k:
+                logger.warning(f"[token_bias] unexpected prob shape {p.shape} (k={k})")
+                continue
+            logp = np.log(p + 1e-12) - lam * mu.reshape(1, -1)
+            logp = logp - logp.max(axis=1, keepdims=True)
+            new_p = np.exp(logp)
+            new_p = new_p / (new_p.sum(axis=1, keepdims=True) + 1e-12)
+            data['probs'] = new_p.tolist()
+
+        else:
+            logger.warning(f"[token_bias] unsupported prob ndim {p.ndim}")
+
+
+# ==============================
+# main
+# ==============================
+
 def main():
     patch_open()
     logging.basicConfig(format="[%(asctime)s] [%(filename)s:%(lineno)d] %(message)s",
@@ -110,20 +223,25 @@ def main():
             import wandb
             project = args.wandb_project
             run_name = args.wandb_run_name or f"{args.model_name}-{args.eval_names[0]}"
-            wandb_run = wandb.init(entity="capde", project=project, name=run_name, config={
-                "pretrained_model_path": args.pretrained_model_path,
-                "model_name": args.model_name,
-                "eval_names": args.eval_names,
-                "option_id_set": args.option_id_set,
-                "noise_mode": args.noise_mode,
-                "noise_alpha": args.noise_alpha,
-                "dummy_id_set": args.dummy_id_set,
-            })
+            wandb_run = wandb.init(
+                entity="capde",
+                project=project,
+                name=run_name,
+                config={
+                    "pretrained_model_path": args.pretrained_model_path,
+                    "model_name": args.model_name,
+                    "eval_names": args.eval_names,
+                    "option_id_set": args.option_id_set,
+                    "token_bias_lambda": getattr(args, "token_bias_lambda", 0.0),
+                },
+            )
         except Exception as e:
             logger.warning(f"W&B init failed: {e}")
             wandb_run = None
 
     # ---- tokenizer / model ----
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+
     toker = AutoTokenizer.from_pretrained(
         args.pretrained_model_path,
         use_fast=False,
@@ -181,15 +299,12 @@ def main():
                 eval_samples_a = prepare_eval_samples_a(subject)
                 eval_samples_b = prepare_eval_samples_b(subject)
 
-                # noise 전달 래핑
+                # noise 없이 eval fn 래핑
                 def make_eval_fn(fn_base, few):
                     def f(model_, toker_, few_):
                         base = fn_base(model_, toker_, few_)
                         def wrapped(sample, rng):
-                            return base(sample, rng,
-                                        noise_mode=args.noise_mode,
-                                        noise_alpha=args.noise_alpha,
-                                        dummy_id_set=args.dummy_id_set)
+                            return base(sample, rng)
                         return wrapped
                     return f
 
@@ -200,6 +315,7 @@ def main():
                 if getattr(args, 'print_prompt_example', False) and not printed_example and len(eval_samples_a) > 0:
                     try:
                         first_input, _first_options, _first_ideal = eval_samples_a[0]
+
                         def build_input_text(pair):
                             sys_msg, eval_sample = pair
                             text = sys_msg + '\n\n'
@@ -208,6 +324,7 @@ def main():
                                     text += s + '\n\n'
                             text += eval_sample
                             return text
+
                         if isinstance(first_input, list) and len(first_input) > 0 and isinstance(first_input[0], list):
                             input_text = build_input_text(first_input[0])
                             bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
@@ -234,10 +351,12 @@ def main():
                 if results_a is None:
                     logger.info(_blue(f"Run started (A): {subject} [{id_set_a}]"))
                     max_samples = 100 if getattr(args, 'test', False) else None
-                    results_a = eval_all_samples(eval_fn_a, eval_samples_a,
-                                                 name=f'{args_a.task},{args_a.num_few_shot},{args_a.setting},{subject},{id_set_a}',
-                                                 threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
-                                                 max_num_samples=max_samples)
+                    results_a = eval_all_samples(
+                        eval_fn_a, eval_samples_a,
+                        name=f'{args_a.task},{args_a.num_few_shot},{args_a.setting},{subject},{id_set_a}',
+                        threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
+                        max_num_samples=max_samples,
+                    )
                     save_results(path_a, results_a, metrics=None)
                     logger.info(f"Results saved (A): {subject}")
                 else:
@@ -246,10 +365,12 @@ def main():
                 if results_b is None:
                     logger.info(_blue(f"Run started (B): {subject} [{id_set_b}]"))
                     max_samples = 100 if getattr(args, 'test', False) else None
-                    results_b = eval_all_samples(eval_fn_b, eval_samples_b,
-                                                 name=f'{args_b.task},{args_b.num_few_shot},{args_b.setting},{subject},{id_set_b}',
-                                                 threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
-                                                 max_num_samples=max_samples)
+                    results_b = eval_all_samples(
+                        eval_fn_b, eval_samples_b,
+                        name=f'{args_b.task},{args_b.num_few_shot},{args_b.setting},{subject},{id_set_b}',
+                        threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
+                        max_num_samples=max_samples,
+                    )
                     save_results(path_b, results_b, metrics=None)
                     logger.info(f"Results saved (B): {subject}")
                 else:
@@ -310,15 +431,12 @@ def main():
     for eval_name in args.eval_names[::1]:
         (subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn_raw) = prepare_eval(args, eval_name)
 
-        # noise 전달용 래핑
+        # noise 없이 eval fn 래핑
         def make_eval_fn(fn_raw, few):
             def f(model_, toker_, few_):
                 base = fn_raw(model_, toker_, few_)
                 def wrapped(sample, rng):
-                    return base(sample, rng,
-                                noise_mode=args.noise_mode,
-                                noise_alpha=args.noise_alpha,
-                                dummy_id_set=args.dummy_id_set)
+                    return base(sample, rng)
                 return wrapped
             return f
 
@@ -335,6 +453,7 @@ def main():
             if getattr(args, 'print_prompt_example', False) and not printed_example and len(eval_samples) > 0:
                 try:
                     first_input, _first_options, _first_ideal = eval_samples[0]
+
                     def build_input_text(pair):
                         sys_msg, eval_sample = pair
                         text = sys_msg + '\n\n'
@@ -343,6 +462,7 @@ def main():
                                 text += s + '\n\n'
                         text += eval_sample
                         return text
+
                     if isinstance(first_input, list) and len(first_input) > 0 and isinstance(first_input[0], list):
                         input_text = build_input_text(first_input[0])
                         bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
@@ -378,13 +498,19 @@ def main():
 
             metrics = None
             if len(results) > 0:
+                # ---- Token-bias offset (λ > 0일 때만 적용) ----
+                option_ids_for_bias = None
+                if args.setting != 'noid':
+                    option_ids_for_bias = _get_option_ids_from_results(args, results)
+                    lam = float(getattr(args, 'token_bias_lambda', 0.0))
+                    if lam != 0.0:
+                        _apply_token_bias_offset_inplace(results, option_ids_for_bias, lam)
+
+                # ---- Metrics 계산 ----
                 if args.setting in ['perm', 'full', 'cyclic']:
-                    # Ensemble over permutations/cycles (이미 noise 보정된 probs 사용)
-                    if getattr(args, 'option_id_set', None):
-                        option_ids = list(args.option_id_set)
-                    else:
-                        k_guess = len(results[0]['data']['options'])
-                        option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
+                    if option_ids_for_bias is None:
+                        option_ids_for_bias = _get_option_ids_from_results(args, results)
+                    option_ids = option_ids_for_bias
                     k = len(option_ids)
 
                     perm_list = list(sorted(permutations(range(k)))) if args.setting in ['perm', 'full'] else _rotations(k)
@@ -413,6 +539,7 @@ def main():
                     logger.info("Final report:")
                     for key, value in metrics['data'].items():
                         logger.info(f"{key}: {value}")
+
             logger.info(_orange(f"Run completed: {subject}"))
 
             if not use_cached:
@@ -425,8 +552,11 @@ def main():
                     if getattr(args, 'option_id_set', None):
                         option_ids = list(args.option_id_set)
                     else:
-                        k = len(results[0]['data']['options']) if len(results) > 0 and results[0]['type'] == 'result' else 4
-                        option_ids = list('ABCDE' if k == 5 else 'ABCD')
+                        if len(results) > 0 and results[0]['type'] == 'result':
+                            k_guess = len(results[0]['data']['options'])
+                            option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
+                        else:
+                            option_ids = list('ABCD')
                     k = len(option_ids)
 
                     perm_list = list(sorted(permutations(range(k))))
@@ -454,17 +584,20 @@ def main():
                                 'idx': data['idx'],
                                 'prompt': data.get('prompt'),
                                 'options': data['options'],
-                                'probs': cyclic_probs,  # 이미 noise 보정됨
+                                'probs': cyclic_probs,
                                 'ideal': data['ideal'],
                             },
                         })
                         agg_cyc = _aggregate_probs_over_permutations(
                             cyclic_probs,
-                            [tuple((i + s) % k for i in range(k)) for s in range(k)], k
+                            [tuple((i + s) % k for i in range(k)) for s in range(k)],
+                            k,
                         )
                         pred_cyc = option_ids[int(np.argmax(agg_cyc))]
                         ok = (pred_cyc == data['ideal'])
-                        cyclic_correct_list.append(ok);  cyclic_corrects += int(ok);  cyclic_total += 1
+                        cyclic_correct_list.append(ok)
+                        cyclic_corrects += int(ok)
+                        cyclic_total += 1
 
                         # default(identity)
                         base_probs = probs_seq[identity_idx]
@@ -477,7 +610,7 @@ def main():
                                 'idx': data['idx'],
                                 'prompt': data.get('prompt'),
                                 'options': data['options'],
-                                'probs': base_probs,  # noise 보정된 단일 벡터
+                                'probs': base_probs,
                                 'sampled': sampled,
                                 'ideal': data['ideal'],
                                 'correct': correct,
@@ -488,7 +621,9 @@ def main():
                         agg_full = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
                         pred_full = option_ids[int(np.argmax(agg_full))]
                         okf = (pred_full == data['ideal'])
-                        full_correct_list.append(okf);  full_corrects += int(okf);  full_total += 1
+                        full_correct_list.append(okf)
+                        full_corrects += int(okf)
+                        full_total += 1
 
                     # save cyclic
                     cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
@@ -546,7 +681,7 @@ def main():
                         logger.info(_purple(f"[{subject}] Beta curve (Cyclic): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_cyc])))
                         logger.info(_purple(f"[{subject}] Beta curve (Full): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_full])))
 
-                        # Ours (dynamic cascading) — 임계치를 (n..N-1) 구간에서 산출하도록 수정
+                        # Ours (dynamic cascading)
                         curve_ours = []
                         ours_cascade_counts_list = []
                         try:
@@ -572,7 +707,7 @@ def main():
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
 
-                                # 수정: 임계치는 “캐스케이드 후보 집합”에서 측정
+                                # 임계치는 “캐스케이드 후보 집합”에서 측정
                                 eval_confs = default_conf[n:] if n < N else default_conf
                                 if eval_confs.size == 0:
                                     thresh = float(np.quantile(default_conf, perc))
@@ -802,16 +937,17 @@ def main():
                                 plt.title(f"Accuracy vs. Cost — {subject}")
                                 plt.grid(True, linestyle='--', alpha=0.4); plt.legend(); plt.tight_layout()
                                 out_png = f"{curve_save_path}/{subject}_beta_curve.png"
-                                fig.savefig(out_png, dpi=160, bbox_inches='tight'); wandb.log({f"{subject}/beta_curve": wandb.Image(out_png)}); plt.close(fig)
+                                fig.savefig(out_png, dpi=160, bbox_inches='tight')
+                                wandb.log({f"{subject}/beta_curve": wandb.Image(out_png)})
+                                plt.close(fig)
                             except Exception as e:
                                 logger.warning(f"W&B logging failed: {e}")
                 except Exception as e:
                     logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
 
-            # ===== [PATCH] Export cascading / switch-* with noise-corrected probs =====
+            # ===== [PATCH] Cascade export (token-bias 적용된 probs 기반) =====
             try:
                 if getattr(args, 'cascade_export', False) and args.setting in ['full', 'cyclic'] and len(results) > 0:
-                    # option ids
                     if getattr(args, 'option_id_set', None):
                         option_ids = list(args.option_id_set)
                     else:
@@ -828,10 +964,10 @@ def main():
                         if identity_idx != 0:
                             order_indices = [identity_idx] + [i for i in order_indices if i != identity_idx]
                     else:  # cyclic
-                        perm_list = _rotations(k)  # list[tuple]
+                        perm_list = _rotations(k)
                         identity_idx = 0
                         cyclic_indices = list(range(k))
-                        order_indices = list(range(k))  # 0..k-1
+                        order_indices = list(range(k))
 
                     # collect per-sample seq
                     per_sample_probs, base_probs_list, ideals = [], [], []
@@ -852,7 +988,6 @@ def main():
                     n = int(N * beta + 1e-9)
                     perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
 
-                    # 수정: 임계치는 “후반(n..N-1)” 집합에서 산출
                     eval_confs = default_conf[n:] if n < N else default_conf
                     if eval_confs.size == 0:
                         thresh = float(np.quantile(default_conf, perc))
@@ -893,7 +1028,7 @@ def main():
                                     selected_perms = [perm_list[j] for j in cyclic_indices]
                                 else:
                                     selected = list(range(k))
-                                    selected_perms = [perm_list[j] for j in selected]  # rotations
+                                    selected_perms = [perm_list[j] for j in selected]
                                 agg = _aggregate_probs_over_permutations(
                                     [probs_seq[j].tolist() for j in selected],
                                     selected_perms,
@@ -933,7 +1068,7 @@ def main():
                             'data': {
                                 'idx': i,
                                 'options': option_ids,
-                                'probs': agg.tolist(),   # 이미 noise 보정된 집계 확률
+                                'probs': agg.tolist(),
                                 'sampled': pred_letter,
                                 'ideal': ideals[i],
                                 'correct': correct,

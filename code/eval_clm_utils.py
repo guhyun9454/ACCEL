@@ -1,4 +1,6 @@
 # eval_clm_utils.py
+# -*- coding: utf-8 -*-
+
 import os
 import sys
 import random
@@ -50,14 +52,10 @@ def parse_arguments():
     parser.add_argument("--test", action="store_true",
                         help='Test mode: evaluate only 100 samples instead of all samples')
 
-    # ---- Dummy / Noise correction ----
-    parser.add_argument("--dummy_id_set", type=str, default="XZ",
-                        help="더미 라벨 2개(예: XZ). 프롬프트엔 표기하지 않고 확률 보정용으로만 사용")
-    parser.add_argument("--noise_mode", type=str, default="off",
-                        choices=["off", "dummy_avg", "dummy_max"],
-                        help="off: 보정 안 함, dummy_avg: 더미 확률 평균을 빼기, dummy_max: 더미 확률 최대치를 빼기")
-    parser.add_argument("--noise_alpha", type=float, default=1.0,
-                        help="노이즈 가중치 α. 최종 q = ReLU(p - α·noise), 이후 재정규화")
+    # ---- (기존) Dummy / Noise 인자 제거됨 ----
+    # parser.add_argument("--dummy_id_set", ...)
+    # parser.add_argument("--noise_mode", ...)
+    # parser.add_argument("--noise_alpha", ...)
 
     # ---- W&B ----
     parser.add_argument("--wandb", action="store_true",
@@ -85,6 +83,17 @@ def parse_arguments():
     parser.add_argument("--cascade_policy", type=str, default="ours",
                         choices=["ours", "switch_full", "switch_cyclic"],
                         help="ours=confidence 기반 순차 집계, switch_full=low-conf면 전부 집계, switch_cyclic=low-conf면 k회전만 집계")
+
+    # ---- Token-bias offset ----
+    parser.add_argument(
+        "--token_bias_lambda",
+        type=float,
+        default=0.0,
+        help=(
+            "If > 0, apply token-bias offset: "
+            "log p_k' = log(p_k) - λ * μ_k, where μ_k is mean log-prob per option index."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -160,66 +169,107 @@ def prepare_eval(args, eval_name):
     # prompt builder
     def create_user_prompt(question: str, options: List[str]):
         if setting in ['noid']:
-            user_prompt = f"Question: {question.strip()}\nOptions:\n" + \
-                "\n".join([f"{answer}".strip()
-                           for option_id, answer in zip(option_ids, options)]) + \
-                "\nAnswer:"
+            user_prompt = (
+                f"Question: {question.strip()}\nOptions:\n"
+                + "\n".join([f"{answer}".strip()
+                             for option_id, answer in zip(option_ids, options)])
+                + "\nAnswer:"
+            )
         elif setting in ['shuffle_both']:
             shuffled_option_ids, shuffled_options = shuffle_options_with_ids(option_ids, options)
-            user_prompt = f"Question: {question.strip()}\nOptions:\n" + \
-                "\n".join([f"{option_id}. {answer}".strip()
-                           for option_id, answer in zip(shuffled_option_ids, shuffled_options)]) + \
-                "\nAnswer:"
+            user_prompt = (
+                f"Question: {question.strip()}\nOptions:\n"
+                + "\n".join([f"{option_id}. {answer}".strip()
+                             for option_id, answer in zip(shuffled_option_ids, shuffled_options)])
+                + "\nAnswer:"
+            )
         else:
-            user_prompt = f"Question: {question.strip()}\nOptions:\n" + \
-                "\n".join([f"{option_id}. {answer}".strip()
-                           for option_id, answer in zip(option_ids, options)]) + \
-                "\nAnswer:"
+            user_prompt = (
+                f"Question: {question.strip()}\nOptions:\n"
+                + "\n".join([f"{option_id}. {answer}".strip()
+                             for option_id, answer in zip(option_ids, options)])
+                + "\nAnswer:"
+            )
         return user_prompt
 
     # few-shot
     def prepare_few_shot_samples(subject):
-        df = pd.read_csv(f'{data_path}/dev/{subject}_dev.csv', names=("Question", *option_ids_header, "Answer"), dtype=str)
+        df = pd.read_csv(
+            f'{data_path}/dev/{subject}_dev.csv',
+            names=("Question", *option_ids_header, "Answer"),
+            dtype=str,
+        )
         if setting in ['noid']:
-            few_shot_samples = df.apply(lambda x:
-                create_user_prompt(x["Question"], [x[e] for e in option_ids_header])
-                + ' ' + x[x["Answer"]]
-            , axis=1).to_list()
+            few_shot_samples = df.apply(
+                lambda x: create_user_prompt(
+                    x["Question"],
+                    [x[e] for e in option_ids_header],
+                ) + ' ' + x[x["Answer"]],
+                axis=1,
+            ).to_list()
         else:
-            few_shot_samples = df.apply(lambda x:
-                create_user_prompt(x["Question"], [x[e] for e in option_ids_header])
-                + ' ' + option_ids[option_ids_header.index(x["Answer"])]
-            , axis=1).to_list()
+            few_shot_samples = df.apply(
+                lambda x: create_user_prompt(
+                    x["Question"],
+                    [x[e] for e in option_ids_header],
+                ) + ' ' + option_ids[option_ids_header.index(x["Answer"])],
+                axis=1,
+            ).to_list()
         return few_shot_samples
 
     # eval samples
     def prepare_eval_samples(subject):
-        df = pd.read_csv(open(f'{data_path}/test/{subject}_test.csv'), names=("Question", *option_ids_header, "Answer"), dtype=str)
+        df = pd.read_csv(
+            open(f'{data_path}/test/{subject}_test.csv'),
+            names=("Question", *option_ids_header, "Answer"),
+            dtype=str,
+        )
 
         if setting is not None and setting.startswith('move'):
             df = df.apply(lambda x: move_answer(x, moved_answer), axis=1)
 
         if setting in ['perm', 'full']:
-            inputs = df.apply(lambda x: [
-                [
-                    sys_msg.format(subject.replace('_', ' ')),
-                    create_user_prompt(x["Question"], permuted_options),
-                ] for permuted_options in permute_options([x[e] for e in option_ids_header])
-            ], axis=1).to_list()
+            inputs = df.apply(
+                lambda x: [
+                    [
+                        sys_msg.format(subject.replace('_', ' ')),
+                        create_user_prompt(
+                            x["Question"],
+                            permuted_options,
+                        ),
+                    ]
+                    for permuted_options in permute_options([x[e] for e in option_ids_header])
+                ],
+                axis=1,
+            ).to_list()
         elif setting in ['cyclic']:
-            inputs = df.apply(lambda x: [
-                [
-                    sys_msg.format(subject.replace('_', ' ')),
-                    create_user_prompt(x["Question"], cycled_options),
-                ] for cycled_options in cycle_options([x[e] for e in option_ids_header])
-            ], axis=1).to_list()
+            inputs = df.apply(
+                lambda x: [
+                    [
+                        sys_msg.format(subject.replace('_', ' ')),
+                        create_user_prompt(
+                            x["Question"],
+                            cycled_options,
+                        ),
+                    ]
+                    for cycled_options in cycle_options([x[e] for e in option_ids_header])
+                ],
+                axis=1,
+            ).to_list()
         else:
-            inputs = df.apply(lambda x: [
-                sys_msg.format(subject.replace('_', ' ')),
-                create_user_prompt(x["Question"], [x[e] for e in option_ids_header]),
-            ], axis=1).to_list()
+            inputs = df.apply(
+                lambda x: [
+                    sys_msg.format(subject.replace('_', ' ')),
+                    create_user_prompt(x["Question"], [x[e] for e in option_ids_header]),
+                ],
+                axis=1,
+            ).to_list()
+
         options = df.apply(lambda x: [str(x[e]) for e in option_ids_header], axis=1).to_list()
-        ideals = df.apply(lambda x: option_ids[option_ids_header.index(x["Answer"])], axis=1).to_list()
+        ideals = df.apply(
+            lambda x: option_ids[option_ids_header.index(x["Answer"])],
+            axis=1,
+        ).to_list()
         return list(zip(inputs, options, ideals))
 
     # which eval fn
@@ -234,42 +284,15 @@ def prepare_eval(args, eval_name):
 
 
 # -----------------------------
-# Noise correction helper
-# -----------------------------
-def _apply_noise(letter_probs: np.ndarray,
-                 dummy_probs: np.ndarray,
-                 mode: str,
-                 alpha: float) -> np.ndarray:
-    """q = ReLU(p - alpha * noise); then renormalize."""
-    if mode == "off" or dummy_probs is None or dummy_probs.size == 0:
-        p = letter_probs.astype(np.float64)
-        s = float(p.sum()) + 1e-12
-        return (p / s)
-    if mode == "dummy_avg":
-        noise = float(np.mean(dummy_probs))
-    elif mode == "dummy_max":
-        noise = float(np.max(dummy_probs))
-    else:
-        noise = 0.0
-    q = np.maximum(letter_probs.astype(np.float64) - alpha * noise, 0.0)
-    s = float(q.sum())
-    if s <= 0:
-        # fallback: just normalize original p
-        p = letter_probs.astype(np.float64)
-        s = float(p.sum()) + 1e-12
-        return (p / s)
-    return (q / s)
-
-
-# -----------------------------
-# Eval fns
+# Eval fns (noise/dummy 제거 버전)
 # -----------------------------
 def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_ids):
     bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
 
-    def eval_fn(sample, rng: random.Random, *,
-                noise_mode=None, noise_alpha=None, dummy_id_set=None):
+    def eval_fn(sample, rng: random.Random):
         idx, (input, options, ideal) = sample
+
+        # ----- 프롬프트 구성 -----
         sys_msg, eval_sample = input.copy()
         input_text = sys_msg + '\n\n'
         if num_few_shot > 0:
@@ -279,50 +302,44 @@ def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_id
         if not bpe_has_space_prefix:
             input_text += ' '
 
+        # ----- 마지막 토큰 logits -----
         input_ids = toker(input_text, return_tensors="pt").input_ids.to(model.device)
         input_ids = input_ids[..., -1536:]
         with torch.no_grad():
             logits = model(input_ids=input_ids).logits[:, -1].view(-1)
 
-        # token indices (letters + dummies), with/without space
+        # ----- letter 토큰 인덱스 (공백/무공백) -----
         letters = list(option_ids)
-        dummies = list(dummy_id_set or "")
-        # collect indices
         letter_idx_space = [toker(f': {e}').input_ids[-1] for e in letters]
         letter_idx_nospace = [toker(f':{e}').input_ids[-1] for e in letters]
-        dummy_idx_space = [toker(f': {e}').input_ids[-1] for e in dummies] if len(dummies) > 0 else []
-        dummy_idx_nospace = [toker(f':{e}').input_ids[-1] for e in dummies] if len(dummies) > 0 else []
+        all_indices = letter_idx_space + letter_idx_nospace  # 길이 2K
 
-        all_indices = letter_idx_space + letter_idx_nospace + dummy_idx_space + dummy_idx_nospace
-        probs_all = F.softmax(logits[..., all_indices], dim=-1).detach().cpu().to(torch.float32).numpy()
+        # ----- subset softmax → space/no-space 합치기 -----
+        probs_all = F.softmax(logits[..., all_indices], dim=-1)
+        probs_all = probs_all.detach().cpu().to(torch.float32).numpy()
 
         K = len(letters)
-        D = len(dummies)
-        # reshape to (2, K+D) → sum over space/no-space
-        probs_all = probs_all.reshape(2, K + D).sum(axis=0) if (K + D) > 0 else probs_all
-        letter_probs = probs_all[:K]
-        dummy_probs = probs_all[K:] if D > 0 else None
+        # (2K,) -> (2, K) -> axis=0 sum
+        probs_all = probs_all.reshape(2, K).sum(axis=0) if K > 0 else probs_all
+        probs = probs_all / (probs_all.sum() + 1e-12)
 
-        # apply noise
-        mode = noise_mode or "off"
-        alpha = float(noise_alpha if noise_alpha is not None else 1.0)
-        probs = _apply_noise(letter_probs, dummy_probs, mode, alpha)
-
-        sampled = option_ids[np.argmax(probs)]
+        sampled = option_ids[int(np.argmax(probs))]
         correct = (sampled == ideal)
+
         result = {
             'type': 'result',
             'data': {
                 'idx': idx,
                 'prompt': input_text,
                 'options': options,
-                'probs': probs.tolist(),  # noise-corrected letters only
+                'probs': probs.tolist(),  # letter-only probs
                 'sampled': sampled,
                 'ideal': ideal,
                 'correct': correct,
             },
         }
         return result
+
     return eval_fn
 
 
@@ -330,7 +347,7 @@ def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot, option_id
     toker.padding_side = 'right'
     bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
 
-    # noid는 토큰 확률이 아니라 LM loss 기반이라 noise 보정 적용하지 않음
+    # noid는 token probs가 아니라 LM loss 기반
     def eval_fn(sample, rng: random.Random, **kwargs):
         idx, (input, options, ideal) = sample
         sys_msg, eval_sample = input.copy()
@@ -358,7 +375,7 @@ def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot, option_id
                 loss = model(input_ids=input_ids, labels=labels).loss.detach().to(torch.float32).cpu().item()
             losses.append(loss)
 
-        nll = - np.array(losses)
+        nll = -np.array(losses)
         probs = np.exp(nll - np.max(nll))
         probs = probs / (probs.sum() + 1e-10)
 
@@ -379,6 +396,7 @@ def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot, option_id
             },
         }
         return result
+
     return eval_fn
 
 
@@ -386,14 +404,14 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
     toker.padding_side = 'left'
     bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
 
-    def eval_fn(sample, rng: random.Random, *,
-                noise_mode=None, noise_alpha=None, dummy_id_set=None):
+    def eval_fn(sample, rng: random.Random):
         idx, (probing_inputs, options, ideal) = sample
         # cyclic=k, full=k! permutations
         num_options = len(option_ids)
         expected_counts = {num_options, math.factorial(num_options)}
         assert len(probing_inputs) in expected_counts
 
+        # ----- 모든 perm/cycle에 대해 프롬프트 구성 -----
         input_texts = []
         for probing_input in probing_inputs:
             sys_msg, eval_sample = probing_input.copy()
@@ -407,33 +425,24 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
             input_texts.append(input_text)
 
         letters = list(option_ids)
-        dummies = list(dummy_id_set or "")
-        K = len(letters); D = len(dummies)
-
-        # Precompute token indices (letters + dummies), with/without space
+        K = len(letters)
         letter_idx_space = [toker(f': {e}').input_ids[-1] for e in letters]
         letter_idx_nospace = [toker(f':{e}').input_ids[-1] for e in letters]
-        dummy_idx_space = [toker(f': {e}').input_ids[-1] for e in dummies] if D > 0 else []
-        dummy_idx_nospace = [toker(f':{e}').input_ids[-1] for e in dummies] if D > 0 else []
-        all_indices = letter_idx_space + letter_idx_nospace + dummy_idx_space + dummy_idx_nospace
+        all_indices = letter_idx_space + letter_idx_nospace  # 길이 2K
 
         all_probs = []
         for input_text in input_texts:
             input_ids = toker(input_text, truncation=False, return_tensors="pt").input_ids.to(model.device)
             input_ids = input_ids[..., -1536:]
             with torch.no_grad():
-                logits = model(input_ids=input_ids).logits[:, -1]
+                logits = model(input_ids=input_ids).logits[:, -1]  # (1, vocab)
 
-            probs_all = F.softmax(logits[..., all_indices], dim=-1).detach().to(torch.float32).cpu().numpy()
-            # (1, 2*(K+D)) → (2, K+D) → sum axis=0
-            probs_all = probs_all.reshape(input_ids.size(0), 2, K + D).sum(axis=1)[0] if (K + D) > 0 else probs_all[0]
-            letter_probs = probs_all[:K]
-            dummy_probs = probs_all[K:] if D > 0 else None
+            probs_all = F.softmax(logits[..., all_indices], dim=-1)
+            probs_all = probs_all.detach().cpu().to(torch.float32).numpy()  # (1, 2K)
+            probs_all = probs_all.reshape(input_ids.size(0), 2, K).sum(axis=1)[0] if K > 0 else probs_all[0]
+            probs = probs_all / (probs_all.sum() + 1e-12)
 
-            mode = noise_mode or "off"
-            alpha = float(noise_alpha if noise_alpha is not None else 1.0)
-            corrected = _apply_noise(letter_probs, dummy_probs, mode, alpha)
-            all_probs.append(corrected.tolist())
+            all_probs.append(probs.tolist())
 
         result = {
             'type': 'result',
@@ -442,9 +451,10 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
                 'prompt': input_texts[0],
                 'prompts': input_texts,
                 'options': options,
-                'probs': all_probs,  # list of noise-corrected probs (letters only)
+                'probs': all_probs,  # list of probs vectors (각 perm/cycle, letters만)
                 'ideal': ideal,
             },
         }
         return result
+
     return eval_fn
