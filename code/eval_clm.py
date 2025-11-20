@@ -767,103 +767,6 @@ def main():
                             curve_ours_switch_full = []
                             curve_ours_switch_cyc = []
 
-                        # ---------------- Ours top2 -> cyclic (low-conf only) ----------------
-                        curve_ours_top2_cyc = []
-                        try:
-                            top2_gap_frac = 0.05
-
-                            for beta in betas:
-                                n = int(N * beta + 1e-9)
-
-                                if n > 0:
-                                    thresh = float(np.quantile(default_conf[:n], perc))
-                                else:
-                                    thresh = float(np.quantile(default_conf, perc))
-
-                                total_cost_t2 = 0.0
-                                corrects_t2 = 0
-
-                                # beta subset: default만
-                                for i in range(0, n):
-                                    bp = base_probs_list[i]
-                                    pred_letter = option_ids[int(np.argmax(bp))]
-                                    if pred_letter == ideals[i]:
-                                        corrects_t2 += 1
-                                    total_cost_t2 += 1.0
-
-                                # (1-beta) subset
-                                for i in range(n, N):
-                                    probs_seq = per_sample_probs[i]
-                                    base_probs = base_probs_list[i]
-                                    pred_base_letter = option_ids[int(np.argmax(base_probs))]
-
-                                    # high-conf → default
-                                    if default_conf[i] >= thresh:
-                                        total_cost_t2 += 1.0
-                                        if pred_base_letter == ideals[i]:
-                                            corrects_t2 += 1
-                                        continue
-
-                                    # base에서 top2 swap
-                                    sorted_idx = np.argsort(base_probs)[::-1]
-                                    top1_idx = int(sorted_idx[0])
-                                    top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
-                                    top1_val = float(base_probs[top1_idx])
-                                    top2_val = float(base_probs[top2_idx])
-
-                                    if top1_val - top2_val >= top2_gap_frac * max(top1_val, 1e-8):
-                                        perm_swap = list(identity_perm)
-                                        perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
-                                        perm_swap_t = tuple(perm_swap)
-                                        if perm_swap_t in perm_list:
-                                            swap_idx = perm_list.index(perm_swap_t)
-                                            probs_base = probs_seq[identity_idx]
-                                            probs_swap = probs_seq[swap_idx]
-                                            agg_top2 = _aggregate_probs_over_permutations(
-                                                [probs_base.tolist(), probs_swap.tolist()],
-                                                [perm_list[identity_idx], perm_list[swap_idx]],
-                                                k,
-                                            )
-                                        else:
-                                            agg_top2 = base_probs.copy()
-                                    else:
-                                        agg_top2 = base_probs.copy()
-
-                                    pred_top2_letter = option_ids[int(np.argmax(agg_top2))]
-
-                                    # 답 바뀌었으면 cyclic, 아니면 top2까지만
-                                    if pred_top2_letter == pred_base_letter:
-                                        # top2까지 (혹은 base와 동일)
-                                        if np.allclose(agg_top2, base_probs):
-                                            total_cost_t2 += 1.0
-                                            final_letter = pred_base_letter
-                                        else:
-                                            total_cost_t2 += 2.0
-                                            final_letter = pred_top2_letter
-                                    else:
-                                        # 여기서는 cyclic으로 승급
-                                        cyc_probs = [probs_seq[j].tolist() for j in cyclic_indices]
-                                        cyc_perms = [perm_list[j] for j in cyclic_indices]
-                                        agg_cyc = _aggregate_probs_over_permutations(
-                                            cyc_probs, cyc_perms, k
-                                        )
-                                        pred_cyc_letter = option_ids[int(np.argmax(agg_cyc))]
-                                        final_letter = pred_cyc_letter
-                                        total_cost_t2 += float(k)
-
-                                    if final_letter == ideals[i]:
-                                        corrects_t2 += 1
-
-                                acc_t2 = (corrects_t2 / float(N)) if N > 0 else float('nan')
-                                cost_t2 = (total_cost_t2 / float(N)) if N > 0 else float('nan')
-                                curve_ours_top2_cyc.append((cost_t2, acc_t2))
-
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours top2->cyclic): " +
-                                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_top2_cyc])))
-                        except Exception as e:
-                            logger.warning(f"Failed to compute Ours top2->cyclic curve: {e}")
-                            curve_ours_top2_cyc = []
-
                         # ---------------- Ours top2flip -> cyclic (low-conf + flip only) ----------------
                         curve_ours_top2flip_cyc = []
                         try:
@@ -956,10 +859,11 @@ def main():
                             logger.warning(f"Failed to compute Ours top2flip->cyclic curve: {e}")
                             curve_ours_top2flip_cyc = []
 
-                        # ---------------- Ours top2 -> top3 -> cyclic (low-conf + flip만 deeper) ----------------
+                        # ---------------- Ours top2 -> top3 -> cyclic + ultra-ambiguous handling ----------------
                         curve_ours_top2_3_cyc = []
                         try:
                             top2_gap_frac_adapt = 0.1
+                            flat_frac4 = 0.05   # top1 ~ top4가 이 정도 이내면 "거의 평평"으로 간주
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
@@ -999,6 +903,30 @@ def main():
                                     top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
                                     top3_idx = int(sorted_idx[2]) if len(sorted_idx) > 2 else top2_idx
 
+                                    # ---- ultra ambiguous 판단 (top1~4 거의 평평) ----
+                                    vals_sorted = base_probs[sorted_idx]
+                                    topk = min(4, len(vals_sorted))
+                                    if topk >= 2:
+                                        flatness = float(vals_sorted[0] - vals_sorted[topk - 1])
+                                        denom = max(float(vals_sorted[0]), 1e-8)
+                                        is_ultra_ambiguous = (flatness <= flat_frac4 * denom)
+                                    else:
+                                        is_ultra_ambiguous = False
+
+                                    if is_ultra_ambiguous:
+                                        # 진짜 애매한 문제 → 바로 cyclic으로 승급
+                                        cyc_probs = [probs_seq[j].tolist() for j in cyclic_indices]
+                                        cyc_perms = [perm_list[j] for j in cyclic_indices]
+                                        agg_cyc = _aggregate_probs_over_permutations(
+                                            cyc_probs, cyc_perms, k
+                                        )
+                                        pred_cyc_letter = option_ids[int(np.argmax(agg_cyc))]
+                                        total_cost_t4 += float(k)
+                                        if pred_cyc_letter == ideals[i]:
+                                            corrects_t4 += 1
+                                        continue
+
+                                    # ---- 여기서부터는 기존 top2 -> top3 -> cyclic 로직 ----
                                     top1_val = float(base_probs[top1_idx])
                                     top2_val = float(base_probs[top2_idx])
 
@@ -1148,11 +1076,6 @@ def main():
                             curve_obj['ours_switch_cyclic'] = {
                                 'costs': [c for c, _ in curve_ours_switch_cyc],
                                 'accuracies': [a for _, a in curve_ours_switch_cyc],
-                            }
-                        if len(curve_ours_top2_cyc) == len(betas):
-                            curve_obj['ours_top2_to_cyclic'] = {
-                                'costs': [c for c, _ in curve_ours_top2_cyc],
-                                'accuracies': [a for _, a in curve_ours_top2_cyc],
                             }
                         if len(curve_ours_top2flip_cyc) == len(betas):
                             curve_obj['ours_top2flip_to_cyclic'] = {
