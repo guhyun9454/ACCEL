@@ -102,7 +102,7 @@ def main():
     if len(args.eval_names) == 0:
         return
 
-    # Optional: W&B init (필요 없으면 --wandb 안 쓰면 됨)
+    # Optional: W&B init
     wandb_run = None
     if getattr(args, 'wandb', False):
         try:
@@ -849,7 +849,6 @@ def main():
                                     # 답 바뀌었는지 체크
                                     if pred_top2_letter == pred_base_letter:
                                         # top2로도 안 바뀜 → top2까지만 (cost=2 or 1)
-                                        # base만 쓴 경우(cost=1)와 구분 위해:
                                         if np.allclose(agg_top2, base_probs):
                                             total_cost_t2 += 1.0
                                             final_letter = pred_base_letter
@@ -865,10 +864,8 @@ def main():
                                         )
                                         pred_cyc_letter = option_ids[int(np.argmax(agg_cyc))]
                                         final_letter = pred_cyc_letter
-                                        # top2 단계에서 identity 한 번, swap 한 번, cyclic(k회)을 모두 비용에 반영
-                                        # (여기서는 base forward는 이미 했다고 치고 top2=1, cyclic=k 로 단순 모델링 가능하지만,
-                                        #  일단 top2까지 2, cyclic 추가로 k 로 계산)
-                                        total_cost_t2 += float(k)  # cyclic 비용만 모델링
+                                        # 여기서는 cyclic 비용만 모델링
+                                        total_cost_t2 += float(k)
 
                                     if final_letter == ideals[i]:
                                         corrects_t2 += 1
@@ -882,6 +879,93 @@ def main():
                         except Exception as e:
                             logger.warning(f"Failed to compute Ours top2->cyclic curve: {e}")
                             curve_ours_top2_cyc = []
+
+                        # ---------------- Ours top2flip -> cyclic (low-conf + label flip만 cyclic) ----------------
+                        curve_ours_top2flip_cyc = []
+                        try:
+                            for beta in betas:
+                                n = int(N * beta + 1e-9)
+
+                                if n > 0:
+                                    thresh = float(np.quantile(default_conf[:n], perc))
+                                else:
+                                    thresh = float(np.quantile(default_conf, perc))
+
+                                total_cost_f2 = 0.0
+                                corrects_f2 = 0
+
+                                # (1) beta subset: 항상 default만 (cost=1)
+                                for i in range(0, n):
+                                    bp = base_probs_list[i]
+                                    pred_base = option_ids[int(np.argmax(bp))]
+                                    if pred_base == ideals[i]:
+                                        corrects_f2 += 1
+                                    total_cost_f2 += 1.0
+
+                                # (2) (1-beta) subset: low-conf + label flip인 애들만 cyclic
+                                for i in range(n, N):
+                                    probs_seq = per_sample_probs[i]
+                                    base_probs = base_probs_list[i]
+                                    pred_base_letter = option_ids[int(np.argmax(base_probs))]
+
+                                    # high-conf면 그냥 default
+                                    if default_conf[i] >= thresh:
+                                        total_cost_f2 += 1.0
+                                        final_letter = pred_base_letter
+                                    else:
+                                        # low-conf: top2로 flip 여부만 체크하는 용도
+                                        sorted_idx = np.argsort(base_probs)[::-1]
+                                        top1_idx = int(sorted_idx[0])
+                                        top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
+
+                                        identity_perm = perm_list[identity_idx]
+                                        perm_swap = list(identity_perm)
+                                        perm_swap[top1_idx], perm_swap[top2_idx] = (
+                                            perm_swap[top2_idx],
+                                            perm_swap[top1_idx],
+                                        )
+                                        perm_swap_t = tuple(perm_swap)
+
+                                        if perm_swap_t in perm_list:
+                                            swap_idx = perm_list.index(perm_swap_t)
+                                            probs_base = probs_seq[identity_idx]
+                                            probs_swap = probs_seq[swap_idx]
+                                            agg_top2 = _aggregate_probs_over_permutations(
+                                                [probs_base.tolist(), probs_swap.tolist()],
+                                                [perm_list[identity_idx], perm_list[swap_idx]],
+                                                k,
+                                            )
+                                        else:
+                                            agg_top2 = base_probs.copy()
+
+                                        pred_top2_letter = option_ids[int(np.argmax(agg_top2))]
+
+                                        if pred_top2_letter != pred_base_letter:
+                                            # label이 바뀐 low-conf 샘플 → 바로 cyclic 승급
+                                            cyc_probs = [probs_seq[j].tolist() for j in cyclic_indices]
+                                            cyc_perms = [perm_list[j] for j in cyclic_indices]
+                                            agg_cyc = _aggregate_probs_over_permutations(
+                                                cyc_probs, cyc_perms, k
+                                            )
+                                            final_letter = option_ids[int(np.argmax(agg_cyc))]
+                                            total_cost_f2 += float(k)
+                                        else:
+                                            # label 안 바뀌면 그냥 base 유지
+                                            final_letter = pred_base_letter
+                                            total_cost_f2 += 1.0
+
+                                    if final_letter == ideals[i]:
+                                        corrects_f2 += 1
+
+                                acc_f2 = (corrects_f2 / float(N)) if N > 0 else float('nan')
+                                cost_f2 = (total_cost_f2 / float(N)) if N > 0 else float('nan')
+                                curve_ours_top2flip_cyc.append((cost_f2, acc_f2))
+
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours top2flip->cyclic): " +
+                                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_top2flip_cyc])))
+                        except Exception as e:
+                            logger.warning(f"Failed to compute Ours top2flip->cyclic curve: {e}")
+                            curve_ours_top2flip_cyc = []
 
                         # ---------------- Oracle low-confidence accuracy ----------------
                         curve_obj = {
@@ -917,6 +1001,11 @@ def main():
                             curve_obj['ours_top2_to_cyclic'] = {
                                 'costs': [c for c, _ in curve_ours_top2_cyc],
                                 'accuracies': [a for _, a in curve_ours_top2_cyc],
+                            }
+                        if len(curve_ours_top2flip_cyc) == len(betas):
+                            curve_obj['ours_top2flip_to_cyclic'] = {
+                                'costs': [c for c, _ in curve_ours_top2flip_cyc],
+                                'accuracies': [a for _, a in curve_ours_top2flip_cyc],
                             }
 
                         # Oracle: bottom-p% accuracy for default
