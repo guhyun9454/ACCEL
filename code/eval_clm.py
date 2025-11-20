@@ -770,7 +770,7 @@ def main():
                         # ---------------- Ours top2 -> cyclic (low-conf only) ----------------
                         curve_ours_top2_cyc = []
                         try:
-                            top2_gap_frac = 0.1
+                            top2_gap_frac = 0.05
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
