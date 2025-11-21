@@ -99,6 +99,7 @@ def plot_curves(betas: List[float],
     plt.scatter([1.0], [default_acc], marker='*', s=180, c='black', label='Default')
     plt.xlabel("Computational Cost (× of default)")
     plt.ylabel("Accuracy")
+    plt.xscale('log', base=2)
     plt.title("Accuracy vs. Computational Cost")
     plt.grid(True, linestyle='--', alpha=0.4)
     plt.legend()

@@ -865,6 +865,7 @@ def main():
                                 plt.scatter([1.0], [summary_base], marker='*', s=180, c='black', label='Default')
                                 plt.xlabel("Computational Cost (× of default)")
                                 plt.ylabel("Accuracy")
+                                plt.xscale('log', base=2)
                                 plt.title(f"Accuracy vs. Cost — {subject}")
                                 plt.grid(True, linestyle='--', alpha=0.4)
                                 plt.legend()
