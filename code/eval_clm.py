@@ -10,6 +10,7 @@ import logging
 import random
 from functools import partial
 from typing import List, Optional, Tuple
+from collections import Counter  # <-- added for voting logic
 
 import numpy as np
 import pandas as pd
@@ -838,15 +839,34 @@ def main():
                                             corrects_t2f += 1
                                         continue
 
-                                    # flip + low-conf인 애들만 cyclic 승급
+                                    # === 여기서부터: flip + low-conf 샘플에 대해 cyclic까지 가고,
+                                    # base / top2 / cyclic 3단계 투표/스위치 적용 ===
                                     cyc_probs = [probs_seq[j].tolist() for j in cyclic_indices]
                                     cyc_perms = [perm_list[j] for j in cyclic_indices]
                                     agg_cyc = _aggregate_probs_over_permutations(
                                         cyc_probs, cyc_perms, k
                                     )
                                     pred_cyc_letter = option_ids[int(np.argmax(agg_cyc))]
+
+                                    # 각 단계 confidence 계산
+                                    conf_base = float(default_conf[i])
+                                    conf_top2 = _conf_gap(agg_top2)
+                                    conf_cyc = _conf_gap(agg_cyc)
+
+                                    labels = [pred_base_letter, pred_top2_letter, pred_cyc_letter]
+                                    confs = [conf_base, conf_top2, conf_cyc]
+
+                                    cnt = Counter(labels)
+                                    most_label, votes = cnt.most_common(1)[0]
+                                    if votes >= 2:
+                                        final_label = most_label
+                                    else:
+                                        # 동률이면 confidence 가장 큰 쪽 선택
+                                        best_idx = int(np.argmax(confs))
+                                        final_label = labels[best_idx]
+
                                     total_cost_t2f += float(k)
-                                    if pred_cyc_letter == ideals[i]:
+                                    if final_label == ideals[i]:
                                         corrects_t2f += 1
 
                                 acc_t2f = (corrects_t2f / float(N)) if N > 0 else float('nan')
@@ -863,7 +883,7 @@ def main():
                         curve_ours_top2_3_cyc = []
                         try:
                             top2_gap_frac_adapt = 0.1
-                            flat_frac4 = 0.05   # top1 ~ top4가 이 정도 이내면 "거의 평평"으로 간주
+                            flat_frac4 = 0.05   # top1 ~ top4 거의 평평 기준
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
@@ -889,6 +909,7 @@ def main():
                                     probs_seq = per_sample_probs[i]
                                     base_probs = base_probs_list[i]
                                     pred_base_letter = option_ids[int(np.argmax(base_probs))]
+                                    conf_base = float(default_conf[i])
 
                                     # high-conf → default
                                     if default_conf[i] >= thresh:
@@ -914,15 +935,27 @@ def main():
                                         is_ultra_ambiguous = False
 
                                     if is_ultra_ambiguous:
-                                        # 진짜 애매한 문제 → 바로 cyclic으로 승급
+                                        # 진짜 애매한 문제 → base vs cyclic 투표
                                         cyc_probs = [probs_seq[j].tolist() for j in cyclic_indices]
                                         cyc_perms = [perm_list[j] for j in cyclic_indices]
                                         agg_cyc = _aggregate_probs_over_permutations(
                                             cyc_probs, cyc_perms, k
                                         )
                                         pred_cyc_letter = option_ids[int(np.argmax(agg_cyc))]
+                                        conf_cyc = _conf_gap(agg_cyc)
+
+                                        labels = [pred_base_letter, pred_cyc_letter]
+                                        confs = [conf_base, conf_cyc]
+                                        cnt = Counter(labels)
+                                        most_label, votes = cnt.most_common(1)[0]
+                                        if votes >= 2:
+                                            final_label = most_label
+                                        else:
+                                            best_idx = int(np.argmax(confs))
+                                            final_label = labels[best_idx]
+
                                         total_cost_t4 += float(k)
-                                        if pred_cyc_letter == ideals[i]:
+                                        if final_label == ideals[i]:
                                             corrects_t4 += 1
                                         continue
 
@@ -947,6 +980,7 @@ def main():
                                         idxs_top2 = [identity_idx]
 
                                     pred_top2_letter = option_ids[int(np.argmax(agg_top2))]
+                                    conf_top2 = _conf_gap(agg_top2)
 
                                     # flip 없으면 ID 민감도 낮다고 보고 default로 고정
                                     if pred_top2_letter == pred_base_letter:
@@ -956,10 +990,8 @@ def main():
                                         continue
 
                                     # flip 발생 → ID bias 민감한 샘플
-                                    conf_top2 = _conf_gap(agg_top2)
-
-                                    # top2에서 conf 회복되면 여기서 stop (cost≈2)
                                     if conf_top2 >= thresh:
+                                        # top2 단계에서 conf 회복되면 여기서 stop (cost≈2)
                                         total_cost_t4 += float(len(idxs_top2))
                                         if pred_top2_letter == ideals[i]:
                                             corrects_t4 += 1
@@ -1026,15 +1058,37 @@ def main():
                                             corrects_t4 += 1
                                         continue
 
-                                    # 마지막 단계: full cyclic
+                                    # 마지막 단계: full cyclic + base/top2/top3/cyclic 4단계 투표
                                     cyc_probs = [probs_seq[j].tolist() for j in cyclic_indices]
                                     cyc_perms = [perm_list[j] for j in cyclic_indices]
                                     agg_cyc = _aggregate_probs_over_permutations(
                                         cyc_probs, cyc_perms, k
                                     )
                                     pred_cyc_letter = option_ids[int(np.argmax(agg_cyc))]
+                                    conf_cyc = _conf_gap(agg_cyc)
+
+                                    labels = [
+                                        pred_base_letter,
+                                        pred_top2_letter,
+                                        pred_top3_letter,
+                                        pred_cyc_letter,
+                                    ]
+                                    confs = [
+                                        conf_base,
+                                        conf_top2,
+                                        conf_top3,
+                                        conf_cyc,
+                                    ]
+                                    cnt = Counter(labels)
+                                    most_label, votes = cnt.most_common(1)[0]
+                                    if votes >= 2:
+                                        final_label = most_label
+                                    else:
+                                        best_idx = int(np.argmax(confs))
+                                        final_label = labels[best_idx]
+
                                     total_cost_t4 += float(k)
-                                    if pred_cyc_letter == ideals[i]:
+                                    if final_label == ideals[i]:
                                         corrects_t4 += 1
 
                                 acc_t4 = (corrects_t4 / float(N)) if N > 0 else float('nan')
