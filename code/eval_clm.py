@@ -805,14 +805,14 @@ def main():
                                             corrects_t2f += 1
                                         continue
 
-                                    # base에서 top2 swap
+                                    # base에서 top2 swap (gap이 **작을 때만** swap)
                                     sorted_idx = np.argsort(base_probs)[::-1]
                                     top1_idx = int(sorted_idx[0])
                                     top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
                                     top1_val = float(base_probs[top1_idx])
                                     top2_val = float(base_probs[top2_idx])
 
-                                    if top1_val - top2_val >= top2_gap_frac2 * max(top1_val, 1e-8):
+                                    if top1_val - top2_val <= top2_gap_frac2 * max(top1_val, 1e-8):
                                         perm_swap = list(identity_perm)
                                         perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
                                         perm_swap_t = tuple(perm_swap)
@@ -963,8 +963,8 @@ def main():
                                     top1_val = float(base_probs[top1_idx])
                                     top2_val = float(base_probs[top2_idx])
 
-                                    # 먼저 top2 swap
-                                    if top1_val - top2_val >= top2_gap_frac_adapt * max(top1_val, 1e-8):
+                                    # 먼저 top2 swap (gap이 **작을 때만** swap)
+                                    if top1_val - top2_val <= top2_gap_frac_adapt * max(top1_val, 1e-8):
                                         perm_swap = list(identity_perm)
                                         perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
                                         perm_swap_t = tuple(perm_swap)
