@@ -882,7 +882,7 @@ def main():
                         # ---------------- Ours top2 -> top3 -> cyclic + ultra-ambiguous handling ----------------
                         curve_ours_top2_3_cyc = []
                         try:
-                            top2_gap_frac_adapt = 0.1
+                            top2_gap_frac_adapt = 0.3
                             flat_frac4 = 0.05   # top1 ~ top4 거의 평평 기준
 
                             for beta in betas:
