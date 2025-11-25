@@ -59,6 +59,8 @@ def parse_arguments():
     # Ours method hyperparameters
     parser.add_argument("--ours_low_conf_percent", type=float, default=10.0,
                         help="Bottom percentile (e.g., 10.0) of confidence (from beta subset) to trigger cascading ensemble")
+    parser.add_argument("--ours_top2_gap_frac", type=float, default=0.3,
+                        help="If (top1 - top2) / top1 <= this, treat as 'very ambiguous' and send directly to cyclic (use 0.0 to disable).")
     parser.add_argument("--force", action="store_true",
                         help="Overwrite existing results files if they exist")
     args = parser.parse_args()
