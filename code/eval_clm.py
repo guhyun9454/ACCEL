@@ -771,7 +771,7 @@ def main():
                         # ---------------- Ours top2flip -> cyclic (low-conf + flip only) ----------------
                         curve_ours_top2flip_cyc = []
                         try:
-                            top2_gap_frac2 = 0.1
+                            top2_gap_frac2 = 0.3
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
