@@ -597,6 +597,7 @@ def main():
                                             ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_full])))
 
                         # Helper for confidence gap
+                                                # Helper for confidence gap (top1 - top2)
                         def _conf_gap(pvec: np.ndarray) -> float:
                             vals = np.sort(pvec)[::-1]
                             if vals.shape[0] < 2:
@@ -607,20 +608,88 @@ def main():
                         per_sample_probs = []
                         base_probs_list = []
                         ideals = []
-                        default_conf = []
+                        default_conf = []  # gap-based confidence (top1 - top2)
                         for r in results:
                             if r.get('type') != 'result':
                                 continue
                             data_r = r['data']
                             probs_seq_r = np.asarray(data_r['probs'], dtype=np.float64)
                             per_sample_probs.append(probs_seq_r)
+
+                            # base 분포: probs[identity_idx]
                             base_probs = probs_seq_r[identity_idx]
                             base_probs_list.append(base_probs)
                             ideals.append(data_r['ideal'])
+
+                            # 이미 쓰던 conf_gap (top1 - top2) – cascade용
                             default_conf.append(_conf_gap(base_probs))
+
                         default_conf = np.asarray(default_conf, dtype=np.float64)
 
+                        # ★ 추가: "conf = max(probs[0])", "gap = top1 - top2" 기준 값 계산
+                        base_conf_max = []   # conf = max(probs[0])
+                        base_gap = []        # gap = top1 - top2 (probs[0] 기준)
+                        for bp in base_probs_list:
+                            vals = np.sort(bp)[::-1]
+                            if vals.shape[0] == 0:
+                                base_conf_max.append(0.0)
+                                base_gap.append(0.0)
+                                continue
+                            top1 = float(vals[0])
+                            top2 = float(vals[1]) if vals.shape[0] > 1 else 0.0
+                            base_conf_max.append(top1)
+                            base_gap.append(top1 - top2)
+
+                        base_conf_max = np.asarray(base_conf_max, dtype=np.float64)
+                        base_gap = np.asarray(base_gap, dtype=np.float64)
+
+                        # ★ 추가: conf-threshold 별 gap 통계 (히스토그램용 summary)
+                        conf_gap_stats = None
+                        try:
+                            # conf ≤ 0.1, 0.2, ..., 1.0 별로 통계 계산
+                            thresholds = [i / 10.0 for i in range(1, 11)]
+                            conf_gap_stats = []
+                            for thr in thresholds:
+                                mask = base_conf_max <= (thr + 1e-9)
+                                count = int(mask.sum())
+                                if count == 0:
+                                    stats = {
+                                        'threshold_conf_max': thr,
+                                        'count': 0,
+                                        'mean_gap': None,
+                                        'std_gap': None,
+                                        'min_gap': None,
+                                        'max_gap': None,
+                                    }
+                                else:
+                                    gaps_thr = base_gap[mask]
+                                    stats = {
+                                        'threshold_conf_max': thr,
+                                        'count': count,
+                                        'mean_gap': float(gaps_thr.mean()),
+                                        'std_gap': float(gaps_thr.std()),
+                                        'min_gap': float(gaps_thr.min()),
+                                        'max_gap': float(gaps_thr.max()),
+                                    }
+                                conf_gap_stats.append(stats)
+
+                            # 로그에도 한 번 찍어줌 (간단 요약)
+                            logger.info(_purple(
+                                f"[{subject}] Conf-max vs gap stats (conf <= thr): " +
+                                ", ".join(
+                                    [
+                                        f"thr={s['threshold_conf_max']:.1f}, n={s['count']}, mean_gap={s['mean_gap']}"
+                                        for s in conf_gap_stats
+                                    ]
+                                )
+                            ))
+                        except Exception as e:
+                            logger.warning(f"Failed to compute conf-max vs gap stats: {e}")
+                            conf_gap_stats = None
+
+                        # (기존 코드) ours_low_conf_percent: gap 기반 cascade 에 여전히 사용
                         perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
+
 
                         # ---------------- Ours (cascading ensemble) ----------------
                         curve_ours = []
@@ -898,6 +967,8 @@ def main():
                                 'costs': [c for c, _ in curve_ours_top2flip_cyc],
                                 'accuracies': [a for _, a in curve_ours_top2flip_cyc],
                             }
+                        if conf_gap_stats is not None:
+                            curve_obj['conf_max_gap_stats'] = conf_gap_stats
 
                         try:
                             default_confs = default_conf.copy()
