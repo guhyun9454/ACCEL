@@ -596,8 +596,7 @@ def main():
                         logger.info(_purple(f"[{subject}] Beta curve (Full): " +
                                             ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_full])))
 
-                        # Helper for confidence gap
-                                                # Helper for confidence gap (top1 - top2)
+                        # Helper for confidence gap (top1 - top2)
                         def _conf_gap(pvec: np.ndarray) -> float:
                             vals = np.sort(pvec)[::-1]
                             if vals.shape[0] < 2:
@@ -621,7 +620,7 @@ def main():
                             base_probs_list.append(base_probs)
                             ideals.append(data_r['ideal'])
 
-                            # 이미 쓰던 conf_gap (top1 - top2) – cascade용
+                            # cascade용 conf_gap (top1 - top2)
                             default_conf.append(_conf_gap(base_probs))
 
                         default_conf = np.asarray(default_conf, dtype=np.float64)
@@ -646,7 +645,6 @@ def main():
                         # ★ 추가: conf-threshold 별 gap 통계 (히스토그램용 summary)
                         conf_gap_stats = None
                         try:
-                            # conf ≤ 0.1, 0.2, ..., 1.0 별로 통계 계산
                             thresholds = [i / 10.0 for i in range(1, 11)]
                             conf_gap_stats = []
                             for thr in thresholds:
@@ -673,7 +671,6 @@ def main():
                                     }
                                 conf_gap_stats.append(stats)
 
-                            # 로그에도 한 번 찍어줌 (간단 요약)
                             logger.info(_purple(
                                 f"[{subject}] Conf-max vs gap stats (conf <= thr): " +
                                 ", ".join(
@@ -687,9 +684,8 @@ def main():
                             logger.warning(f"Failed to compute conf-max vs gap stats: {e}")
                             conf_gap_stats = None
 
-                        # (기존 코드) ours_low_conf_percent: gap 기반 cascade 에 여전히 사용
+                        # ours_low_conf_percent: gap 기반 cascade에 사용
                         perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
-
 
                         # ---------------- Ours (cascading ensemble) ----------------
                         curve_ours = []
@@ -840,9 +836,8 @@ def main():
                         # ---------------- Ours top2flip -> cyclic ----------------
                         curve_ours_top2flip_cyc = []
                         try:
-                            # CLI에서 ours_top2_gap_frac은 받지만,
-                            # 여기서는 gap 크기에 상관없이 모든 low-conf 샘플을 ambiguous로 취급.
-                            _unused_gap_frac = getattr(args, "ours_top2_gap_frac", 0.0)
+                            gap_frac_thr = float(getattr(args, "ours_top2_gap_frac", 0.0) or 0.0)
+                            gap_frac_thr = max(gap_frac_thr, 0.0)
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
@@ -854,6 +849,9 @@ def main():
 
                                 total_cost_t2f = 0.0
                                 corrects_t2f = 0
+
+                                very_amb_cnt = 0
+                                flip_cnt = 0
 
                                 # beta subset: 항상 default
                                 for i in range(0, n):
@@ -876,55 +874,77 @@ def main():
                                             corrects_t2f += 1
                                         continue
 
-                                    # low-conf: top1/top2 contents swap 후 flip 여부 확인
+                                    # low-conf: (top1-top2)/top1 계산
                                     sorted_idx = np.argsort(base_probs)[::-1]
                                     top1_idx = int(sorted_idx[0])
                                     top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
 
-                                    perm_swap = list(identity_perm)
-                                    perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
-                                    perm_swap_t = tuple(perm_swap)
-                                    swap_idx = perm_index_map.get(perm_swap_t, identity_idx)
+                                    top1_val = float(base_probs[top1_idx])
+                                    top2_val = float(base_probs[top2_idx])
+                                    gap = max(top1_val - top2_val, 0.0)
+                                    gap_frac = gap / (top1_val + 1e-12)
 
-                                    probs_base = probs_seq[identity_idx]
-                                    probs_swap = probs_seq[swap_idx]
+                                    # 핵심: very ambiguous일 때만 swap-check 수행
+                                    if (gap_frac_thr > 0.0) and (gap_frac <= gap_frac_thr):
+                                        very_amb_cnt += 1
 
-                                    # identity 설정에서의 content-level prediction
-                                    agg_base = _aggregate_probs_over_permutations(
-                                        [probs_base.tolist()],
-                                        [perm_list[identity_idx]],
-                                        k,
-                                    )
-                                    # top1/top2 contents를 swap한 설정에서의 content-level prediction
-                                    agg_swap = _aggregate_probs_over_permutations(
-                                        [probs_swap.tolist()],
-                                        [perm_list[swap_idx]],
-                                        k,
-                                    )
-                                    pred_base_content = option_ids[int(np.argmax(agg_base))]
-                                    pred_swap_content = option_ids[int(np.argmax(agg_swap))]
+                                        # top1/top2 contents swap 후 flip 여부 확인
+                                        perm_swap = list(identity_perm)
+                                        perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
+                                        perm_swap_t = tuple(perm_swap)
+                                        swap_idx = perm_index_map.get(perm_swap_t, identity_idx)
 
-                                    if pred_swap_content == pred_base_content:
-                                        # flip이 없으면 base 그대로 사용하고 stop
-                                        total_cost_t2f += 1.0
-                                        if pred_base_content == ideals[i]:
+                                        probs_base = probs_seq[identity_idx]
+                                        probs_swap = probs_seq[swap_idx]
+
+                                        # identity 설정에서 content-level prediction
+                                        agg_base = _aggregate_probs_over_permutations(
+                                            [probs_base.tolist()],
+                                            [perm_list[identity_idx]],
+                                            k,
+                                        )
+                                        # swap 설정에서 content-level prediction
+                                        agg_swap = _aggregate_probs_over_permutations(
+                                            [probs_swap.tolist()],
+                                            [perm_list[swap_idx]],
+                                            k,
+                                        )
+                                        pred_base_content = option_ids[int(np.argmax(agg_base))]
+                                        pred_swap_content = option_ids[int(np.argmax(agg_swap))]
+
+                                        if pred_swap_content == pred_base_content:
+                                            # flip 없으면 base 그대로 사용하고 stop
+                                            total_cost_t2f += 1.0
+                                            if pred_base_content == ideals[i]:
+                                                corrects_t2f += 1
+                                            continue
+
+                                        # flip 발생 → cyclic까지 보내고 최종 답은 cyclic
+                                        flip_cnt += 1
+                                        cyc_probs = [probs_seq[j].tolist() for j in cyclic_indices]
+                                        cyc_perms = [perm_list[j] for j in cyclic_indices]
+                                        agg_cyc = _aggregate_probs_over_permutations(
+                                            cyc_probs, cyc_perms, k
+                                        )
+                                        pred_cyc_letter = option_ids[int(np.argmax(agg_cyc))]
+                                        total_cost_t2f += float(k)
+                                        if pred_cyc_letter == ideals[i]:
                                             corrects_t2f += 1
                                         continue
 
-                                    # flip 발생: ID에 민감한 샘플 → cyclic까지 보내고, 최종 답은 cyclic만 사용
-                                    cyc_probs = [probs_seq[j].tolist() for j in cyclic_indices]
-                                    cyc_perms = [perm_list[j] for j in cyclic_indices]
-                                    agg_cyc = _aggregate_probs_over_permutations(
-                                        cyc_probs, cyc_perms, k
-                                    )
-                                    pred_cyc_letter = option_ids[int(np.argmax(agg_cyc))]
-                                    total_cost_t2f += float(k)
-                                    if pred_cyc_letter == ideals[i]:
+                                    # low-conf지만 very ambiguous가 아님 → swap 체크 없이 base로 종료
+                                    total_cost_t2f += 1.0
+                                    if pred_base_letter == ideals[i]:
                                         corrects_t2f += 1
 
                                 acc_t2f = (corrects_t2f / float(N)) if N > 0 else float('nan')
                                 cost_t2f = (total_cost_t2f / float(N)) if N > 0 else float('nan')
                                 curve_ours_top2flip_cyc.append((cost_t2f, acc_t2f))
+
+                                logger.info(_purple(
+                                    f"[{subject}] top2flip->cyclic beta={beta:.1f} "
+                                    f"(gap_frac_thr={gap_frac_thr:.3f}) very_amb={very_amb_cnt}, flips={flip_cnt}"
+                                ))
 
                             logger.info(_purple(f"[{subject}] Beta curve (Ours top2flip->cyclic): " +
                                                 ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_top2flip_cyc])))
