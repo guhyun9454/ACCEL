@@ -1,11 +1,29 @@
+# eval_clm.py
+# -*- coding: utf-8 -*-
+
 import os
 import sys
+import gc
 import json
+import copy
 import logging
+import random
+from functools import partial
+from typing import List, Optional, Tuple
+from collections import Counter  # <-- added for voting logic
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import logging as hf_logging
+
 from eval_clm_utils import (
     parse_arguments,
     prepare_eval,
 )
+
 from utils import (
     _orange, _blue, _purple,
     eval_all_samples,
@@ -14,16 +32,8 @@ from utils import (
     save_results,
     patch_open,
 )
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers import BitsAndBytesConfig
-import numpy as np
-from types import SimpleNamespace
-from itertools import permutations
-import matplotlib.pyplot as plt
-import math
 
-import gc
+import math
 
 import pynvml
 pynvml.nvmlInit()
@@ -37,7 +47,13 @@ def logging_cuda_memory_usage():
     for i in range(n_gpus):
         handle = pynvml.nvmlDeviceGetHandleByIndex(i)
         meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        logger.info("GPU {}: {:.2f} GB / {:.2f} GB".format(i, meminfo.used / 1024 ** 3, meminfo.total / 1024 ** 3))
+        logger.info(
+            "GPU {}: {:.2f} GB / {:.2f} GB".format(
+                i,
+                meminfo.used / 1024 ** 3,
+                meminfo.total / 1024 ** 3
+            )
+        )
 
 
 def _rotations(k: int):
@@ -46,8 +62,6 @@ def _rotations(k: int):
 
 def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
     """
-    Map letter-indexed probs from each permutation to content-indexed probs,
-    then average across permutations.
     probs_seq: list of length (#perms), each a length-k list of probs for letters
     permuted_indices: list of tuples, permutation p: letter j corresponds to content index p[j]
     """
@@ -80,28 +94,35 @@ def main():
         format="[%(asctime)s] [%(filename)s:%(lineno)d] %(message)s",
         level=logging.INFO,
     )
+    hf_logging.set_verbosity_error()
 
     args = parse_arguments()
     if len(args.eval_names) == 0:
-        exit()
+        return
 
     # Optional: W&B init
     wandb_run = None
     if getattr(args, 'wandb', False):
         try:
             import wandb
-            project = args.wandb_project 
+            project = args.wandb_project
             run_name = args.wandb_run_name or f"{args.model_name}-{args.eval_names[0]}"
-            wandb_run = wandb.init(entity = "capde", project=project, name=run_name, config={
-                "pretrained_model_path": args.pretrained_model_path,
-                "model_name": args.model_name,
-                "eval_names": args.eval_names,
-                "option_id_set": args.option_id_set,
-            })
+            wandb_run = wandb.init(
+                entity="capde",
+                project=project,
+                name=run_name,
+                config={
+                    "pretrained_model_path": args.pretrained_model_path,
+                    "model_name": args.model_name,
+                    "eval_names": args.eval_names,
+                    "option_id_set": args.option_id_set,
+                },
+            )
         except Exception as e:
             logger.warning(f"W&B init failed: {e}")
             wandb_run = None
 
+    # Tokenizer / Model
     toker = AutoTokenizer.from_pretrained(
         args.pretrained_model_path,
         use_fast=False,
@@ -117,12 +138,17 @@ def main():
         torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
         cache_dir=args.cache_dir,
     )
+
     logging_cuda_memory_usage()
 
     printed_example = False
 
-    # Comparative mode: run with two option ID sets and compute matching ratio and flip stats
+    # ---------------------------------------------------------
+    # 1) Comparative mode: option_id_sets 두 개 비교
+    # ---------------------------------------------------------
     if getattr(args, 'option_id_sets', None) and len(args.option_id_sets) == 2:
+        from types import SimpleNamespace
+
         id_set_a, id_set_b = args.option_id_sets[0], args.option_id_sets[1]
 
         overall_total = 0
@@ -132,23 +158,23 @@ def main():
         overall_both_correct = 0
         overall_both_incorrect = 0
 
-        def _read_results_file(file_path):
-            try:
-                lines = [json.loads(line) for line in open(file_path)]
-                lines = [e for e in lines if e.get('type') == 'result']
-                lines = sorted(lines, key=lambda x: int(x['data']['idx']))
-                return lines
-            except FileNotFoundError:
-                return None
-
         for eval_name in args.eval_names[::1]:
             eval_args = eval_name.split(',')
             setting = eval_args[2] if len(eval_args) > 2 else None
-            if setting in ['perm', 'cyclic']:
+            if setting in ['perm', 'cyclic', 'full']:
                 logger.info(_orange(f"Skipping compare for setting '{setting}' (not supported)."))
                 continue
-            args_a = SimpleNamespace(pretrained_model_path=args.pretrained_model_path, model_name=args.model_name, option_id_set=id_set_a)
-            args_b = SimpleNamespace(pretrained_model_path=args.pretrained_model_path, model_name=args.model_name, option_id_set=id_set_b)
+
+            args_a = SimpleNamespace(
+                pretrained_model_path=args.pretrained_model_path,
+                model_name=args.model_name,
+                option_id_set=id_set_a,
+            )
+            args_b = SimpleNamespace(
+                pretrained_model_path=args.pretrained_model_path,
+                model_name=args.model_name,
+                option_id_set=id_set_b,
+            )
 
             (subjects_a, prepare_fewshot_a, prepare_eval_samples_a, prepare_eval_fn_a) = prepare_eval(args_a, eval_name)
             (subjects_b, prepare_fewshot_b, prepare_eval_samples_b, prepare_eval_fn_b) = prepare_eval(args_b, eval_name)
@@ -168,6 +194,7 @@ def main():
                 if getattr(args, 'print_prompt_example', False) and not printed_example and len(eval_samples_a) > 0:
                     try:
                         first_input, _first_options, _first_ideal = eval_samples_a[0]
+
                         def build_input_text(pair):
                             sys_msg, eval_sample = pair
                             text = sys_msg + '\n\n'
@@ -176,6 +203,7 @@ def main():
                                     text += s + '\n\n'
                             text += eval_sample
                             return text
+
                         if isinstance(first_input, list) and len(first_input) > 0 and isinstance(first_input[0], list):
                             input_text = build_input_text(first_input[0])
                             bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
@@ -186,6 +214,7 @@ def main():
                             bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
                             if not bpe_has_space_prefix:
                                 input_text += ' '
+
                         logger.info(_purple("==== Prompt example ===="))
                         logger.info("\n" + input_text)
                         logger.info(_purple("==== End prompt example ===="))
@@ -193,7 +222,6 @@ def main():
                     except Exception as e:
                         logger.warning(f"Failed to build prompt example: {e}")
 
-                # Try cached results first
                 path_a = f'{args_a.save_path}/{subject}.jsonl'
                 path_b = f'{args_b.save_path}/{subject}.jsonl'
                 results_a = None if getattr(args, 'force', False) else _read_results_file(path_a)
@@ -242,7 +270,6 @@ def main():
                 for idx in common:
                     ra = map_a[idx]['data']
                     rb = map_b[idx]['data']
-                    # Predicted option indices via argmax over probs
                     pa = int(np.argmax(np.array(ra['probs'])))
                     pb = int(np.argmax(np.array(rb['probs'])))
                     if pa == pb:
@@ -276,19 +303,25 @@ def main():
                 gc.collect()
                 torch.cuda.empty_cache()
 
-        # Overall summary
         if overall_total > 0:
             overall_mr = overall_matches / overall_total
-            logger.info(_purple("==== Overall compare summary ====\n" +
-                                f"matching_ratio={overall_mr:.4f} (matches/total={overall_matches}/{overall_total})\n" +
-                                f"correct->incorrect={overall_c2i}, incorrect->correct={overall_i2c}, both_correct={overall_both_correct}, both_incorrect={overall_both_incorrect}"))
+            logger.info(
+                _purple(
+                    "==== Overall compare summary ====\n"
+                    f"matching_ratio={overall_mr:.4f} (matches/total={overall_matches}/{overall_total})\n"
+                    f"correct->incorrect={overall_c2i}, incorrect->correct={overall_i2c}, "
+                    f"both_correct={overall_both_correct}, both_incorrect={overall_both_incorrect}"
+                )
+            )
         return
 
-    # Single-run mode (original)
+    # ---------------------------------------------------------
+    # 2) Single-run mode
+    # ---------------------------------------------------------
     for eval_name in args.eval_names[::1]:
-        (
-            subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
-        ) = prepare_eval(args, eval_name)
+        (subjects, prepare_few_shot_samples,
+         prepare_eval_samples, prepare_eval_fn) = prepare_eval(args, eval_name)
+
         for subject in subjects[::1]:
             cached_path = f'{args.save_path}/{subject}.jsonl'
             use_cached = (not getattr(args, 'force', False)) and os.path.exists(cached_path)
@@ -302,7 +335,7 @@ def main():
             if getattr(args, 'print_prompt_example', False) and not printed_example and len(eval_samples) > 0:
                 try:
                     first_input, _first_options, _first_ideal = eval_samples[0]
-                    # Build input_text similarly to eval fns for accuracy of display
+
                     def build_input_text(pair):
                         sys_msg, eval_sample = pair
                         text = sys_msg + '\n\n'
@@ -313,14 +346,11 @@ def main():
                         return text
 
                     if isinstance(first_input, list) and len(first_input) > 0 and isinstance(first_input[0], list):
-                        # perm/cyclic case: list of [sys_msg, prompt] pairs; show the first
                         input_text = build_input_text(first_input[0])
-                        # Match model-space behavior: add trailing space if tokenizer lacks space-prefix
                         bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
                         if not bpe_has_space_prefix:
                             input_text += ' '
                     else:
-                        # base/noid case
                         input_text = build_input_text(first_input)
                         if args.setting not in ['noid']:
                             bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
@@ -337,7 +367,6 @@ def main():
             if use_cached:
                 logger.info(_blue(f"Using cached results: {cached_path}"))
                 results = _read_results_file(cached_path) or []
-                ran_eval = False
             else:
                 logger.info(_blue(f"Run started: {subject}"))
                 max_samples = 100 if getattr(args, 'test', False) else None
@@ -349,7 +378,6 @@ def main():
                 )
                 gc.collect()
                 torch.cuda.empty_cache()
-                ran_eval = True
 
             metrics = None
             if len(results) > 0:
@@ -363,6 +391,7 @@ def main():
                     k = len(option_ids)
 
                     if args.setting in ['perm', 'full']:
+                        from itertools import permutations
                         perm_list = list(sorted(permutations(range(k))))
                     else:
                         perm_list = _rotations(k)
@@ -392,92 +421,105 @@ def main():
                     logger.info("Final report:")
                     for key, value in metrics['data'].items():
                         logger.info(f"{key}: {value}")
+
             logger.info(_orange(f"Run completed: {subject}"))
 
             if not use_cached:
-                save_results(f'{args.save_path}/{subject}.jsonl', results, metrics)
+                save_results(cached_path, results, metrics)
                 logger.info(f"Results saved: {subject}")
 
-            # Derive cyclic and default (base) outputs automatically from FULL permutation runs
-            if args.setting == 'full':
+            # -------------------------------------------------
+            # FULL permutation에서 cyclic / base / beta curve 등 파생 결과 계산
+            # -------------------------------------------------
+            if args.setting == 'full' and len(results) > 0:
                 try:
-                    # Determine option ids (respect custom option_id_set)
+                    # Determine option ids
                     if getattr(args, 'option_id_set', None):
                         option_ids = list(args.option_id_set)
                     else:
-                        # Fallback to infer from first result options length
-                        k = len(results[0]['data']['options']) if len(results) > 0 and results[0]['type'] == 'result' else 4
-                        option_ids = list('ABCDE' if k == 5 else 'ABCD')
+                        k_guess = len(results[0]['data']['options'])
+                        option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
                     k = len(option_ids)
 
-                    # Build permutation index lookup (identity and cyclic rotations)
+                    from itertools import permutations
                     perm_list = list(sorted(permutations(range(k))))
+                    perm_index_map = {p: idx for idx, p in enumerate(perm_list)}
                     identity_idx = perm_list.index(tuple(range(k)))
-                    cyclic_indices = [perm_list.index(tuple((i + s) % k for i in range(k))) for s in range(k)]
+                    identity_perm = perm_list[identity_idx]
+                    cyclic_indices = [
+                        perm_list.index(tuple((i + s) % k for i in range(k)))
+                        for s in range(k)
+                    ]
 
-                    # Build derived results
+                    # Derived results
                     cyclic_results = []
                     base_results = []
-                    # For reporting ensemble accuracies
+                    base_correct_list = []
+                    cyclic_correct_list = []
+                    full_correct_list = []
+
                     full_total = 0
                     full_corrects = 0
                     cyclic_total = 0
                     cyclic_corrects = 0
-                    # Per-sample correctness lists for beta curves
-                    base_correct_list = []
-                    cyclic_correct_list = []
-                    full_correct_list = []
+
                     for r in results:
                         if r.get('type') != 'result':
                             continue
                         data = r['data']
-                        probs_seq = data['probs']  # list of length (#perms) each with length k
-                        if not isinstance(probs_seq, list) or len(probs_seq) <= identity_idx:
+                        probs_seq = data['probs']
+                        if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
                             continue
 
-                        # Cyclic subset
-                        cyclic_probs = [probs_seq[idx] for idx in cyclic_indices]
+                        # Cyclic probs subset
+                        cyc_probs = [probs_seq[idx] for idx in cyclic_indices]
                         cyclic_results.append({
                             'type': 'result',
                             'data': {
                                 'idx': data['idx'],
                                 'prompt': data.get('prompt'),
                                 'options': data['options'],
-                                'probs': cyclic_probs,
+                                'probs': cyc_probs,
                                 'ideal': data['ideal'],
                             },
                         })
-                        # Cyclic ensemble vote for this sample
-                        agg_cyc = _aggregate_probs_over_permutations(cyclic_probs, [tuple((i + s) % k for i in range(k)) for s in range(k)], k)
+                        cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]
+                        agg_cyc = _aggregate_probs_over_permutations(
+                            cyc_probs, cyc_perms, k
+                        )
                         pred_cyc = option_ids[int(np.argmax(agg_cyc))]
-                        cyclic_correct_list.append(pred_cyc == data['ideal'])
-                        if pred_cyc == data['ideal']:
+                        corr_cyc = (pred_cyc == data['ideal'])
+                        cyclic_correct_list.append(corr_cyc)
+                        if corr_cyc:
                             cyclic_corrects += 1
                         cyclic_total += 1
 
-                        # Default (identity) subset -> base-style result
-                        base_probs = probs_seq[identity_idx]
-                        sampled = option_ids[int(np.argmax(np.array(base_probs)))]
-                        correct = (sampled == data['ideal'])
-                        base_correct_list.append(correct)
+                        # Base (identity)
+                        base_probs = np.asarray(probs_seq[identity_idx], dtype=np.float64)
+                        pred_base = option_ids[int(np.argmax(base_probs))]
+                        corr_base = (pred_base == data['ideal'])
+                        base_correct_list.append(corr_base)
                         base_results.append({
                             'type': 'result',
                             'data': {
                                 'idx': data['idx'],
                                 'prompt': data.get('prompt'),
                                 'options': data['options'],
-                                'probs': base_probs,
-                                'sampled': sampled,
+                                'probs': base_probs.tolist(),
+                                'sampled': pred_base,
                                 'ideal': data['ideal'],
-                                'correct': correct,
+                                'correct': corr_base,
                             },
                         })
 
-                        # Full ensemble vote for this sample
-                        agg_full = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
+                        # Full ensemble
+                        agg_full = _aggregate_probs_over_permutations(
+                            probs_seq, perm_list, k
+                        )
                         pred_full = option_ids[int(np.argmax(agg_full))]
-                        full_correct_list.append(pred_full == data['ideal'])
-                        if pred_full == data['ideal']:
+                        corr_full = (pred_full == data['ideal'])
+                        full_correct_list.append(corr_full)
+                        if corr_full:
                             full_corrects += 1
                         full_total += 1
 
@@ -494,7 +536,7 @@ def main():
                     save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results, metrics=cyclic_metrics)
                     logger.info(_orange(f"Derived and saved cyclic results (with metrics): {subject}"))
 
-                    # Save base-derived results with metrics
+                    # Save base-derived results
                     base_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}'
                     if getattr(args, 'option_id_set', None):
                         base_save_path += f'_id-{args.option_id_set}'
@@ -510,78 +552,152 @@ def main():
                     save_results(f'{base_save_path}/{subject}.jsonl', base_results, base_metrics)
                     logger.info(_orange(f"Derived and saved base results (with metrics): {subject}"))
 
-                    # Report FULL ensemble accuracy
+                    # Full ensemble accuracy
                     if full_total > 0:
                         full_acc = full_corrects / full_total
                         logger.info(_purple(f"[{subject}] Full permutation ensemble accuracy: {full_acc:.4f}"))
 
-                    # Unified 3-accuracy summary (Full, Cyclic, Default)
                     summary_full = full_acc if full_total > 0 else float('nan')
                     summary_cyc = cyclic_acc if cyclic_total > 0 else float('nan')
                     summary_base = base_metrics['data']['accuracy'] if (base_metrics is not None and 'accuracy' in base_metrics['data']) else float('nan')
                     logger.info(_purple(f"[{subject}] Accuracies — Full: {summary_full:.4f}, Cyclic: {summary_cyc:.4f}, Default: {summary_base:.4f}"))
 
-                    # Compute beta curves (0.0, 0.1, ..., 1.0) with cost on x-axis
+                    # ---------------- Beta curves (Cyclic / Full / Ours / switch / top2 variants) ------------
                     if len(base_correct_list) == len(cyclic_correct_list) == len(full_correct_list) and len(base_correct_list) > 0:
                         N = len(base_correct_list)
                         betas = [i / 10.0 for i in range(11)]
-                        # Cost per sample: beta*C + (1-beta)*1 (C = k or k!)
                         C_cyc = float(k)
-                        # factorial for k
                         C_full = float(math.factorial(k))
+
+                        # Cyclic / Full beta curves (deterministic subset)
                         curve_cyc = []
                         curve_full = []
-                        # Deterministic subset: use first n indices (results already sorted by idx)
                         for beta in betas:
                             n = int(N * beta + 1e-9)
-                            # Cyclic mix accuracy
+
+                            # cyclic mix
                             if n > 0:
-                                acc_cyc = (sum(cyclic_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
+                                acc_cyc_mix = (sum(cyclic_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
                             else:
-                                acc_cyc = sum(base_correct_list) / float(N)
-                            cost_cyc = (beta * C_cyc) + ((1.0 - beta) * 1.0)
-                            curve_cyc.append((cost_cyc, acc_cyc))
-                            # Full mix accuracy
+                                acc_cyc_mix = sum(base_correct_list) / float(N)
+                            cost_cyc = beta * C_cyc + (1.0 - beta) * 1.0
+                            curve_cyc.append((cost_cyc, acc_cyc_mix))
+
+                            # full mix
                             if n > 0:
                                 acc_full_mix = (sum(full_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
                             else:
                                 acc_full_mix = sum(base_correct_list) / float(N)
-                            cost_full = (beta * C_full) + ((1.0 - beta) * 1.0)
-                            curve_full.append((cost_full, acc_full_mix))
+                            cost_full_mix = beta * C_full + (1.0 - beta) * 1.0
+                            curve_full.append((cost_full_mix, acc_full_mix))
 
-                        logger.info(_purple(f"[{subject}] Beta curve (Cyclic): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_cyc])))
-                        logger.info(_purple(f"[{subject}] Beta curve (Full): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_full])))
+                        logger.info(_purple(f"[{subject}] Beta curve (Cyclic): " +
+                                            ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_cyc])))
+                        logger.info(_purple(f"[{subject}] Beta curve (Full): " +
+                                            ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_full])))
 
-                        # Ours (dynamic cascading ensemble)
+                        # Helper for confidence gap
+                                                # Helper for confidence gap (top1 - top2)
+                        def _conf_gap(pvec: np.ndarray) -> float:
+                            vals = np.sort(pvec)[::-1]
+                            if vals.shape[0] < 2:
+                                return 0.0
+                            return float(vals[0] - vals[1])
+
+                        # per-sample structures
+                        per_sample_probs = []
+                        base_probs_list = []
+                        ideals = []
+                        default_conf = []  # gap-based confidence (top1 - top2)
+                        for r in results:
+                            if r.get('type') != 'result':
+                                continue
+                            data_r = r['data']
+                            probs_seq_r = np.asarray(data_r['probs'], dtype=np.float64)
+                            per_sample_probs.append(probs_seq_r)
+
+                            # base 분포: probs[identity_idx]
+                            base_probs = probs_seq_r[identity_idx]
+                            base_probs_list.append(base_probs)
+                            ideals.append(data_r['ideal'])
+
+                            # 이미 쓰던 conf_gap (top1 - top2) – cascade용
+                            default_conf.append(_conf_gap(base_probs))
+
+                        default_conf = np.asarray(default_conf, dtype=np.float64)
+
+                        # ★ 추가: "conf = max(probs[0])", "gap = top1 - top2" 기준 값 계산
+                        base_conf_max = []   # conf = max(probs[0])
+                        base_gap = []        # gap = top1 - top2 (probs[0] 기준)
+                        for bp in base_probs_list:
+                            vals = np.sort(bp)[::-1]
+                            if vals.shape[0] == 0:
+                                base_conf_max.append(0.0)
+                                base_gap.append(0.0)
+                                continue
+                            top1 = float(vals[0])
+                            top2 = float(vals[1]) if vals.shape[0] > 1 else 0.0
+                            base_conf_max.append(top1)
+                            base_gap.append(top1 - top2)
+
+                        base_conf_max = np.asarray(base_conf_max, dtype=np.float64)
+                        base_gap = np.asarray(base_gap, dtype=np.float64)
+
+                        # ★ 추가: conf-threshold 별 gap 통계 (히스토그램용 summary)
+                        conf_gap_stats = None
+                        try:
+                            # conf ≤ 0.1, 0.2, ..., 1.0 별로 통계 계산
+                            thresholds = [i / 10.0 for i in range(1, 11)]
+                            conf_gap_stats = []
+                            for thr in thresholds:
+                                mask = base_conf_max <= (thr + 1e-9)
+                                count = int(mask.sum())
+                                if count == 0:
+                                    stats = {
+                                        'threshold_conf_max': thr,
+                                        'count': 0,
+                                        'mean_gap': None,
+                                        'std_gap': None,
+                                        'min_gap': None,
+                                        'max_gap': None,
+                                    }
+                                else:
+                                    gaps_thr = base_gap[mask]
+                                    stats = {
+                                        'threshold_conf_max': thr,
+                                        'count': count,
+                                        'mean_gap': float(gaps_thr.mean()),
+                                        'std_gap': float(gaps_thr.std()),
+                                        'min_gap': float(gaps_thr.min()),
+                                        'max_gap': float(gaps_thr.max()),
+                                    }
+                                conf_gap_stats.append(stats)
+
+                            # 로그에도 한 번 찍어줌 (간단 요약)
+                            logger.info(_purple(
+                                f"[{subject}] Conf-max vs gap stats (conf <= thr): " +
+                                ", ".join(
+                                    [
+                                        f"thr={s['threshold_conf_max']:.1f}, n={s['count']}, mean_gap={s['mean_gap']}"
+                                        for s in conf_gap_stats
+                                    ]
+                                )
+                            ))
+                        except Exception as e:
+                            logger.warning(f"Failed to compute conf-max vs gap stats: {e}")
+                            conf_gap_stats = None
+
+                        # (기존 코드) ours_low_conf_percent: gap 기반 cascade 에 여전히 사용
+                        perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
+
+
+                        # ---------------- Ours (cascading ensemble) ----------------
                         curve_ours = []
-                        # For W&B: per-beta cascade counts (number of permutations aggregated per sample)
                         ours_cascade_counts_list = []
                         try:
-                            # Build deterministic permutation order (identity first)
                             order_indices = list(range(len(perm_list)))
                             if identity_idx != 0:
                                 order_indices = [identity_idx] + [i for i in order_indices if i != identity_idx]
-                            # Precompute per-sample probs and identity probs
-                            per_sample_probs = []
-                            base_probs_list = []
-                            ideals = []
-                            for r in results:
-                                if r.get('type') != 'result':
-                                    continue
-                                data = r['data']
-                                probs_seq = np.asarray(data['probs'], dtype=np.float64)
-                                per_sample_probs.append(probs_seq)
-                                base_probs_list.append(probs_seq[identity_idx])
-                                ideals.append(data['ideal'])
-
-                            def _conf_gap(pvec: np.ndarray) -> float:
-                                vals = np.sort(pvec)[::-1]
-                                if vals.shape[0] < 2:
-                                    return 0.0
-                                return float(vals[0] - vals[1])
-
-                            default_conf = np.array([_conf_gap(bp) for bp in base_probs_list], dtype=np.float64)
-                            perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
@@ -594,7 +710,7 @@ def main():
                                 corrects = 0
                                 cascade_counts = []
 
-                                # beta subset: use default only
+                                # beta subset: default only
                                 for i in range(0, n):
                                     bp = base_probs_list[i]
                                     pred_letter = option_ids[int(np.argmax(bp))]
@@ -603,9 +719,10 @@ def main():
                                     total_cost += 1.0
                                     cascade_counts.append(1)
 
-                                # (1-beta) subset: cascade if low confidence
+                                # (1-beta) subset: dynamic cascade
                                 for i in range(n, N):
                                     probs_seq = per_sample_probs[i]
+
                                     selected = [order_indices[0]]
                                     agg = _aggregate_probs_over_permutations(
                                         [probs_seq[j].tolist() for j in selected],
@@ -623,49 +740,29 @@ def main():
                                         )
                                         current_conf = _conf_gap(agg)
                                         t += 1
+
                                     pred_letter = option_ids[int(np.argmax(agg))]
                                     if pred_letter == ideals[i]:
                                         corrects += 1
                                     total_cost += float(len(selected))
-                                    cascade_counts.append(int(len(selected)))
+                                    cascade_counts.append(len(selected))
 
                                 acc_ours = (corrects / float(N)) if N > 0 else float('nan')
                                 cost_ours = (total_cost / float(N)) if N > 0 else float('nan')
                                 curve_ours.append((cost_ours, acc_ours))
                                 ours_cascade_counts_list.append(cascade_counts)
 
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours])))
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours): " +
+                                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours])))
                         except Exception as e:
                             logger.warning(f"Failed to compute Ours curve: {e}")
                             curve_ours = []
                             ours_cascade_counts_list = []
 
-                        # Ablations: switch-full and switch-cyclic (no cascading)
+                        # ---------------- switch-full / switch-cyclic ----------------
                         curve_ours_switch_full = []
                         curve_ours_switch_cyc = []
                         try:
-                            # per-sample cached structures from above block if available; otherwise build them
-                            if 'per_sample_probs' not in locals():
-                                per_sample_probs = []
-                                base_probs_list = []
-                                ideals = []
-                                for r in results:
-                                    if r.get('type') != 'result':
-                                        continue
-                                    data = r['data']
-                                    probs_seq = np.asarray(data['probs'], dtype=np.float64)
-                                    per_sample_probs.append(probs_seq)
-                                    base_probs_list.append(probs_seq[identity_idx])
-                                    ideals.append(data['ideal'])
-                            if 'default_conf' not in locals():
-                                def _conf_gap2(pvec: np.ndarray) -> float:
-                                    vals = np.sort(pvec)[::-1]
-                                    if vals.shape[0] < 2:
-                                        return 0.0
-                                    return float(vals[0] - vals[1])
-                                default_conf = np.array([_conf_gap2(bp) for bp in base_probs_list], dtype=np.float64)
-                            perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
-
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
                                 if n > 0:
@@ -676,14 +773,12 @@ def main():
                                 # switch-full
                                 total_cost_sf = 0.0
                                 corrects_sf = 0
-                                # beta subset default
                                 for i in range(0, n):
                                     bp = base_probs_list[i]
                                     pred_letter = option_ids[int(np.argmax(bp))]
                                     if pred_letter == ideals[i]:
                                         corrects_sf += 1
                                     total_cost_sf += 1.0
-                                # remaining: if low-conf -> full ensemble, else default
                                 for i in range(n, N):
                                     probs_seq = per_sample_probs[i]
                                     if default_conf[i] < thresh:
@@ -699,6 +794,7 @@ def main():
                                     pred_letter = option_ids[int(np.argmax(agg))]
                                     if pred_letter == ideals[i]:
                                         corrects_sf += 1
+
                                 acc_sf = (corrects_sf / float(N)) if N > 0 else float('nan')
                                 cost_sf = (total_cost_sf / float(N)) if N > 0 else float('nan')
                                 curve_ours_switch_full.append((cost_sf, acc_sf))
@@ -727,22 +823,116 @@ def main():
                                     pred_letter = option_ids[int(np.argmax(agg))]
                                     if pred_letter == ideals[i]:
                                         corrects_sc += 1
+
                                 acc_sc = (corrects_sc / float(N)) if N > 0 else float('nan')
                                 cost_sc = (total_cost_sc / float(N)) if N > 0 else float('nan')
                                 curve_ours_switch_cyc.append((cost_sc, acc_sc))
 
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-full): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_full])))
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-cyclic): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_cyc])))
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-full): " +
+                                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_full])))
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-cyclic): " +
+                                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_cyc])))
                         except Exception as e:
                             logger.warning(f"Failed to compute Ours ablation curves: {e}")
                             curve_ours_switch_full = []
                             curve_ours_switch_cyc = []
 
-                        # Save curve data
-                        curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
-                        if getattr(args, 'option_id_set', None):
-                            curve_save_path += f'_id-{args.option_id_set}'
-                        os.makedirs(curve_save_path, exist_ok=True)
+                        # ---------------- Ours top2flip -> cyclic ----------------
+                        curve_ours_top2flip_cyc = []
+                        try:
+                            # CLI에서 ours_top2_gap_frac은 받지만,
+                            # 여기서는 gap 크기에 상관없이 모든 low-conf 샘플을 ambiguous로 취급.
+                            _unused_gap_frac = getattr(args, "ours_top2_gap_frac", 0.0)
+
+                            for beta in betas:
+                                n = int(N * beta + 1e-9)
+
+                                if n > 0:
+                                    thresh = float(np.quantile(default_conf[:n], perc))
+                                else:
+                                    thresh = float(np.quantile(default_conf, perc))
+
+                                total_cost_t2f = 0.0
+                                corrects_t2f = 0
+
+                                # beta subset: 항상 default
+                                for i in range(0, n):
+                                    bp = base_probs_list[i]
+                                    pred_letter = option_ids[int(np.argmax(bp))]
+                                    if pred_letter == ideals[i]:
+                                        corrects_t2f += 1
+                                    total_cost_t2f += 1.0
+
+                                # (1-beta) subset
+                                for i in range(n, N):
+                                    probs_seq = per_sample_probs[i]
+                                    base_probs = base_probs_list[i]
+                                    pred_base_letter = option_ids[int(np.argmax(base_probs))]
+
+                                    # high-conf → default로 바로 사용
+                                    if default_conf[i] >= thresh:
+                                        total_cost_t2f += 1.0
+                                        if pred_base_letter == ideals[i]:
+                                            corrects_t2f += 1
+                                        continue
+
+                                    # low-conf: top1/top2 contents swap 후 flip 여부 확인
+                                    sorted_idx = np.argsort(base_probs)[::-1]
+                                    top1_idx = int(sorted_idx[0])
+                                    top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
+
+                                    perm_swap = list(identity_perm)
+                                    perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
+                                    perm_swap_t = tuple(perm_swap)
+                                    swap_idx = perm_index_map.get(perm_swap_t, identity_idx)
+
+                                    probs_base = probs_seq[identity_idx]
+                                    probs_swap = probs_seq[swap_idx]
+
+                                    # identity 설정에서의 content-level prediction
+                                    agg_base = _aggregate_probs_over_permutations(
+                                        [probs_base.tolist()],
+                                        [perm_list[identity_idx]],
+                                        k,
+                                    )
+                                    # top1/top2 contents를 swap한 설정에서의 content-level prediction
+                                    agg_swap = _aggregate_probs_over_permutations(
+                                        [probs_swap.tolist()],
+                                        [perm_list[swap_idx]],
+                                        k,
+                                    )
+                                    pred_base_content = option_ids[int(np.argmax(agg_base))]
+                                    pred_swap_content = option_ids[int(np.argmax(agg_swap))]
+
+                                    if pred_swap_content == pred_base_content:
+                                        # flip이 없으면 base 그대로 사용하고 stop
+                                        total_cost_t2f += 1.0
+                                        if pred_base_content == ideals[i]:
+                                            corrects_t2f += 1
+                                        continue
+
+                                    # flip 발생: ID에 민감한 샘플 → cyclic까지 보내고, 최종 답은 cyclic만 사용
+                                    cyc_probs = [probs_seq[j].tolist() for j in cyclic_indices]
+                                    cyc_perms = [perm_list[j] for j in cyclic_indices]
+                                    agg_cyc = _aggregate_probs_over_permutations(
+                                        cyc_probs, cyc_perms, k
+                                    )
+                                    pred_cyc_letter = option_ids[int(np.argmax(agg_cyc))]
+                                    total_cost_t2f += float(k)
+                                    if pred_cyc_letter == ideals[i]:
+                                        corrects_t2f += 1
+
+                                acc_t2f = (corrects_t2f / float(N)) if N > 0 else float('nan')
+                                cost_t2f = (total_cost_t2f / float(N)) if N > 0 else float('nan')
+                                curve_ours_top2flip_cyc.append((cost_t2f, acc_t2f))
+
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours top2flip->cyclic): " +
+                                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_top2flip_cyc])))
+                        except Exception as e:
+                            logger.warning(f"Failed to compute Ours top2flip->cyclic curve: {e}")
+                            curve_ours_top2flip_cyc = []
+
+                        # ---------------- Oracle low-confidence accuracy ----------------
                         curve_obj = {
                             'subject': subject,
                             'k': k,
@@ -772,34 +962,26 @@ def main():
                                 'costs': [c for c, _ in curve_ours_switch_cyc],
                                 'accuracies': [a for _, a in curve_ours_switch_cyc],
                             }
+                        if len(curve_ours_top2flip_cyc) == len(betas):
+                            curve_obj['ours_top2flip_to_cyclic'] = {
+                                'costs': [c for c, _ in curve_ours_top2flip_cyc],
+                                'accuracies': [a for _, a in curve_ours_top2flip_cyc],
+                            }
+                        if conf_gap_stats is not None:
+                            curve_obj['conf_max_gap_stats'] = conf_gap_stats
 
-                        # Oracle analysis: bottom-p% (by default confidence) subset accuracy (1% steps)
                         try:
-                            # Build default confidence and correctness
-                            def _conf_gap_oracle(pvec: np.ndarray) -> float:
-                                vals = np.sort(pvec)[::-1]
-                                if vals.shape[0] < 2:
-                                    return 0.0
-                                return float(vals[0] - vals[1])
-                            default_confs = []
-                            default_corrects = []
-                            for r in results:
-                                if r.get('type') != 'result':
-                                    continue
-                                data = r['data']
-                                probs_seq = np.asarray(data['probs'], dtype=np.float64)
-                                base_probs = probs_seq[identity_idx]
-                                default_confs.append(_conf_gap_oracle(base_probs))
-                                pred_letter = option_ids[int(np.argmax(base_probs))]
-                                default_corrects.append(int(pred_letter == data['ideal']))
-                            default_confs = np.asarray(default_confs, dtype=np.float64)
-                            default_corrects = np.asarray(default_corrects, dtype=np.int32)
-                            order = np.argsort(default_confs)  # ascending = low confidence first
+                            default_confs = default_conf.copy()
+                            default_corrects = np.array(
+                                [1 if c else 0 for c in base_correct_list],
+                                dtype=np.int32
+                            )
+                            order = np.argsort(default_confs)
                             oracle_percentiles = list(range(1, 101))
                             oracle_bottom_accs = []
                             for p in oracle_percentiles:
-                                n = max(1, int(N * (p / 100.0) + 1e-9))
-                                sel = order[:n]
+                                nn = max(1, int(N * (p / 100.0) + 1e-9))
+                                sel = order[:nn]
                                 acc_bottom = float(default_corrects[sel].mean())
                                 oracle_bottom_accs.append(acc_bottom)
                             bottom10 = oracle_bottom_accs[9] if len(oracle_bottom_accs) >= 10 else float('nan')
@@ -812,106 +994,12 @@ def main():
                         except Exception as e:
                             logger.warning(f"Failed to compute oracle low-confidence accuracy curve: {e}")
 
+                        curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
+                        if getattr(args, 'option_id_set', None):
+                            curve_save_path += f'_id-{args.option_id_set}'
+                        os.makedirs(curve_save_path, exist_ok=True)
                         save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', [curve_obj], metrics=None)
 
-                        # W&B logging: one sample's prompts + per-permutation probs, and the beta curve figure
-                        if wandb_run is not None:
-                            try:
-                                import wandb
-
-                                # Choose sample to log
-                                target_idx = args.wandb_sample_idx
-                                chosen = None
-                                for r in results:
-                                    if r.get('type') != 'result':
-                                        continue
-                                    if target_idx is None or int(r['data']['idx']) == int(target_idx):
-                                        chosen = r['data']
-                                        break
-                                if chosen is None and len(results) > 0 and results[0].get('type') == 'result':
-                                    chosen = results[0]['data']
-
-                                # Log prompts/probs table
-                                if chosen is not None and 'prompts' in chosen and 'probs' in chosen:
-                                    prompts_list = chosen['prompts']
-                                    probs_seq = chosen['probs']
-                                    cols = ['perm_idx', 'ideal', 'prompt'] + [f'prob_{oid}' for oid in option_ids]
-                                    rows = []
-                                    for pi, (ptext, pvec) in enumerate(zip(prompts_list, probs_seq)):
-                                        rows.append([pi, chosen['ideal'], ptext] + [float(x) for x in pvec])
-                                    table = wandb.Table(columns=cols, data=rows)
-                                    wandb.log({f"{subject}/sample_prompts": table})
-
-                                # Build and log beta curve figure (save then upload)
-                                fig = plt.figure(figsize=(7.5, 5.0), dpi=160)
-                                cyc_costs = [c for c, _ in curve_cyc]
-                                cyc_accs = [a for _, a in curve_cyc]
-                                full_costs = [c for c, _ in curve_full]
-                                full_accs = [a for _, a in curve_full]
-                                plt.plot(cyc_costs, cyc_accs, marker='o', label='Cyclic (k rotations)')
-                                plt.plot(full_costs, full_accs, marker='o', label='Full (k! permutations)')
-                                if len(curve_ours) == len(betas):
-                                    ours_costs = [c for c, _ in curve_ours]
-                                    ours_accs = [a for _, a in curve_ours]
-                                    plt.plot(ours_costs, ours_accs, marker='o', label='Ours (cascading)')
-                                if len(curve_ours_switch_full) == len(betas):
-                                    sf_costs = [c for c, _ in curve_ours_switch_full]
-                                    sf_accs = [a for _, a in curve_ours_switch_full]
-                                    plt.plot(sf_costs, sf_accs, marker='o', label='Ours (switch-full)')
-                                if len(curve_ours_switch_cyc) == len(betas):
-                                    sc_costs = [c for c, _ in curve_ours_switch_cyc]
-                                    sc_accs = [a for _, a in curve_ours_switch_cyc]
-                                    plt.plot(sc_costs, sc_accs, marker='o', label='Ours (switch-cyclic)')
-                                plt.scatter([1.0], [summary_base], marker='*', s=180, c='black', label='Default')
-                                plt.xlabel("Computational Cost (× of default)")
-                                plt.ylabel("Accuracy")
-                                plt.xscale('log', base=2)
-                                plt.title(f"Accuracy vs. Cost — {subject}")
-                                plt.grid(True, linestyle='--', alpha=0.4)
-                                plt.legend()
-                                plt.tight_layout()
-                                out_png = f"{curve_save_path}/{subject}_beta_curve.png"
-                                fig.savefig(out_png, dpi=160, bbox_inches='tight')
-                                wandb.log({f"{subject}/beta_curve": wandb.Image(out_png)})
-                                plt.close(fig)
-
-                                # Oracle low-confidence accuracy figure
-                                if 'oracle_low_conf' in curve_obj:
-                                    fig2 = plt.figure(figsize=(7.5, 5.0), dpi=160)
-                                    xs = curve_obj['oracle_low_conf']['percentiles']
-                                    ys = curve_obj['oracle_low_conf']['accuracies']
-                                    plt.plot(xs, ys, marker='o', label='Bottom-p% (default acc)')
-                                    plt.xlabel("p (Bottom p% by default confidence)")
-                                    plt.ylabel("Accuracy on bottom-p% subset")
-                                    plt.title(f"Oracle: Low-confidence subset accuracy — {subject}")
-                                    plt.grid(True, linestyle='--', alpha=0.4)
-                                    plt.legend()
-                                    plt.tight_layout()
-                                    out_png2 = f"{curve_save_path}/{subject}_oracle_low_conf_acc.png"
-                                    fig2.savefig(out_png2, dpi=160, bbox_inches='tight')
-                                    wandb.log({f"{subject}/oracle_low_conf_curve": wandb.Image(out_png2)})
-                                    plt.close(fig2)
-
-                                # Histogram(s): per-beta cascade counts for Ours
-                                if len(curve_ours) == len(betas) and isinstance(ours_cascade_counts_list, list) and len(ours_cascade_counts_list) == len(betas):
-                                    try:
-                                        # Log a histogram for each beta; tag with beta value
-                                        for bi, beta in enumerate(betas):
-                                            counts = ours_cascade_counts_list[bi]
-                                            if isinstance(counts, list) and len(counts) > 0:
-                                                wandb.log({f"{subject}/ours_cascade_hist_beta_{beta:.1f}": wandb.Histogram(counts)})
-                                    except Exception as e:
-                                        logger.warning(f"W&B cascade histogram logging failed: {e}")
-
-                                # Log scalar metrics as well
-                                payload = {
-                                    f"{subject}/acc_full": summary_full,
-                                    f"{subject}/acc_cyclic": summary_cyc,
-                                    f"{subject}/acc_default": summary_base,
-                                }
-                                wandb.log(payload)
-                            except Exception as e:
-                                logger.warning(f"W&B logging failed: {e}")
                 except Exception as e:
                     logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
 
@@ -925,6 +1013,6 @@ def main():
     except Exception:
         pass
 
+
 if __name__ == "__main__":
     main()
-
