@@ -341,10 +341,12 @@ def main():
                         top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
                         perm_swap = list(identity_perm)
                         perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
+                        perm_swap_t = tuple(perm_swap)
                         swap_idx = perm_index_map.get(tuple(perm_swap), identity_idx)
                         
                         probs_base_raw = per_sample_probs[i][identity_idx]
                         probs_swap_raw = per_sample_probs[i][swap_idx]
+                        
                         agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [perm_list[identity_idx]], k) 
                         agg_swap = _aggregate_probs_over_permutations([probs_swap_raw.tolist()], [perm_list[swap_idx]], k)
                         
@@ -553,9 +555,12 @@ def main():
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
+
+                                # 1. Estimate Threshold from Beta sample
                                 if n > 0:
                                     thresh = float(np.quantile(default_conf[:n], perc))
                                 else:
+                                    # Fallback: use Oracle for 0.0 just to show a baseline reference
                                     thresh = float(np.quantile(default_conf, perc))
 
                                 total_cost_t2f = 0.0
@@ -599,6 +604,8 @@ def main():
                                                 ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_top2flip_cyc])))
                         except Exception as e:
                             logger.warning(f"Failed to compute Ours top2flip->cyclic curve: {e}")
+                            import traceback
+                            traceback.print_exc()
                             curve_ours_top2flip_cyc = []
 
                         # 5. Ours AvgGap -> Cyclic (Cost Analysis)
