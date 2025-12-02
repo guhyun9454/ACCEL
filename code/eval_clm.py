@@ -298,12 +298,10 @@ def main():
                     cyclic_total = 0
                     cyclic_corrects = 0
 
-                    # For Advanced Curves & Analysis
+                    # Data collections for analysis
                     per_sample_probs = []
                     base_probs_list = []
                     ideals = []
-                    default_conf = [] # Gap (Top1 - Top2)
-                    base_conf_max = [] # Confidence (Top1 Prob)
 
                     for r in results:
                         if r.get('type') != 'result':
@@ -371,18 +369,26 @@ def main():
                             full_corrects += 1
                         full_total += 1
 
-                        # Confidence Stats (Gap & Max)
-                        vals = np.sort(base_probs)[::-1]
+                    # =========================================================
+                    # [Pre-computation] Compute Confidence stats BEFORE Analysis
+                    # This ensures default_conf (Gap) and base_conf_max (Top1) are available
+                    # =========================================================
+                    default_conf = [] # Gap (Top1 - Top2)
+                    base_conf_max = [] # Confidence (Top1 Prob)
+                    
+                    for bp in base_probs_list:
+                        vals = np.sort(bp)[::-1]
                         if vals.shape[0] < 2:
                             top1, top2 = (vals[0], 0.0) if vals.shape[0] > 0 else (0.0, 0.0)
                         else:
                             top1, top2 = vals[0], vals[1]
                         base_conf_max.append(top1)
-                        default_conf.append(top1 - top2) # This is the Gap used by Switch Cyclic
+                        default_conf.append(top1 - top2) # Gap calculation
 
-                    # Convert lists to numpy
+                    # Convert lists to numpy for vectorized ops
                     default_conf = np.asarray(default_conf, dtype=np.float64)
                     base_conf_max = np.asarray(base_conf_max, dtype=np.float64)
+                    # =========================================================
 
                     # Save cyclic-derived results
                     cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
@@ -735,7 +741,8 @@ def main():
 
                             # 3. Analyze Low Conf (Switch-Cyclic Style) & Combined Strategy
                             # We scan percentiles to emulate "ours_low_conf_percent" logic
-                            scan_percentiles = list(range(5, 105, 5))
+                            # [UPDATED] Scan all deciles 0%, 10%, ... 100% to show detailed thresholds
+                            scan_percentiles = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                             
                             low_conf_stats = []
                             combined_stats = [] 
@@ -743,7 +750,7 @@ def main():
                             # Use default_conf (Gap) which is exactly what switch_cyclic uses
                             low_conf_thresholds = np.percentile(default_conf, scan_percentiles)
 
-                            logger.info(_purple(f"[{subject}] Combined Strategy Analysis (Low Conf [Gap] AND Flip Changed):"))
+                            logger.info(_purple(f"[{subject}] Detailed Threshold & Performance Analysis (Low Conf [Gap] AND Flip Changed):"))
 
                             for i, p in enumerate(scan_percentiles):
                                 # -- Low Confidence Based (Switch Cyclic Logic) --
@@ -764,9 +771,8 @@ def main():
                                 pred_mask_combined = pred_mask_low_conf & arr_flip_trigger
                                 p_comb, r_comb, f1_comb, tp_comb, fp_comb, fn_comb = calc_pr_f1(pred_mask_combined, target_mask)
                                 
-                                # Special Log for 30% (User Requested)
-                                if p == 30:
-                                     logger.info(f"  [30% Low Conf Cutoff] Trigger Rate: {pred_mask_combined.mean()*100:.2f}%, F1: {f1_comb:.4f}, Prec: {p_comb:.4f}, Rec: {r_comb:.4f}")
+                                # Log detailed info for each step
+                                logger.info(f"  [Bottom {p}%] Gap Threshold: {thr:.4f} | Trigger: {pred_mask_combined.mean()*100:.2f}% | F1: {f1_comb:.4f} | Prec: {p_comb:.4f} | Rec: {r_comb:.4f}")
 
                                 combined_stats.append({
                                     'percentile': p,
