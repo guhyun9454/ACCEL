@@ -341,12 +341,10 @@ def main():
                         top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
                         perm_swap = list(identity_perm)
                         perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
-                        perm_swap_t = tuple(perm_swap)
                         swap_idx = perm_index_map.get(tuple(perm_swap), identity_idx)
                         
                         probs_base_raw = per_sample_probs[i][identity_idx]
                         probs_swap_raw = per_sample_probs[i][swap_idx]
-                        
                         agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [perm_list[identity_idx]], k) 
                         agg_swap = _aggregate_probs_over_permutations([probs_swap_raw.tolist()], [perm_list[swap_idx]], k)
                         
@@ -369,7 +367,7 @@ def main():
                     mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
                     arr_flip_trigger_global = np.array(flip_trigger_mask_global, dtype=bool)
                     
-                    # Target Mask (Gain) - Now this will work because lists are populated
+                    # Target Mask (Gain)
                     arr_base_correct = np.array(base_correct_list, dtype=bool)
                     arr_cyclic_correct = np.array(cyclic_correct_list, dtype=bool)
                     target_mask = (~arr_base_correct) & (arr_cyclic_correct)
@@ -382,8 +380,16 @@ def main():
                     if getattr(args, 'option_id_set', None):
                         cyclic_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(cyclic_save_path, exist_ok=True)
-                    cyclic_metrics = {'type': 'metric', 'data': {'accuracy': cyclic_acc}}
-                    logger.info(_purple(f"[{subject}] Cyclic ensemble accuracy: {cyclic_acc:.4f}"))
+                    
+                    # [FIXED] Calculate cyclic_acc here BEFORE using it in metrics
+                    if cyclic_total > 0:
+                        cyclic_acc = cyclic_corrects / cyclic_total
+                        cyclic_metrics = {'type': 'metric', 'data': {'accuracy': cyclic_acc}}
+                        logger.info(_purple(f"[{subject}] Cyclic ensemble accuracy: {cyclic_acc:.4f}"))
+                    else:
+                        cyclic_acc = float('nan') # Handle case with 0 samples
+                        cyclic_metrics = None
+
                     save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results, metrics=cyclic_metrics)
                     logger.info(_orange(f"Derived and saved cyclic results: {subject}"))
 
@@ -560,7 +566,6 @@ def main():
                                 if n > 0:
                                     thresh = float(np.quantile(default_conf[:n], perc))
                                 else:
-                                    # Fallback: use Oracle for 0.0 just to show a baseline reference
                                     thresh = float(np.quantile(default_conf, perc))
 
                                 total_cost_t2f = 0.0
