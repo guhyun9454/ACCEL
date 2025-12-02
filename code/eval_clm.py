@@ -148,10 +148,6 @@ def main():
     if getattr(args, 'option_id_sets', None) and len(args.option_id_sets) == 2:
         from types import SimpleNamespace
         id_set_a, id_set_b = args.option_id_sets[0], args.option_id_sets[1]
-
-        # ... (Comparative mode 코드는 길어서 생략하지 않고 원본 로직이 있다면 유지해야 하나, 
-        #      질문의 핵심인 Single-run Full Permutation 복구를 위해 여기서는 패스합니다.
-        #      필요하다면 이전 코드 블록에서 복사해오시면 됩니다.)
         logger.info("Comparative mode logic exists but skipped in this summary for focus.")
         pass 
 
@@ -687,7 +683,7 @@ def main():
                             curve_ours_top2flip_cyc = []
 
                         # =========================================================================
-                        # [NEW] Precision / Recall / F1 Analysis (Gap vs Conf vs Flip)
+                        # [NEW] Precision / Recall / F1 Analysis (Gap vs Conf vs Flip vs Combined)
                         # Meeting Note Requirements: Evaluate decision rules for triggering cyclic
                         # =========================================================================
                         pr_analysis_results = {}
@@ -695,11 +691,6 @@ def main():
                             logger.info(_purple(f"[{subject}] Starting Precision/Recall/F1 Analysis..."))
 
                             # 1. Define "Positive" Class (Ground Truth)
-                            # Positive = The case where we SHOULD run Cyclic.
-                            # Definition: Base is Wrong AND Cyclic is Correct. (Pure Gain)
-                            # (If Base is Correct, Cyclic is unnecessary -> Negative)
-                            # (If Cyclic is also Wrong, Cyclic is waste -> Negative)
-                            
                             arr_base_correct = np.array(base_correct_list, dtype=bool)
                             arr_cyclic_correct = np.array(cyclic_correct_list, dtype=bool)
                             target_mask = (~arr_base_correct) & (arr_cyclic_correct)
@@ -716,23 +707,46 @@ def main():
                                 f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
                                 return precision, recall, f1, int(tp), int(fp), int(fn)
 
-                            # 2. Analyze Gap & Confidence across percentiles (Scanner)
-                            # We scan thresholds from 5% to 100% (low gap/conf = ambiguous -> trigger cyclic)
+                            # 2. Pre-compute Global Flip Trigger (Already done in user thought)
+                            # This is "Did flip change the answer?" for ALL samples.
+                            flip_trigger_mask = []
+                            for i in range(N):
+                                probs_seq = per_sample_probs[i]
+                                base_probs = base_probs_list[i]
+                                sorted_idx = np.argsort(base_probs)[::-1]
+                                top1_idx = int(sorted_idx[0])
+                                top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
+                                perm_swap = list(identity_perm)
+                                perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
+                                perm_swap_t = tuple(perm_swap)
+                                swap_idx = perm_index_map.get(perm_swap_t, identity_idx)
+                                probs_swap = probs_seq[swap_idx]
+                                agg_base = _aggregate_probs_over_permutations([probs_seq[identity_idx].tolist()], [perm_list[identity_idx]], k) # Explicit base check
+                                agg_swap = _aggregate_probs_over_permutations([probs_swap.tolist()], [perm_list[swap_idx]], k)
+                                pred_base_content = option_ids[int(np.argmax(agg_base))]
+                                pred_swap_content = option_ids[int(np.argmax(agg_swap))]
+                                if pred_base_content != pred_swap_content:
+                                    flip_trigger_mask.append(True)
+                                else:
+                                    flip_trigger_mask.append(False)
+                            arr_flip_trigger = np.array(flip_trigger_mask, dtype=bool)
+
+                            # 3. Analyze Gap & Confidence & Combined Strategy across percentiles
                             scan_percentiles = list(range(5, 105, 5))
                             
                             gap_stats = []
                             conf_stats = []
+                            combined_stats = [] # Gap Filter + Flip Change
                             
-                            # Pre-compute thresholds
-                            # Gap: smaller is more ambiguous -> lower percentiles
                             gap_thresholds = np.percentile(default_conf, scan_percentiles)
-                            # Conf: smaller is more ambiguous -> lower percentiles
                             conf_thresholds = np.percentile(base_conf_max, scan_percentiles)
+
+                            logger.info(_purple(f"[{subject}] Combined Strategy Analysis (Gap <= Thr AND Flip Changed):"))
 
                             for i, p in enumerate(scan_percentiles):
                                 # -- Gap Based --
                                 thr_g = gap_thresholds[i]
-                                pred_mask_gap = default_conf <= thr_g # Predicted "Needs Cyclic"
+                                pred_mask_gap = default_conf <= thr_g 
                                 p_g, r_g, f1_g, tp_g, fp_g, fn_g = calc_pr_f1(pred_mask_gap, target_mask)
                                 gap_stats.append({
                                     'percentile': p,
@@ -745,7 +759,7 @@ def main():
 
                                 # -- Confidence Based --
                                 thr_c = conf_thresholds[i]
-                                pred_mask_conf = base_conf_max <= thr_c # Predicted "Needs Cyclic"
+                                pred_mask_conf = base_conf_max <= thr_c 
                                 p_c, r_c, f1_c, tp_c, fp_c, fn_c = calc_pr_f1(pred_mask_conf, target_mask)
                                 conf_stats.append({
                                     'percentile': p,
@@ -756,50 +770,28 @@ def main():
                                     'trigger_rate': float(pred_mask_conf.mean())
                                 })
 
-                            # 3. Analyze Flip Strategy (Top2 Swap Change)
-                            # Simulate Flip for ALL samples to get global stats (independent of beta loops)
-                            flip_trigger_mask = []
-                            
-                            for i in range(N):
-                                probs_seq = per_sample_probs[i]
-                                base_probs = base_probs_list[i]
+                                # -- Combined Strategy (Gap Filter + Flip Change) --
+                                # Trigger if: (Gap is Low) AND (Flip Changed Answer)
+                                pred_mask_combined = pred_mask_gap & arr_flip_trigger
+                                p_comb, r_comb, f1_comb, tp_comb, fp_comb, fn_comb = calc_pr_f1(pred_mask_combined, target_mask)
                                 
-                                # Find Top1, Top2
-                                sorted_idx = np.argsort(base_probs)[::-1]
-                                top1_idx = int(sorted_idx[0])
-                                top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
-                                
-                                # Base Prediction
-                                pred_base_content = option_ids[top1_idx] 
-                                
-                                # Swap Permutation
-                                perm_swap = list(identity_perm)
-                                perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
-                                perm_swap_t = tuple(perm_swap)
-                                swap_idx = perm_index_map.get(perm_swap_t, identity_idx)
-                                
-                                # Swap Prediction (Content Level)
-                                probs_swap = probs_seq[swap_idx]
-                                agg_swap = _aggregate_probs_over_permutations(
-                                    [probs_swap.tolist()],
-                                    [perm_list[swap_idx]],
-                                    k
-                                )
-                                pred_swap_content = option_ids[int(np.argmax(agg_swap))]
-                                
-                                # Trigger if Changed
-                                if pred_base_content != pred_swap_content:
-                                    flip_trigger_mask.append(True)
-                                else:
-                                    flip_trigger_mask.append(False)
+                                # Special Log for 30% (User Requested)
+                                if p == 30:
+                                     logger.info(f"  [30% Gap Cutoff] Trigger Rate: {pred_mask_combined.mean()*100:.2f}%, F1: {f1_comb:.4f}, Prec: {p_comb:.4f}, Rec: {r_comb:.4f}")
 
-                            arr_flip_trigger = np.array(flip_trigger_mask, dtype=bool)
-                            
-                            # Metrics for Flip Strategy
+                                combined_stats.append({
+                                    'percentile': p,
+                                    'threshold': float(thr_g),
+                                    'precision': float(p_comb),
+                                    'recall': float(r_comb),
+                                    'f1': float(f1_comb),
+                                    'trigger_rate': float(pred_mask_combined.mean())
+                                })
+
+                            # 4. Global Flip Strategy (No Gap Filter)
                             p_f, r_f, f1_f, tp_f, fp_f, fn_f = calc_pr_f1(arr_flip_trigger, target_mask)
-                            
                             flip_stats = {
-                                'strategy': 'top2_flip_change',
+                                'strategy': 'top2_flip_change_global',
                                 'trigger_count': int(arr_flip_trigger.sum()),
                                 'trigger_rate': float(arr_flip_trigger.mean()),
                                 'precision': float(p_f),
@@ -809,12 +801,13 @@ def main():
                                 'fp': fp_f
                             }
                             
-                            logger.info(_purple(f"[{subject}] Flip Strategy Stats: Trigger Rate={flip_stats['trigger_rate']*100:.1f}%, F1={f1_f:.4f} (Prec={p_f:.4f}, Rec={r_f:.4f})"))
+                            logger.info(_purple(f"[{subject}] Global Flip Stats: Trigger Rate={flip_stats['trigger_rate']*100:.1f}%, F1={f1_f:.4f}"))
                             
                             pr_analysis_results = {
                                 'gap_stats': gap_stats,
                                 'conf_stats': conf_stats,
-                                'flip_stats': flip_stats
+                                'flip_stats': flip_stats,
+                                'combined_gap_flip_stats': combined_stats
                             }
 
                         except Exception as e:
@@ -822,6 +815,41 @@ def main():
                             import traceback
                             traceback.print_exc()
                         
+                        # =========================================================================
+                        # [NEW] Gap vs Flip Rate Correlation Analysis
+                        # =========================================================================
+                        gap_flip_stats = []
+                        try:
+                            bins = [i / 10.0 for i in range(11)]
+                            logger.info(_purple(f"[{subject}] Gap vs Flip Rate Analysis:"))
+                            for i in range(len(bins) - 1):
+                                low = bins[i]
+                                high = bins[i+1]
+                                if i == len(bins) - 2:
+                                    mask_bin = (default_conf >= low) & (default_conf <= high)
+                                else:
+                                    mask_bin = (default_conf >= low) & (default_conf < high)
+                                count_total = int(mask_bin.sum())
+                                if count_total > 0:
+                                    count_flip = int(arr_flip_trigger[mask_bin].sum())
+                                    flip_rate = count_flip / count_total
+                                else:
+                                    count_flip = 0
+                                    flip_rate = 0.0
+                                stat_item = {
+                                    'gap_range_start': low,
+                                    'gap_range_end': high,
+                                    'total_samples': count_total,
+                                    'flipped_samples': count_flip,
+                                    'flip_rate': flip_rate
+                                }
+                                gap_flip_stats.append(stat_item)
+                                if count_total > 0:
+                                    logger.info(f"  Gap {low:.1f}~{high:.1f}: {flip_rate*100:5.1f}% flipped ({count_flip}/{count_total})")
+                            curve_obj['gap_flip_analysis'] = gap_flip_stats
+                        except Exception as e:
+                            logger.warning(f"Failed to compute Gap vs Flip stats: {e}")
+                            
                         # =========================================================================
 
                         # ---------------- Curve Object Packaging ----------------
@@ -838,7 +866,6 @@ def main():
                                 'costs': [c for c, _ in curve_full],
                                 'accuracies': [a for _, a in curve_full],
                             },
-                            # [NEW] Add PR Analysis to output
                             'pr_analysis': pr_analysis_results
                         }
 
