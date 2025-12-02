@@ -715,9 +715,10 @@ def main():
                                 f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
                                 return precision, recall, f1, int(tp), int(fp), int(fn)
 
-                            # 2. Pre-compute Global Flip Trigger (Already done in user thought)
-                            # This is "Did flip change the answer?" for ALL samples.
+                            # 2. Pre-compute Global Flip Trigger & Flipped Confidence
                             flip_trigger_mask = []
+                            flipped_conf_list = [] # Store gap of flipped result
+                            
                             for i in range(N):
                                 probs_seq = per_sample_probs[i]
                                 base_probs = base_probs_list[i]
@@ -728,8 +729,16 @@ def main():
                                 perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
                                 perm_swap_t = tuple(perm_swap)
                                 swap_idx = perm_index_map.get(perm_swap_t, identity_idx)
+                                
+                                # Flipped Confidence (Gap of flipped result)
+                                probs_swap_raw = probs_seq[swap_idx]
+                                vals_swap = np.sort(probs_swap_raw)[::-1]
+                                gap_swap = vals_swap[0] - vals_swap[1] if len(vals_swap) > 1 else 0.0
+                                flipped_conf_list.append(gap_swap)
+
+                                # Flip Change Check
                                 probs_swap = probs_seq[swap_idx]
-                                agg_base = _aggregate_probs_over_permutations([probs_seq[identity_idx].tolist()], [perm_list[identity_idx]], k) # Explicit base check
+                                agg_base = _aggregate_probs_over_permutations([probs_seq[identity_idx].tolist()], [perm_list[identity_idx]], k) 
                                 agg_swap = _aggregate_probs_over_permutations([probs_swap.tolist()], [perm_list[swap_idx]], k)
                                 pred_base_content = option_ids[int(np.argmax(agg_base))]
                                 pred_swap_content = option_ids[int(np.argmax(agg_swap))]
@@ -737,71 +746,61 @@ def main():
                                     flip_trigger_mask.append(True)
                                 else:
                                     flip_trigger_mask.append(False)
+                                    
                             arr_flip_trigger = np.array(flip_trigger_mask, dtype=bool)
+                            flipped_conf = np.array(flipped_conf_list, dtype=np.float64)
 
-                            # 3. Analyze Low Conf (Switch-Cyclic Style) & Combined Strategy
-                            # We scan percentiles to emulate "ours_low_conf_percent" logic
-                            # [UPDATED] Scan all deciles 0%, 10%, ... 100% to show detailed thresholds
+                            # 3. Analyze Dual Strategy (User's Idea: Gap OR Flipped Gap)
+                            # We check: (Low Conf OR Low Flipped Conf) 
+                            # But wait, User wanted: "top1-top2 rate (original gap) -> then check top2-top1 rate (flipped gap)"
+                            # Strategy: Trigger if (Original Gap < Thr) OR (Flipped Gap < Thr) ?
+                            # Or strict User: Trigger if (Original Gap < Thr) AND ((Flip Change) OR (Flipped Gap < Thr))
+                            
+                            # Let's show the "Dual Check" strategy:
+                            # Trigger = (Flip Change) OR (Flipped Gap < Threshold)
+                            # AND keep the Global Threshold (Original Gap) analysis too.
+                            
                             scan_percentiles = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                             
-                            low_conf_stats = []
+                            dual_stats = []
                             combined_stats = [] 
                             
-                            # Use default_conf (Gap) which is exactly what switch_cyclic uses
+                            # Use default_conf (Gap) to determine thresholds
                             low_conf_thresholds = np.percentile(default_conf, scan_percentiles)
 
-                            logger.info(_purple(f"[{subject}] Detailed Threshold & Performance Analysis (Low Conf [Gap] AND Flip Changed):"))
+                            logger.info(_purple(f"[{subject}] Dual Strategy Analysis (User Idea: Flip Change OR Low Flipped Gap):"))
 
                             for i, p in enumerate(scan_percentiles):
-                                # -- Low Confidence Based (Switch Cyclic Logic) --
                                 thr = low_conf_thresholds[i]
-                                pred_mask_low_conf = default_conf <= thr 
-                                p_l, r_l, f1_l, tp_l, fp_l, fn_l = calc_pr_f1(pred_mask_low_conf, target_mask)
-                                low_conf_stats.append({
-                                    'percentile': p,
-                                    'threshold': float(thr),
-                                    'precision': float(p_l),
-                                    'recall': float(r_l),
-                                    'f1': float(f1_l),
-                                    'trigger_rate': float(pred_mask_low_conf.mean())
-                                })
-
-                                # -- Combined Strategy (Low Conf Filter + Flip Change) --
-                                # Trigger if: (Gap is Low [Switch Cyclic Logic]) AND (Flip Changed Answer)
-                                pred_mask_combined = pred_mask_low_conf & arr_flip_trigger
-                                p_comb, r_comb, f1_comb, tp_comb, fp_comb, fn_comb = calc_pr_f1(pred_mask_combined, target_mask)
                                 
-                                # Log detailed info for each step
-                                logger.info(f"  [Bottom {p}%] Gap Threshold: {thr:.4f} | Trigger: {pred_mask_combined.mean()*100:.2f}% | F1: {f1_comb:.4f} | Prec: {p_comb:.4f} | Rec: {r_comb:.4f}")
+                                # Strategy A: Standard Combined (Low Conf AND Flip Change) - The baseline
+                                pred_mask_low_conf = default_conf <= thr 
+                                pred_mask_combined = pred_mask_low_conf & arr_flip_trigger
+                                p_c, r_c, f1_c, _, _, _ = calc_pr_f1(pred_mask_combined, target_mask)
+                                
+                                # Strategy B: User's Dual Check (Inside Low Conf, check Flip Change OR Low Flipped Gap)
+                                # Logic: If Original Gap is Low...
+                                #        Check: Did answer change? OR Is Flipped Gap also Low?
+                                #        If yes, Trigger.
+                                pred_mask_flipped_low = flipped_conf <= thr
+                                pred_mask_dual_trigger = arr_flip_trigger | pred_mask_flipped_low
+                                pred_mask_final = pred_mask_low_conf & pred_mask_dual_trigger
+                                
+                                p_d, r_d, f1_d, _, _, _ = calc_pr_f1(pred_mask_final, target_mask)
+                                
+                                # Log detailed info
+                                logger.info(f"  [Bottom {p}% (Thr={thr:.4f})] Standard F1: {f1_c:.4f} | Dual F1: {f1_d:.4f} | Dual Rec: {r_d:.4f}")
 
-                                combined_stats.append({
+                                dual_stats.append({
                                     'percentile': p,
                                     'threshold': float(thr),
-                                    'precision': float(p_comb),
-                                    'recall': float(r_comb),
-                                    'f1': float(f1_comb),
-                                    'trigger_rate': float(pred_mask_combined.mean())
+                                    'f1_standard': float(f1_c),
+                                    'f1_dual': float(f1_d),
+                                    'recall_dual': float(r_d)
                                 })
 
-                            # 4. Global Flip Strategy (No Low Conf Filter)
-                            p_f, r_f, f1_f, tp_f, fp_f, fn_f = calc_pr_f1(arr_flip_trigger, target_mask)
-                            flip_stats = {
-                                'strategy': 'top2_flip_change_global',
-                                'trigger_count': int(arr_flip_trigger.sum()),
-                                'trigger_rate': float(arr_flip_trigger.mean()),
-                                'precision': float(p_f),
-                                'recall': float(r_f),
-                                'f1': float(f1_f),
-                                'tp': tp_f,
-                                'fp': fp_f
-                            }
-                            
-                            logger.info(_purple(f"[{subject}] Global Flip Stats: Trigger Rate={flip_stats['trigger_rate']*100:.1f}%, F1={f1_f:.4f}"))
-                            
                             pr_analysis_results = {
-                                'low_conf_stats': low_conf_stats,
-                                'combined_gap_flip_stats': combined_stats,
-                                'flip_stats': flip_stats
+                                'dual_strategy_stats': dual_stats
                             }
 
                         except Exception as e:
