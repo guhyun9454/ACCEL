@@ -371,7 +371,6 @@ def main():
 
                     # =========================================================
                     # [Pre-computation] Compute Confidence stats BEFORE Analysis
-                    # This ensures default_conf (Gap) and base_conf_max (Top1) are available
                     # =========================================================
                     default_conf = [] # Gap (Top1 - Top2)
                     base_conf_max = [] # Confidence (Top1 Prob)
@@ -715,9 +714,9 @@ def main():
                                 f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
                                 return precision, recall, f1, int(tp), int(fp), int(fn)
 
-                            # 2. Pre-compute Global Flip Trigger & Flipped Confidence
+                            # 2. Pre-compute Global Flip Trigger & AVERAGE GAP (Dual Ensemble)
                             flip_trigger_mask = []
-                            flipped_conf_list = [] # Store gap of flipped result
+                            mean_gap_list = [] # Store gap of (Original+Flipped)/2
                             
                             for i in range(N):
                                 probs_seq = per_sample_probs[i]
@@ -730,77 +729,68 @@ def main():
                                 perm_swap_t = tuple(perm_swap)
                                 swap_idx = perm_index_map.get(perm_swap_t, identity_idx)
                                 
-                                # Flipped Confidence (Gap of flipped result)
-                                probs_swap_raw = probs_seq[swap_idx]
-                                vals_swap = np.sort(probs_swap_raw)[::-1]
-                                gap_swap = vals_swap[0] - vals_swap[1] if len(vals_swap) > 1 else 0.0
-                                flipped_conf_list.append(gap_swap)
+                                # Average Probabilities & Mean Gap
+                                probs_base_raw = probs_seq[identity_idx]
+                                probs_swap_raw = probs_seq[swap_idx] # Note: indices are permuted here
+                                
+                                # We need to aggregate back to Content Space to average correctly
+                                agg_base_probs = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [perm_list[identity_idx]], k)
+                                agg_swap_probs = _aggregate_probs_over_permutations([probs_swap_raw.tolist()], [perm_list[swap_idx]], k)
+                                
+                                mean_probs = (agg_base_probs + agg_swap_probs) / 2.0
+                                vals_mean = np.sort(mean_probs)[::-1]
+                                mean_gap = vals_mean[0] - vals_mean[1] if len(vals_mean) > 1 else 0.0
+                                mean_gap_list.append(mean_gap)
 
                                 # Flip Change Check
-                                probs_swap = probs_seq[swap_idx]
-                                agg_base = _aggregate_probs_over_permutations([probs_seq[identity_idx].tolist()], [perm_list[identity_idx]], k) 
-                                agg_swap = _aggregate_probs_over_permutations([probs_swap.tolist()], [perm_list[swap_idx]], k)
-                                pred_base_content = option_ids[int(np.argmax(agg_base))]
-                                pred_swap_content = option_ids[int(np.argmax(agg_swap))]
+                                pred_base_content = option_ids[int(np.argmax(agg_base_probs))]
+                                pred_swap_content = option_ids[int(np.argmax(agg_swap_probs))]
                                 if pred_base_content != pred_swap_content:
                                     flip_trigger_mask.append(True)
                                 else:
                                     flip_trigger_mask.append(False)
                                     
                             arr_flip_trigger = np.array(flip_trigger_mask, dtype=bool)
-                            flipped_conf = np.array(flipped_conf_list, dtype=np.float64)
+                            mean_conf = np.array(mean_gap_list, dtype=np.float64)
 
-                            # 3. Analyze Dual Strategy (User's Idea: Gap OR Flipped Gap)
-                            # We check: (Low Conf OR Low Flipped Conf) 
-                            # But wait, User wanted: "top1-top2 rate (original gap) -> then check top2-top1 rate (flipped gap)"
-                            # Strategy: Trigger if (Original Gap < Thr) OR (Flipped Gap < Thr) ?
-                            # Or strict User: Trigger if (Original Gap < Thr) AND ((Flip Change) OR (Flipped Gap < Thr))
-                            
-                            # Let's show the "Dual Check" strategy:
-                            # Trigger = (Flip Change) OR (Flipped Gap < Threshold)
-                            # AND keep the Global Threshold (Original Gap) analysis too.
+                            # 3. Analyze Average Gap Strategy (User's Idea: Gap of Average)
+                            # Strategy: Trigger if Mean Gap < Threshold
                             
                             scan_percentiles = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                             
                             dual_stats = []
-                            combined_stats = [] 
                             
-                            # Use default_conf (Gap) to determine thresholds
+                            # Use default_conf (Gap) to determine thresholds (Keeping strictly to original scale)
                             low_conf_thresholds = np.percentile(default_conf, scan_percentiles)
 
-                            logger.info(_purple(f"[{subject}] Dual Strategy Analysis (User Idea: Flip Change OR Low Flipped Gap):"))
+                            logger.info(_purple(f"[{subject}] Dual Ensemble (Average) Strategy Analysis:"))
 
                             for i, p in enumerate(scan_percentiles):
                                 thr = low_conf_thresholds[i]
                                 
-                                # Strategy A: Standard Combined (Low Conf AND Flip Change) - The baseline
+                                # Strategy A: Standard Combined (Low Conf AND Flip Change) - Baseline
                                 pred_mask_low_conf = default_conf <= thr 
                                 pred_mask_combined = pred_mask_low_conf & arr_flip_trigger
-                                p_c, r_c, f1_c, _, _, _ = calc_pr_f1(pred_mask_combined, target_mask)
+                                _, _, f1_c, _, _, _ = calc_pr_f1(pred_mask_combined, target_mask)
                                 
-                                # Strategy B: User's Dual Check (Inside Low Conf, check Flip Change OR Low Flipped Gap)
-                                # Logic: If Original Gap is Low...
-                                #        Check: Did answer change? OR Is Flipped Gap also Low?
-                                #        If yes, Trigger.
-                                pred_mask_flipped_low = flipped_conf <= thr
-                                pred_mask_dual_trigger = arr_flip_trigger | pred_mask_flipped_low
-                                pred_mask_final = pred_mask_low_conf & pred_mask_dual_trigger
-                                
-                                p_d, r_d, f1_d, _, _, _ = calc_pr_f1(pred_mask_final, target_mask)
+                                # Strategy B: User's Average Gap Check
+                                # Trigger if Mean Gap < Threshold
+                                pred_mask_mean_gap = mean_conf <= thr
+                                p_avg, r_avg, f1_avg, _, _, _ = calc_pr_f1(pred_mask_mean_gap, target_mask)
                                 
                                 # Log detailed info
-                                logger.info(f"  [Bottom {p}% (Thr={thr:.4f})] Standard F1: {f1_c:.4f} | Dual F1: {f1_d:.4f} | Dual Rec: {r_d:.4f}")
+                                logger.info(f"  [Bottom {p}% (Thr={thr:.4f})] Standard F1: {f1_c:.4f} | AvgGap F1: {f1_avg:.4f} | AvgGap Rec: {r_avg:.4f} | AvgGap Prec: {p_avg:.4f}")
 
                                 dual_stats.append({
                                     'percentile': p,
                                     'threshold': float(thr),
                                     'f1_standard': float(f1_c),
-                                    'f1_dual': float(f1_d),
-                                    'recall_dual': float(r_d)
+                                    'f1_avg_gap': float(f1_avg),
+                                    'recall_avg_gap': float(r_avg)
                                 })
 
                             pr_analysis_results = {
-                                'dual_strategy_stats': dual_stats
+                                'avg_gap_strategy_stats': dual_stats
                             }
 
                         except Exception as e:
