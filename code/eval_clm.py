@@ -861,7 +861,7 @@ def main():
                                     pred_letter = option_ids[int(np.argmax(bp))]
                                     if pred_letter == ideals[i]:
                                         corrects_t2f += 1
-                                    total_cost_t2f += 1.0
+                                    total_cost_t2f += 2.0
 
                                 # (1-beta) subset
                                 for i in range(n, N):
