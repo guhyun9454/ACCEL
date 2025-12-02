@@ -371,7 +371,6 @@ def main():
 
                     # =========================================================
                     # [Pre-computation] Compute Confidence stats BEFORE Analysis
-                    # This ensures default_conf (Gap) and base_conf_max (Top1) are available
                     # =========================================================
                     default_conf = [] # Gap (Top1 - Top2)
                     base_conf_max = [] # Confidence (Top1 Prob)
@@ -388,6 +387,37 @@ def main():
                     # Convert lists to numpy for vectorized ops
                     default_conf = np.asarray(default_conf, dtype=np.float64)
                     base_conf_max = np.asarray(base_conf_max, dtype=np.float64)
+                    
+                    # Compute Global Flip Trigger for Ground Truth comparison
+                    flip_trigger_mask_global = []
+                    for i in range(len(base_probs_list)):
+                        # Re-calculate Flip status
+                        probs_seq = per_sample_probs[i]
+                        base_probs = base_probs_list[i]
+                        sorted_idx = np.argsort(base_probs)[::-1]
+                        top1_idx = int(sorted_idx[0])
+                        top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
+                        perm_swap = list(identity_perm)
+                        perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
+                        perm_swap_t = tuple(perm_swap)
+                        swap_idx = perm_index_map.get(perm_swap_t, identity_idx)
+                        probs_swap = probs_seq[swap_idx]
+                        
+                        agg_base = _aggregate_probs_over_permutations([probs_seq[identity_idx].tolist()], [perm_list[identity_idx]], k) 
+                        agg_swap = _aggregate_probs_over_permutations([probs_swap.tolist()], [perm_list[swap_idx]], k)
+                        pred_base_content = option_ids[int(np.argmax(agg_base))]
+                        pred_swap_content = option_ids[int(np.argmax(agg_swap))]
+                        
+                        if pred_base_content != pred_swap_content:
+                            flip_trigger_mask_global.append(True)
+                        else:
+                            flip_trigger_mask_global.append(False)
+                    arr_flip_trigger_global = np.array(flip_trigger_mask_global, dtype=bool)
+                    
+                    # Target (Gain) Mask
+                    arr_base_correct = np.array(base_correct_list, dtype=bool)
+                    arr_cyclic_correct = np.array(cyclic_correct_list, dtype=bool)
+                    target_mask = (~arr_base_correct) & (arr_cyclic_correct)
                     # =========================================================
 
                     # Save cyclic-derived results
@@ -438,7 +468,6 @@ def main():
                         curve_full = []
                         for beta in betas:
                             n = int(N * beta + 1e-9)
-                            
                             # Cyclic Mix
                             if n > 0:
                                 acc_cyc_mix = (sum(cyclic_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
@@ -446,7 +475,6 @@ def main():
                                 acc_cyc_mix = sum(base_correct_list) / float(N)
                             cost_cyc = beta * C_cyc + (1.0 - beta) * 1.0
                             curve_cyc.append((cost_cyc, acc_cyc_mix))
-
                             # Full Mix
                             if n > 0:
                                 acc_full_mix = (sum(full_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
@@ -472,46 +500,29 @@ def main():
 
                                 total_cost = 0.0
                                 corrects = 0
-
-                                # beta subset: default only
                                 for i in range(0, n):
                                     bp = base_probs_list[i]
                                     pred_letter = option_ids[int(np.argmax(bp))]
                                     if pred_letter == ideals[i]:
                                         corrects += 1
                                     total_cost += 1.0
-
-                                # (1-beta) subset: dynamic cascade
                                 for i in range(n, N):
                                     probs_seq = per_sample_probs[i]
                                     selected = [order_indices[0]]
-                                    agg = _aggregate_probs_over_permutations(
-                                        [probs_seq[j].tolist() for j in selected],
-                                        [perm_list[j] for j in selected],
-                                        k,
-                                    )
-                                    
-                                    # Simple top1-top2 gap
+                                    agg = _aggregate_probs_over_permutations([probs_seq[j].tolist() for j in selected], [perm_list[j] for j in selected], k)
                                     vals = np.sort(agg)[::-1]
                                     cur_gap = vals[0] - vals[1] if len(vals) > 1 else vals[0]
-
                                     t = 1
                                     while (cur_gap < thresh) and (t < len(order_indices)):
                                         selected.append(order_indices[t])
-                                        agg = _aggregate_probs_over_permutations(
-                                            [probs_seq[j].tolist() for j in selected],
-                                            [perm_list[j] for j in selected],
-                                            k,
-                                        )
+                                        agg = _aggregate_probs_over_permutations([probs_seq[j].tolist() for j in selected], [perm_list[j] for j in selected], k)
                                         vals = np.sort(agg)[::-1]
                                         cur_gap = vals[0] - vals[1] if len(vals) > 1 else vals[0]
                                         t += 1
-
                                     pred_letter = option_ids[int(np.argmax(agg))]
                                     if pred_letter == ideals[i]:
                                         corrects += 1
                                     total_cost += float(len(selected))
-
                                 acc_ours = (corrects / float(N)) if N > 0 else float('nan')
                                 cost_ours = (total_cost / float(N)) if N > 0 else float('nan')
                                 curve_ours.append((cost_ours, acc_ours))
@@ -519,26 +530,22 @@ def main():
                             logger.warning(f"Failed to compute Ours curve: {e}")
                             curve_ours = []
 
-                        # 3. Switch-Full / Switch-Cyclic (The original Switch Cyclic Logic)
+                        # 3. Switch-Full / Switch-Cyclic
                         curve_ours_switch_full = []
                         curve_ours_switch_cyc = []
                         try:
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
                                 if n > 0:
-                                    # [KEY POINT] This `thresh` uses `default_conf` (Gap) based on `perc`
                                     thresh = float(np.quantile(default_conf[:n], perc))
                                 else:
                                     thresh = float(np.quantile(default_conf, perc))
-
                                 # switch-full
                                 total_cost_sf = 0.0
                                 corrects_sf = 0
                                 # switch-cyclic
                                 total_cost_sc = 0.0
                                 corrects_sc = 0
-
-                                # beta subset: default
                                 for i in range(0, n):
                                     bp = base_probs_list[i]
                                     pred_letter = option_ids[int(np.argmax(bp))]
@@ -547,20 +554,11 @@ def main():
                                         corrects_sc += 1
                                     total_cost_sf += 1.0
                                     total_cost_sc += 1.0
-
-                                # (1-beta) subset: switch based on gap
                                 for i in range(n, N):
                                     probs_seq = per_sample_probs[i]
-                                    # [KEY POINT] Using default_conf (Gap) to determine Low Conf
                                     is_ambiguous = (default_conf[i] < thresh)
-
-                                    # Full Logic
                                     if is_ambiguous:
-                                        agg_full = _aggregate_probs_over_permutations(
-                                            [probs_seq[j].tolist() for j in range(len(perm_list))],
-                                            [perm_list[j] for j in range(len(perm_list))],
-                                            k,
-                                        )
+                                        agg_full = _aggregate_probs_over_permutations([probs_seq[j].tolist() for j in range(len(perm_list))], [perm_list[j] for j in range(len(perm_list))], k)
                                         pred_f = option_ids[int(np.argmax(agg_full))]
                                         total_cost_sf += float(len(perm_list))
                                     else:
@@ -568,14 +566,8 @@ def main():
                                         total_cost_sf += 1.0
                                     if pred_f == ideals[i]:
                                         corrects_sf += 1
-
-                                    # Cyclic Logic
                                     if is_ambiguous:
-                                        agg_cyc = _aggregate_probs_over_permutations(
-                                            [probs_seq[j].tolist() for j in cyclic_indices],
-                                            [perm_list[j] for j in cyclic_indices],
-                                            k,
-                                        )
+                                        agg_cyc = _aggregate_probs_over_permutations([probs_seq[j].tolist() for j in cyclic_indices], [perm_list[j] for j in cyclic_indices], k)
                                         pred_c = option_ids[int(np.argmax(agg_cyc))]
                                         total_cost_sc += float(k)
                                     else:
@@ -583,37 +575,74 @@ def main():
                                         total_cost_sc += 1.0
                                     if pred_c == ideals[i]:
                                         corrects_sc += 1
-
                                 acc_sf = corrects_sf / float(N)
                                 cost_sf = total_cost_sf / float(N)
                                 curve_ours_switch_full.append((cost_sf, acc_sf))
-
                                 acc_sc = corrects_sc / float(N)
                                 cost_sc = total_cost_sc / float(N)
                                 curve_ours_switch_cyc.append((cost_sc, acc_sc))
-
                         except Exception as e:
                             logger.warning(f"Failed to compute switch curves: {e}")
                             curve_ours_switch_full = []
                             curve_ours_switch_cyc = []
 
-                        # 4. Ours top2flip -> cyclic (The Code User Provided)
+                        # =========================================================================
+                        # 4. Ours top2flip -> cyclic (Beta Analysis + PR Metrics Logging)
+                        # =========================================================================
                         curve_ours_top2flip_cyc = []
                         try:
                             _unused_gap_frac = getattr(args, "ours_top2_gap_frac", 0.0)
+                            
+                            # Helper for PR
+                            def calc_pr_f1(pred_mask, gt_mask):
+                                tp = (pred_mask & gt_mask).sum()
+                                fp = (pred_mask & ~gt_mask).sum()
+                                fn = (~pred_mask & gt_mask).sum()
+                                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                                f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+                                return precision, recall, f1
+
+                            logger.info(_purple(f"[{subject}] Beta-wise Threshold & PR Analysis (Low Conf [Gap] AND Flip Changed):"))
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
 
+                                # 1. Estimate Threshold from Beta sample (or 0 if n=0)
                                 if n > 0:
                                     thresh = float(np.quantile(default_conf[:n], perc))
                                 else:
+                                    # Fallback: use Oracle for 0.0 just to show a baseline reference
                                     thresh = float(np.quantile(default_conf, perc))
 
                                 total_cost_t2f = 0.0
                                 corrects_t2f = 0
+                                
+                                # 2. Evaluate Strategy on Test Set (1-Beta)
+                                # We check how well the estimated threshold performs on the remaining data.
+                                test_indices = list(range(n, N))
+                                if len(test_indices) > 0:
+                                    # Subset arrays
+                                    test_default_conf = default_conf[n:]
+                                    test_flip_trigger = arr_flip_trigger_global[n:]
+                                    test_target_mask = target_mask[n:]
+                                    
+                                    # Apply Strategy: (Gap <= Thr) AND (Flip Changed)
+                                    pred_mask_low_conf = test_default_conf <= thresh
+                                    pred_mask_combined = pred_mask_low_conf & test_flip_trigger
+                                    
+                                    # Metrics
+                                    pr_p, pr_r, pr_f1 = calc_pr_f1(pred_mask_combined, test_target_mask)
+                                    
+                                    # Log stats for interesting Betas
+                                    if beta in [0.0, 0.1, 0.2, 0.3, 0.5, 1.0]: 
+                                        logger.info(f"  [Beta {beta:.1f}] Sample Size: {n} | Est. Threshold ({perc*100:.0f}%): {thresh:.4f} | Real F1: {pr_f1:.4f} | Prec: {pr_p:.4f} | Rec: {pr_r:.4f}")
+                                else:
+                                    # Beta=1.0, no test set.
+                                    pass
 
-                                # beta subset: 항상 default
+                                # 3. Calculate Curve (Cost/Acc) - Standard Logic
+                                # Beta part: Default
                                 for i in range(0, n):
                                     bp = base_probs_list[i]
                                     pred_letter = option_ids[int(np.argmax(bp))]
@@ -621,64 +650,33 @@ def main():
                                         corrects_t2f += 1
                                     total_cost_t2f += 1.0
 
-                                # (1-beta) subset
+                                # (1-Beta) part: Strategy
                                 for i in range(n, N):
-                                    probs_seq = per_sample_probs[i]
-                                    base_probs = base_probs_list[i]
-                                    pred_base_letter = option_ids[int(np.argmax(base_probs))]
-
-                                    # high-conf → default로 바로 사용
+                                    # Check Low Conf (using Estimated Threshold)
                                     if default_conf[i] >= thresh:
                                         total_cost_t2f += 1.0
-                                        if pred_base_letter == ideals[i]:
+                                        pred_letter = option_ids[int(np.argmax(base_probs_list[i]))]
+                                        if pred_letter == ideals[i]:
                                             corrects_t2f += 1
                                         continue
 
-                                    # low-conf: top1/top2 contents swap 후 flip 여부 확인
-                                    sorted_idx = np.argsort(base_probs)[::-1]
-                                    top1_idx = int(sorted_idx[0])
-                                    top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
-
-                                    perm_swap = list(identity_perm)
-                                    perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
-                                    perm_swap_t = tuple(perm_swap)
-                                    swap_idx = perm_index_map.get(perm_swap_t, identity_idx)
-
-                                    probs_base = probs_seq[identity_idx]
-                                    probs_swap = probs_seq[swap_idx]
-
-                                    # identity 설정에서의 content-level prediction
-                                    agg_base = _aggregate_probs_over_permutations(
-                                        [probs_base.tolist()],
-                                        [perm_list[identity_idx]],
-                                        k,
-                                    )
-                                    # top1/top2 contents를 swap한 설정에서의 content-level prediction
-                                    agg_swap = _aggregate_probs_over_permutations(
-                                        [probs_swap.tolist()],
-                                        [perm_list[swap_idx]],
-                                        k,
-                                    )
-                                    pred_base_content = option_ids[int(np.argmax(agg_base))]
-                                    pred_swap_content = option_ids[int(np.argmax(agg_swap))]
-
-                                    if pred_swap_content == pred_base_content:
-                                        # flip이 없으면 base 그대로 사용하고 stop
-                                        total_cost_t2f += 1.0
-                                        if pred_base_content == ideals[i]:
+                                    # Low Conf -> Check Flip
+                                    if arr_flip_trigger_global[i]: # Pre-computed flip status
+                                        # Triggered -> Run Cyclic
+                                        total_cost_t2f += float(k)
+                                        # Use Cyclic Prediction
+                                        cyc_probs = [per_sample_probs[i][j].tolist() for j in cyclic_indices]
+                                        cyc_perms = [perm_list[j] for j in cyclic_indices]
+                                        agg_cyc = _aggregate_probs_over_permutations(cyc_probs, cyc_perms, k)
+                                        pred_cyc = option_ids[int(np.argmax(agg_cyc))]
+                                        if pred_cyc == ideals[i]:
                                             corrects_t2f += 1
-                                        continue
-
-                                    # flip 발생: ID에 민감한 샘플 → cyclic까지 보내고, 최종 답은 cyclic만 사용
-                                    cyc_probs = [probs_seq[j].tolist() for j in cyclic_indices]
-                                    cyc_perms = [perm_list[j] for j in cyclic_indices]
-                                    agg_cyc = _aggregate_probs_over_permutations(
-                                        cyc_probs, cyc_perms, k
-                                    )
-                                    pred_cyc_letter = option_ids[int(np.argmax(agg_cyc))]
-                                    total_cost_t2f += float(k)
-                                    if pred_cyc_letter == ideals[i]:
-                                        corrects_t2f += 1
+                                    else:
+                                        # Not Triggered -> Stop (Cost = 2.0 for Base+Swap)
+                                        total_cost_t2f += 2.0 
+                                        pred_letter = option_ids[int(np.argmax(base_probs_list[i]))]
+                                        if pred_letter == ideals[i]:
+                                            corrects_t2f += 1
 
                                 acc_t2f = (corrects_t2f / float(N)) if N > 0 else float('nan')
                                 cost_t2f = (total_cost_t2f / float(N)) if N > 0 else float('nan')
@@ -688,91 +686,34 @@ def main():
                                                 ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_top2flip_cyc])))
                         except Exception as e:
                             logger.warning(f"Failed to compute Ours top2flip->cyclic curve: {e}")
+                            import traceback
+                            traceback.print_exc()
                             curve_ours_top2flip_cyc = []
 
                         # =========================================================================
                         # [NEW] Precision / Recall / F1 Analysis (Strictly User's Logic)
                         # Requirement: Low Confidence (Gap based) -> Then Flip Check -> Then Cyclic
                         # =========================================================================
+                        # (Keeping this Oracle analysis for reference as well)
                         pr_analysis_results = {}
                         try:
-                            logger.info(_purple(f"[{subject}] Starting Precision/Recall/F1 Analysis..."))
-
-                            # 1. Define "Positive" Class (Ground Truth)
-                            arr_base_correct = np.array(base_correct_list, dtype=bool)
-                            arr_cyclic_correct = np.array(cyclic_correct_list, dtype=bool)
-                            target_mask = (~arr_base_correct) & (arr_cyclic_correct)
-                            total_positives = target_mask.sum()
-                            
-                            logger.info(f"[{subject}] Total samples: {N}, Target Gains (Base X -> Cyc O): {total_positives} ({total_positives/N*100:.2f}%)")
-
-                            def calc_pr_f1(pred_mask, gt_mask):
-                                tp = (pred_mask & gt_mask).sum()
-                                fp = (pred_mask & ~gt_mask).sum()
-                                fn = (~pred_mask & gt_mask).sum()
-                                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-                                f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-                                return precision, recall, f1, int(tp), int(fp), int(fn)
-
-                            # 2. Pre-compute Global Flip Trigger (Already done in user thought)
-                            # This is "Did flip change the answer?" for ALL samples.
-                            flip_trigger_mask = []
-                            for i in range(N):
-                                probs_seq = per_sample_probs[i]
-                                base_probs = base_probs_list[i]
-                                sorted_idx = np.argsort(base_probs)[::-1]
-                                top1_idx = int(sorted_idx[0])
-                                top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
-                                perm_swap = list(identity_perm)
-                                perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
-                                perm_swap_t = tuple(perm_swap)
-                                swap_idx = perm_index_map.get(perm_swap_t, identity_idx)
-                                probs_swap = probs_seq[swap_idx]
-                                agg_base = _aggregate_probs_over_permutations([probs_seq[identity_idx].tolist()], [perm_list[identity_idx]], k) # Explicit base check
-                                agg_swap = _aggregate_probs_over_permutations([probs_swap.tolist()], [perm_list[swap_idx]], k)
-                                pred_base_content = option_ids[int(np.argmax(agg_base))]
-                                pred_swap_content = option_ids[int(np.argmax(agg_swap))]
-                                if pred_base_content != pred_swap_content:
-                                    flip_trigger_mask.append(True)
-                                else:
-                                    flip_trigger_mask.append(False)
-                            arr_flip_trigger = np.array(flip_trigger_mask, dtype=bool)
-
                             # 3. Analyze Low Conf (Switch-Cyclic Style) & Combined Strategy
-                            # We scan percentiles to emulate "ours_low_conf_percent" logic
-                            # [UPDATED] Scan all deciles 0%, 10%, ... 100% to show detailed thresholds
                             scan_percentiles = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                             
-                            low_conf_stats = []
                             combined_stats = [] 
                             
                             # Use default_conf (Gap) which is exactly what switch_cyclic uses
                             low_conf_thresholds = np.percentile(default_conf, scan_percentiles)
 
-                            logger.info(_purple(f"[{subject}] Detailed Threshold & Performance Analysis (Low Conf [Gap] AND Flip Changed):"))
+                            logger.info(_purple(f"[{subject}] Detailed ORACLE Analysis (If we knew full distribution):"))
 
                             for i, p in enumerate(scan_percentiles):
-                                # -- Low Confidence Based (Switch Cyclic Logic) --
                                 thr = low_conf_thresholds[i]
                                 pred_mask_low_conf = default_conf <= thr 
-                                p_l, r_l, f1_l, tp_l, fp_l, fn_l = calc_pr_f1(pred_mask_low_conf, target_mask)
-                                low_conf_stats.append({
-                                    'percentile': p,
-                                    'threshold': float(thr),
-                                    'precision': float(p_l),
-                                    'recall': float(r_l),
-                                    'f1': float(f1_l),
-                                    'trigger_rate': float(pred_mask_low_conf.mean())
-                                })
-
-                                # -- Combined Strategy (Low Conf Filter + Flip Change) --
-                                # Trigger if: (Gap is Low [Switch Cyclic Logic]) AND (Flip Changed Answer)
-                                pred_mask_combined = pred_mask_low_conf & arr_flip_trigger
+                                pred_mask_combined = pred_mask_low_conf & arr_flip_trigger_global
                                 p_comb, r_comb, f1_comb, tp_comb, fp_comb, fn_comb = calc_pr_f1(pred_mask_combined, target_mask)
                                 
-                                # Log detailed info for each step
-                                logger.info(f"  [Bottom {p}%] Gap Threshold: {thr:.4f} | Trigger: {pred_mask_combined.mean()*100:.2f}% | F1: {f1_comb:.4f} | Prec: {p_comb:.4f} | Rec: {r_comb:.4f}")
+                                logger.info(f"  [Oracle Bottom {p}%] Gap Threshold: {thr:.4f} | Trigger: {pred_mask_combined.mean()*100:.2f}% | F1: {f1_comb:.4f} | Prec: {p_comb:.4f} | Rec: {r_comb:.4f}")
 
                                 combined_stats.append({
                                     'percentile': p,
@@ -783,25 +724,8 @@ def main():
                                     'trigger_rate': float(pred_mask_combined.mean())
                                 })
 
-                            # 4. Global Flip Strategy (No Low Conf Filter)
-                            p_f, r_f, f1_f, tp_f, fp_f, fn_f = calc_pr_f1(arr_flip_trigger, target_mask)
-                            flip_stats = {
-                                'strategy': 'top2_flip_change_global',
-                                'trigger_count': int(arr_flip_trigger.sum()),
-                                'trigger_rate': float(arr_flip_trigger.mean()),
-                                'precision': float(p_f),
-                                'recall': float(r_f),
-                                'f1': float(f1_f),
-                                'tp': tp_f,
-                                'fp': fp_f
-                            }
-                            
-                            logger.info(_purple(f"[{subject}] Global Flip Stats: Trigger Rate={flip_stats['trigger_rate']*100:.1f}%, F1={f1_f:.4f}"))
-                            
                             pr_analysis_results = {
-                                'low_conf_stats': low_conf_stats,
                                 'combined_gap_flip_stats': combined_stats,
-                                'flip_stats': flip_stats
                             }
 
                         except Exception as e:
@@ -825,7 +749,7 @@ def main():
                                     mask_bin = (default_conf >= low) & (default_conf < high)
                                 count_total = int(mask_bin.sum())
                                 if count_total > 0:
-                                    count_flip = int(arr_flip_trigger[mask_bin].sum())
+                                    count_flip = int(arr_flip_trigger_global[mask_bin].sum())
                                     flip_rate = count_flip / count_total
                                 else:
                                     count_flip = 0
