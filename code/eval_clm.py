@@ -148,8 +148,6 @@ def main():
 
     logging_cuda_memory_usage()
 
-    printed_example = False
-
     # ---------------------------------------------------------
     # 2) Single-run mode
     # ---------------------------------------------------------
@@ -248,24 +246,21 @@ def main():
                         for s in range(k)
                     ]
 
-                    # Derived results containers
-                    cyclic_results = []
-                    base_results = []
+                    # -----------------------------------------------------------------
+                    # [Pre-Computation Phase]
+                    # Gather all necessary metrics for every sample
+                    # -----------------------------------------------------------------
+                    
+                    full_data_records = []
                     
                     full_total = 0
                     full_corrects = 0
-                    cyclic_total = 0
-                    cyclic_corrects = 0
-
-                    per_sample_probs = []
-                    base_probs_list = []
-                    ideals = []
                     
-                    # [FIXED] Initialize correctness lists
-                    base_correct_list = []
-                    cyclic_correct_list = []
-                    # [FIXED] This was missing and caused NameError
-                    full_correct_list = []
+                    # For quick base/cyclic results saving
+                    cyclic_results_to_save = []
+                    base_results_to_save = []
+                    base_correct_count = 0
+                    cyclic_correct_count = 0
 
                     for r in results:
                         if r.get('type') != 'result':
@@ -276,39 +271,69 @@ def main():
                             continue
                         
                         probs_seq_np = np.asarray(probs_seq, dtype=np.float64)
-                        per_sample_probs.append(probs_seq_np)
-                        ideals.append(data['ideal'])
+                        ideal = data['ideal']
 
-                        # Cyclic
-                        cyc_probs = [probs_seq[idx] for idx in cyclic_indices]
-                        cyclic_results.append({
-                            'type': 'result',
-                            'data': {
-                                'idx': data['idx'],
-                                'prompt': data.get('prompt'),
-                                'options': data['options'],
-                                'probs': cyc_probs,
-                                'ideal': data['ideal'],
-                            },
-                        })
+                        # 1. Base Logic
+                        base_probs = probs_seq_np[identity_idx]
+                        pred_base_idx = int(np.argmax(base_probs))
+                        pred_base = option_ids[pred_base_idx]
+                        is_base_correct = (pred_base == ideal)
+                        
+                        base_vals = np.sort(base_probs)[::-1]
+                        top1_val = base_vals[0]
+                        top2_val = base_vals[1] if len(base_vals) > 1 else 0.0
+                        gap_val = top1_val - top2_val
+
+                        # 2. Cyclic Logic
+                        cyc_probs_list = [probs_seq[idx] for idx in cyclic_indices]
                         cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]
-                        agg_cyc = _aggregate_probs_over_permutations(cyc_probs, cyc_perms, k)
+                        agg_cyc = _aggregate_probs_over_permutations(cyc_probs_list, cyc_perms, k)
                         pred_cyc = option_ids[int(np.argmax(agg_cyc))]
-                        corr_cyc = (pred_cyc == data['ideal'])
-                        
-                        cyclic_correct_list.append(corr_cyc)
-                        if corr_cyc:
-                            cyclic_corrects += 1
-                        cyclic_total += 1
+                        is_cyclic_correct = (pred_cyc == ideal)
 
-                        # Base
-                        base_probs = np.asarray(probs_seq[identity_idx], dtype=np.float64)
-                        base_probs_list.append(base_probs)
-                        pred_base = option_ids[int(np.argmax(base_probs))]
-                        corr_base = (pred_base == data['ideal'])
+                        # 3. Full Logic
+                        agg_full = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
+                        pred_full = option_ids[int(np.argmax(agg_full))]
+                        is_full_correct = (pred_full == ideal)
+                        if is_full_correct: full_corrects += 1
+                        full_total += 1
+
+                        # 4. Flip & Swap Logic
+                        sorted_idx = np.argsort(base_probs)[::-1]
+                        t1, t2 = sorted_idx[0], sorted_idx[1] if len(sorted_idx) > 1 else sorted_idx[0]
+                        perm_swap = list(identity_perm)
+                        perm_swap[t1], perm_swap[t2] = perm_swap[t2], perm_swap[t1]
+                        swap_idx = perm_index_map.get(tuple(perm_swap), identity_idx)
                         
-                        base_correct_list.append(corr_base)
-                        base_results.append({
+                        probs_swap = probs_seq_np[swap_idx]
+                        agg_swap = _aggregate_probs_over_permutations([probs_swap.tolist()], [perm_list[swap_idx]], k)
+                        pred_swap = option_ids[int(np.argmax(agg_swap))]
+                        
+                        is_flipped = (pred_base != pred_swap)
+                        
+                        # Swap Gap
+                        vals_swap = np.sort(probs_swap)[::-1]
+                        gap_swap = vals_swap[0] - vals_swap[1] if len(vals_swap) > 1 else vals_swap[0]
+                        
+                        # Avg Gap
+                        avg_gap_val = (gap_val + gap_swap) / 2.0
+
+                        # Store Record
+                        full_data_records.append({
+                            'ideal': ideal,
+                            'is_base_correct': is_base_correct,
+                            'is_cyclic_correct': is_cyclic_correct,
+                            'is_full_correct': is_full_correct,
+                            'gap': gap_val,
+                            'top1': top1_val,
+                            'is_flipped': is_flipped,
+                            'avg_gap': avg_gap_val
+                        })
+
+                        if is_base_correct: base_correct_count += 1
+                        if is_cyclic_correct: cyclic_correct_count += 1
+                        
+                        base_results_to_save.append({
                             'type': 'result',
                             'data': {
                                 'idx': data['idx'],
@@ -316,441 +341,177 @@ def main():
                                 'options': data['options'],
                                 'probs': base_probs.tolist(),
                                 'sampled': pred_base,
-                                'ideal': data['ideal'],
-                                'correct': corr_base,
-                            },
+                                'ideal': ideal,
+                                'correct': is_base_correct,
+                            }
+                        })
+                        cyclic_results_to_save.append({
+                            'type': 'result',
+                            'data': {
+                                'idx': data['idx'],
+                                'prompt': data.get('prompt'),
+                                'options': data['options'],
+                                'probs': cyc_probs_list,
+                                'ideal': ideal,
+                            }
                         })
 
-                        # Full
-                        agg_full = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
-                        pred_full = option_ids[int(np.argmax(agg_full))]
-                        corr_full = (pred_full == data['ideal'])
-
-                        # [FIXED] Append full correctness for later beta-curve logic
-                        full_correct_list.append(corr_full)
-
-                        if corr_full:
-                            full_corrects += 1
-                        full_total += 1
-
-                    # =========================================================
-                    # 1. Pre-compute ALL Confidence stats & Triggers
-                    # =========================================================
-                    default_conf = [] # Gap (Top1 - Top2)
-                    base_conf_max = [] # Confidence (Top1 Prob)
-                    mean_gap_list = [] # Avg Gap of (Base + Flip)
-                    flip_trigger_mask_global = []
-
-                    for i, bp in enumerate(base_probs_list):
-                        # Base Stats
-                        vals = np.sort(bp)[::-1]
-                        if vals.shape[0] < 2:
-                            top1, top2 = (vals[0], 0.0) if vals.shape[0] > 0 else (0.0, 0.0)
-                        else:
-                            top1, top2 = vals[0], vals[1]
-                        base_conf_max.append(top1)
-                        default_conf.append(top1 - top2) # Gap calculation
-
-                        # Avg Gap & Flip Trigger
-                        sorted_idx = np.argsort(bp)[::-1]
-                        top1_idx = int(sorted_idx[0])
-                        top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
-                        perm_swap = list(identity_perm)
-                        perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
-                        swap_idx = perm_index_map.get(tuple(perm_swap), identity_idx)
-                        
-                        probs_base_raw = per_sample_probs[i][identity_idx]
-                        probs_swap_raw = per_sample_probs[i][swap_idx]
-                        agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [perm_list[identity_idx]], k) 
-                        agg_swap = _aggregate_probs_over_permutations([probs_swap_raw.tolist()], [perm_list[swap_idx]], k)
-                        
-                        mean_probs = (agg_base + agg_swap) / 2.0
-                        vals_mean = np.sort(mean_probs)[::-1]
-                        mean_gap = vals_mean[0] - vals_mean[1] if len(vals_mean) > 1 else 0.0
-                        mean_gap_list.append(mean_gap)
-
-                        # Flip Check
-                        pred_base_content = option_ids[int(np.argmax(agg_base))]
-                        pred_swap_content = option_ids[int(np.argmax(agg_swap))]
-                        if pred_base_content != pred_swap_content:
-                            flip_trigger_mask_global.append(True)
-                        else:
-                            flip_trigger_mask_global.append(False)
-
-                    # Convert to numpy
-                    default_conf = np.asarray(default_conf, dtype=np.float64)
-                    base_conf_max = np.asarray(base_conf_max, dtype=np.float64)
-                    mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
-                    arr_flip_trigger_global = np.array(flip_trigger_mask_global, dtype=bool)
+                    # -----------------------------------------------------------------
+                    # Save Derived Results (Base / Cyclic)
+                    # -----------------------------------------------------------------
+                    N = len(full_data_records)
                     
-                    # Target Mask (Gain)
-                    arr_base_correct = np.array(base_correct_list, dtype=bool)
-                    arr_cyclic_correct = np.array(cyclic_correct_list, dtype=bool)
-                    target_mask = (~arr_base_correct) & (arr_cyclic_correct)
-                    
-                    total_positives = int(target_mask.sum())
-                    # =========================================================
-
-                    # Save cyclic-derived results
                     cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
-                    if getattr(args, 'option_id_set', None):
-                        cyclic_save_path += f'_id-{args.option_id_set}'
+                    if getattr(args, 'option_id_set', None): cyclic_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(cyclic_save_path, exist_ok=True)
+                    cyc_acc = cyclic_correct_count / N if N > 0 else 0.0
+                    save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results, metrics={'type': 'metric', 'data': {'accuracy': cyc_acc}})
                     
-                    # Calculate cyclic_acc here BEFORE using it in metrics
-                    if cyclic_total > 0:
-                        cyclic_acc = cyclic_corrects / cyclic_total
-                        cyclic_metrics = {'type': 'metric', 'data': {'accuracy': cyclic_acc}}
-                        logger.info(_purple(f"[{subject}] Cyclic ensemble accuracy: {cyclic_acc:.4f}"))
-                    else:
-                        cyclic_acc = float('nan')
-                        cyclic_metrics = None
-
-                    save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results, metrics=cyclic_metrics)
-                    logger.info(_orange(f"Derived and saved cyclic results: {subject}"))
-
-                    # Save base-derived results
                     base_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}'
-                    if getattr(args, 'option_id_set', None):
-                        base_save_path += f'_id-{args.option_id_set}'
+                    if getattr(args, 'option_id_set', None): base_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(base_save_path, exist_ok=True)
-                    base_metrics = {'type': 'metric', 'data': {'accuracy': get_accuracy(base_results)}}
-                    save_results(f'{base_save_path}/{subject}.jsonl', base_results, base_metrics)
-                    logger.info(_orange(f"Derived and saved base results: {subject}"))
+                    base_acc = base_correct_count / N if N > 0 else 0.0
+                    save_results(f'{base_save_path}/{subject}.jsonl', base_results_to_save, 
+                                 metrics={'type': 'metric', 'data': {'accuracy': base_acc}})
 
-                    # Full ensemble accuracy
-                    if full_total > 0:
-                        full_acc = full_corrects / full_total
-                        logger.info(_purple(f"[{subject}] Full permutation ensemble accuracy: {full_acc:.4f}"))
+                    full_acc = full_corrects / full_total if full_total > 0 else 0.0
+                    logger.info(_purple(f"[{subject}] Base: {base_acc:.4f}, Cyclic: {cyc_acc:.4f}, Full: {full_acc:.4f}"))
 
-                    summary_full = full_acc if full_total > 0 else float('nan')
-                    summary_cyc = cyclic_acc if cyclic_total > 0 else float('nan')
-                    summary_base = base_metrics['data']['accuracy'] if (base_metrics is not None and 'accuracy' in base_metrics['data']) else float('nan')
-                    logger.info(_purple(f"[{subject}] Accuracies — Full: {summary_full:.4f}, Cyclic: {summary_cyc:.4f}, Default: {summary_base:.4f}"))
+                    # =================================================================
+                    # Multi-Strategy Beta Curve Analysis
+                    # =================================================================
+                    logger.info(_blue(f"Starting Multi-Strategy Analysis for {subject}..."))
+                    
+                    betas = [i / 10.0 for i in range(11)]
+                    
+                    # Convert list of dicts to easy-access arrays
+                    arr_gap = np.array([r['gap'] for r in full_data_records])
+                    arr_top1 = np.array([r['top1'] for r in full_data_records])
+                    arr_avggap = np.array([r['avg_gap'] for r in full_data_records])
+                    arr_flip = np.array([r['is_flipped'] for r in full_data_records], dtype=bool)
+                    
+                    arr_base_corr = np.array([r['is_base_correct'] for r in full_data_records], dtype=float)
+                    arr_cyc_corr = np.array([r['is_cyclic_correct'] for r in full_data_records], dtype=float)
+                    arr_full_corr = np.array([r['is_full_correct'] for r in full_data_records], dtype=float)
 
-                    # ---------------- Beta curves (Cyclic / Full / Ours / switch / top2 variants) ------------
-                    if len(base_correct_list) == len(cyclic_correct_list) == len(full_correct_list) and len(base_correct_list) > 0:
-                        N = len(base_correct_list)
-                        betas = [i / 10.0 for i in range(11)]
-                        C_cyc = float(k)
-                        C_full = float(math.factorial(k))
+                    # --- 1. Existing Baselines ---
+                    results_random_cyclic = []   # (a) cyclic permu
+                    results_random_full = []     # (b) full permu
+                    results_switch_full = []     # (c) switch full (gap->full)
+                    results_switch_cyclic = []   # (d) switch cyclic (gap->cyclic) == Pure Gap
+                    
+                    # --- 2. New Experiments ---
+                    results_top1_cyclic = []     # top1 -> cyclic
+                    results_top1_flip_cyclic = []# top1+flip -> cyclic
+                    results_avg_gap_cyclic = []  # avggap -> cyclic
 
-                        # 1. Standard Cyclic & Full Curves
-                        curve_cyc = []
-                        curve_full = []
-                        for beta in betas:
-                            n = int(N * beta + 1e-9)
-                            # Cyclic Mix
-                            if n > 0:
-                                acc_cyc_mix = (sum(cyclic_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
-                            else:
-                                acc_cyc_mix = sum(base_correct_list) / float(N)
-                            cost_cyc = beta * C_cyc + (1.0 - beta) * 1.0
-                            curve_cyc.append((cost_cyc, acc_cyc_mix))
-                            # Full Mix
-                            if n > 0:
-                                acc_full_mix = (sum(full_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
-                            else:
-                                acc_full_mix = sum(base_correct_list) / float(N)
-                            cost_full_mix = beta * C_full + (1.0 - beta) * 1.0
-                            curve_full.append((cost_full_mix, acc_full_mix))
+                    # Costs
+                    C_cyc = float(k)
+                    C_full = float(math.factorial(k))
 
-                        # 2. Ours (Cascading Ensemble)
-                        perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
-                        curve_ours = []
-                        try:
-                            order_indices = list(range(len(perm_list)))
-                            if identity_idx != 0:
-                                order_indices = [identity_idx] + [i for i in order_indices if i != identity_idx]
+                    for beta in betas:
+                        n_budget = int(N * beta + 1e-9)
+                        
+                        # (A) Random Baselines
+                        # Cost & Acc: Linear Interpolation
+                        # Cyclic
+                        cost_rnd_cyc = beta * C_cyc + (1.0 - beta) * 1.0
+                        acc_rnd_cyc = beta * cyc_acc + (1.0 - beta) * base_acc
+                        results_random_cyclic.append({'beta': beta, 'cost': cost_rnd_cyc, 'acc': acc_rnd_cyc})
+                        # Full
+                        cost_rnd_full = beta * C_full + (1.0 - beta) * 1.0
+                        acc_rnd_full = beta * full_acc + (1.0 - beta) * base_acc
+                        results_random_full.append({'beta': beta, 'cost': cost_rnd_full, 'acc': acc_rnd_full})
 
-                            for beta in betas:
-                                n = int(N * beta + 1e-9)
-                                if n > 0:
-                                    thresh = float(np.quantile(default_conf[:n], perc))
-                                else:
-                                    thresh = float(np.quantile(default_conf, perc))
+                        # (B) Thresholding Logic
+                        # Gap Threshold
+                        if n_budget == 0: thr_gap = -1.0
+                        elif n_budget == N: thr_gap = 1.1
+                        else: thr_gap = np.sort(arr_gap)[n_budget-1]
+                        mask_gap = (arr_gap <= thr_gap)
 
-                                total_cost = 0.0
-                                corrects = 0
-                                for i in range(0, n):
-                                    bp = base_probs_list[i]
-                                    pred_letter = option_ids[int(np.argmax(bp))]
-                                    if pred_letter == ideals[i]:
-                                        corrects += 1
-                                    total_cost += 1.0
-                                for i in range(n, N):
-                                    probs_seq = per_sample_probs[i]
-                                    selected = [order_indices[0]]
-                                    agg = _aggregate_probs_over_permutations([probs_seq[j].tolist() for j in selected], [perm_list[j] for j in selected], k)
-                                    vals = np.sort(agg)[::-1]
-                                    cur_gap = vals[0] - vals[1] if len(vals) > 1 else vals[0]
-                                    t = 1
-                                    while (cur_gap < thresh) and (t < len(order_indices)):
-                                        selected.append(order_indices[t])
-                                        agg = _aggregate_probs_over_permutations([probs_seq[j].tolist() for j in selected], [perm_list[j] for j in selected], k)
-                                        vals = np.sort(agg)[::-1]
-                                        cur_gap = vals[0] - vals[1] if len(vals) > 1 else vals[0]
-                                        t += 1
-                                    pred_letter = option_ids[int(np.argmax(agg))]
-                                    if pred_letter == ideals[i]:
-                                        corrects += 1
-                                    total_cost += float(len(selected))
-                                acc_ours = (corrects / float(N)) if N > 0 else float('nan')
-                                cost_ours = (total_cost / float(N)) if N > 0 else float('nan')
-                                curve_ours.append((cost_ours, acc_ours))
-                        except Exception as e:
-                            logger.warning(f"Failed to compute Ours curve: {e}")
-                            curve_ours = []
+                        # Top1 Threshold
+                        if n_budget == 0: thr_top1 = -1.0
+                        elif n_budget == N: thr_top1 = 1.1
+                        else: thr_top1 = np.sort(arr_top1)[n_budget-1]
+                        mask_top1 = (arr_top1 <= thr_top1)
 
-                        # 3. Switch-Full / Switch-Cyclic
-                        curve_ours_switch_full = []
-                        curve_ours_switch_cyc = []
-                        try:
-                            for beta in betas:
-                                n = int(N * beta + 1e-9)
-                                if n > 0:
-                                    thresh = float(np.quantile(default_conf[:n], perc))
-                                else:
-                                    thresh = float(np.quantile(default_conf, perc))
-                                # switch-full
-                                total_cost_sf = 0.0
-                                corrects_sf = 0
-                                # switch-cyclic
-                                total_cost_sc = 0.0
-                                corrects_sc = 0
-                                for i in range(0, n):
-                                    bp = base_probs_list[i]
-                                    pred_letter = option_ids[int(np.argmax(bp))]
-                                    if pred_letter == ideals[i]:
-                                        corrects_sf += 1
-                                        corrects_sc += 1
-                                    total_cost_sf += 1.0
-                                    total_cost_sc += 1.0
-                                for i in range(n, N):
-                                    probs_seq = per_sample_probs[i]
-                                    is_ambiguous = (default_conf[i] < thresh)
-                                    if is_ambiguous:
-                                        agg_full = _aggregate_probs_over_permutations([probs_seq[j].tolist() for j in range(len(perm_list))], [perm_list[j] for j in range(len(perm_list))], k)
-                                        pred_f = option_ids[int(np.argmax(agg_full))]
-                                        total_cost_sf += float(len(perm_list))
-                                    else:
-                                        pred_f = option_ids[int(np.argmax(base_probs_list[i]))]
-                                        total_cost_sf += 1.0
-                                    if pred_f == ideals[i]:
-                                        corrects_sf += 1
-                                    if is_ambiguous:
-                                        agg_cyc = _aggregate_probs_over_permutations([probs_seq[j].tolist() for j in cyclic_indices], [perm_list[j] for j in cyclic_indices], k)
-                                        pred_c = option_ids[int(np.argmax(agg_cyc))]
-                                        total_cost_sc += float(k)
-                                    else:
-                                        pred_c = option_ids[int(np.argmax(base_probs_list[i]))]
-                                        total_cost_sc += 1.0
-                                    if pred_c == ideals[i]:
-                                        corrects_sc += 1
-                                acc_sf = corrects_sf / float(N)
-                                cost_sf = total_cost_sf / float(N)
-                                curve_ours_switch_full.append((cost_sf, acc_sf))
-                                acc_sc = corrects_sc / float(N)
-                                cost_sc = total_cost_sc / float(N)
-                                curve_ours_switch_cyc.append((cost_sc, acc_sc))
-                        except Exception as e:
-                            logger.warning(f"Failed to compute switch curves: {e}")
-                            curve_ours_switch_full = []
-                            curve_ours_switch_cyc = []
+                        # AvgGap Threshold
+                        if n_budget == 0: thr_avg = -1.0
+                        elif n_budget == N: thr_avg = 1.1
+                        else: thr_avg = np.sort(arr_avggap)[n_budget-1]
+                        mask_avg = (arr_avggap <= thr_avg)
 
-                        # 4. Ours top2flip -> cyclic
-                        curve_ours_top2flip_cyc = []
-                        try:
-                            _unused_gap_frac = getattr(args, "ours_top2_gap_frac", 0.0)
-                            
-                            # Helper for PR
-                            def calc_pr_f1(pred_mask, gt_mask):
-                                tp = (pred_mask & gt_mask).sum()
-                                fp = (pred_mask & ~gt_mask).sum()
-                                fn = (~pred_mask & gt_mask).sum()
-                                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-                                f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-                                return precision, recall, f1
+                        # (C) Gap-Based Switching (Existing)
+                        # Switch -> Cyclic (Pure Gap)
+                        cost_sw_cyc = np.sum(np.where(mask_gap, C_cyc, 1.0)) / N
+                        acc_sw_cyc = (np.sum(arr_cyc_corr[mask_gap]) + np.sum(arr_base_corr[~mask_gap])) / N
+                        results_switch_cyclic.append({'beta': beta, 'cost': cost_sw_cyc, 'acc': acc_sw_cyc, 'thresh': float(thr_gap)})
 
-                            logger.info(_purple(f"[{subject}] Beta-wise Threshold & PR Analysis (Low Conf [Gap] AND Flip Changed):"))
+                        # Switch -> Full
+                        cost_sw_full = np.sum(np.where(mask_gap, C_full, 1.0)) / N
+                        acc_sw_full = (np.sum(arr_full_corr[mask_gap]) + np.sum(arr_base_corr[~mask_gap])) / N
+                        results_switch_full.append({'beta': beta, 'cost': cost_sw_full, 'acc': acc_sw_full, 'thresh': float(thr_gap)})
 
-                            for beta in betas:
-                                n = int(N * beta + 1e-9)
-                                if n > 0:
-                                    thresh = float(np.quantile(default_conf[:n], perc))
-                                else:
-                                    thresh = float(np.quantile(default_conf, perc))
+                        # (D) New Strategy 1: Top1 -> Cyclic
+                        cost_top1 = np.sum(np.where(mask_top1, C_cyc, 1.0)) / N
+                        acc_top1 = (np.sum(arr_cyc_corr[mask_top1]) + np.sum(arr_base_corr[~mask_top1])) / N
+                        results_top1_cyclic.append({'beta': beta, 'cost': cost_top1, 'acc': acc_top1, 'thresh': float(thr_top1)})
 
-                                total_cost_t2f = 0.0
-                                corrects_t2f = 0
-                                
-                                # Log stats for interesting Betas
-                                test_indices = list(range(n, N))
-                                if len(test_indices) > 0 and beta in [0.0, 0.1, 0.2, 0.3, 0.5, 1.0]:
-                                    test_default_conf = default_conf[n:]
-                                    test_flip_trigger = arr_flip_trigger_global[n:]
-                                    test_target_mask = target_mask[n:]
-                                    
-                                    pred_mask_low_conf = test_default_conf <= thresh
-                                    pred_mask_combined = pred_mask_low_conf & test_flip_trigger
-                                    
-                                    pr_p, pr_r, pr_f1 = calc_pr_f1(pred_mask_combined, test_target_mask)
-                                    logger.info(f"  [Beta {beta:.1f}] Sample Size: {n} | Est. Threshold ({perc*100:.0f}%): {thresh:.4f} | Real F1: {pr_f1:.4f} | Prec: {pr_p:.4f} | Rec: {pr_r:.4f}")
+                        # (E) New Strategy 2: Top1 + Flip -> Cyclic
+                        mask_low_conf = mask_top1
+                        mask_flip_triggered = (~mask_low_conf) & (arr_flip) # High Conf but Flip
+                        mask_high_conf_no_flip = (~mask_low_conf) & (~arr_flip)
+                        
+                        acc_hybrid = (np.sum(arr_cyc_corr[mask_low_conf]) + 
+                                      np.sum(arr_cyc_corr[mask_flip_triggered]) + 
+                                      np.sum(arr_base_corr[mask_high_conf_no_flip])) / N
+                        
+                        # Cost Logic: High Conf + Check Flip (Cost 2.0). 
+                        # If Flip triggers, we treat it as just paying Cyclic Cost (assuming reuse).
+                        # Or strictly: 2.0 (check) + k (cyclic) = k+2? 
+                        # Comparison Standard: Usually we assume if we go cyclic, cost is k. 
+                        # But Flip check needs explicit +1 cost.
+                        c_low = np.sum(mask_low_conf) * C_cyc
+                        c_flip = np.sum(mask_flip_triggered) * C_cyc 
+                        c_safe = np.sum(mask_high_conf_no_flip) * 2.0 
+                        cost_hybrid = (c_low + c_flip + c_safe) / N
+                        
+                        results_top1_flip_cyclic.append({'beta': beta, 'cost': cost_hybrid, 'acc': acc_hybrid, 'thresh': float(thr_top1)})
 
-                                for i in range(0, n):
-                                    if base_correct_list[i]: corrects_t2f += 1
-                                    total_cost_t2f += 1.0
+                        # (F) New Strategy 3: Avg Gap -> Cyclic
+                        cost_avg = np.sum(np.where(mask_avg, C_cyc, 2.0)) / N
+                        acc_avg = (np.sum(arr_cyc_corr[mask_avg]) + np.sum(arr_base_corr[~mask_avg])) / N
+                        results_avg_gap_cyclic.append({'beta': beta, 'cost': cost_avg, 'acc': acc_avg, 'thresh': float(thr_avg)})
+                        
+                        logger.info(f"  [Beta {beta:.1f}] SwitchCyc({acc_sw_cyc:.4f}) | SwitchFull({acc_sw_full:.4f})")
 
-                                for i in range(n, N):
-                                    if default_conf[i] >= thresh:
-                                        total_cost_t2f += 1.0
-                                        if base_correct_list[i]: corrects_t2f += 1
-                                        continue
-
-                                    if arr_flip_trigger_global[i]: 
-                                        total_cost_t2f += float(k)
-                                        if cyclic_correct_list[i]: corrects_t2f += 1
-                                    else:
-                                        total_cost_t2f += 2.0 
-                                        if base_correct_list[i]: corrects_t2f += 1
-
-                                acc_t2f = (corrects_t2f / float(N)) if N > 0 else float('nan')
-                                cost_t2f = (total_cost_t2f / float(N)) if N > 0 else float('nan')
-                                curve_ours_top2flip_cyc.append((cost_t2f, acc_t2f))
-
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours top2flip->cyclic): " +
-                                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_top2flip_cyc])))
-                        except Exception as e:
-                            logger.warning(f"Failed to compute Ours top2flip->cyclic curve: {e}")
-                            import traceback
-                            traceback.print_exc()
-                            curve_ours_top2flip_cyc = []
-
-                        # 5. Ours AvgGap -> Cyclic (Cost Analysis)
-                        curve_ours_avg_gap_cyc = []
-                        try:
-                            for beta in betas:
-                                n = int(N * beta + 1e-9)
-                                if n > 0:
-                                    thresh = float(np.quantile(default_conf[:n], perc))
-                                else:
-                                    thresh = float(np.quantile(default_conf, perc))
-
-                                total_cost_avg = 0.0
-                                corrects_avg = 0
-
-                                for i in range(0, n):
-                                    if base_correct_list[i]: corrects_avg += 1
-                                    total_cost_avg += 1.0
-
-                                for i in range(n, N):
-                                    if default_conf[i] >= thresh:
-                                        total_cost_avg += 1.0
-                                        if base_correct_list[i]: corrects_avg += 1
-                                        continue
-                                    
-                                    if mean_conf[i] < thresh:
-                                        total_cost_avg += float(k)
-                                        if cyclic_correct_list[i]: corrects_avg += 1
-                                    else:
-                                        total_cost_avg += 2.0
-                                        if base_correct_list[i]: corrects_avg += 1
-
-                                acc_avg = (corrects_avg / float(N)) if N > 0 else float('nan')
-                                cost_avg = (total_cost_avg / float(N)) if N > 0 else float('nan')
-                                curve_ours_avg_gap_cyc.append((cost_avg, acc_avg))
-
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours AvgGap->cyclic): " +
-                                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_avg_gap_cyc])))
-
-                        except Exception as e:
-                            logger.warning(f"Failed to compute Ours AvgGap->cyclic curve: {e}")
-                            curve_ours_avg_gap_cyc = []
-
-                        curve_obj = {
-                            'subject': subject,
-                            'k': k,
-                            'betas': betas,
-                            'default_accuracy': base_metrics['data']['accuracy'],
-                            'cyclic': {'costs': [c for c, _ in curve_cyc], 'accuracies': [a for _, a in curve_cyc]},
-                            'ours_top2flip': {'costs': [c for c, _ in curve_ours_top2flip_cyc], 'accuracies': [a for _, a in curve_ours_top2flip_cyc]},
-                            'ours_avggap': {'costs': [c for c, _ in curve_ours_avg_gap_cyc], 'accuracies': [a for _, a in curve_ours_avg_gap_cyc]},
+                    # Save All Curves
+                    final_obj = {
+                        'subject': subject,
+                        'k': k,
+                        'betas': betas,
+                        'curves': {
+                            # Existing Baselines
+                            'random_cyclic': results_random_cyclic,
+                            'random_full': results_random_full,
+                            'switch_cyclic': results_switch_cyclic,
+                            'switch_full': results_switch_full,
+                            # New Experiments
+                            'top1_cyclic': results_top1_cyclic,
+                            'top1_flip_cyclic': results_top1_flip_cyclic,
+                            'avg_gap_cyclic': results_avg_gap_cyclic
                         }
-
-                        # =========================================================
-                        # [NEW] Gain/Loss & Net Accuracy Analysis (AvgGap Strategy)
-                        # =========================================================
-                        try:
-                            logger.info(_purple(f"[{subject}] Detailed PR & Gain/Loss Analysis (Oracle Bottom %):"))
-                            
-                            scan_percentiles = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-                            low_conf_thresholds = np.percentile(default_conf, scan_percentiles)
-                            
-                            combined_stats = []
-                            
-                            for i, p in enumerate(scan_percentiles):
-                                thr = low_conf_thresholds[i]
-                                
-                                # AvgGap Strategy: Trigger if (Low Conf Original) AND (Mean Gap < Thr)
-                                pred_mask_low = default_conf <= thr
-                                pred_mask_avg = pred_mask_low & (mean_conf <= thr)
-                                
-                                trigger_count = int(pred_mask_avg.sum())
-                                gain_mask = (~arr_base_correct) & (arr_cyclic_correct) & pred_mask_avg
-                                gain_count = int(gain_mask.sum())
-                                loss_mask = (arr_base_correct) & (~arr_cyclic_correct) & pred_mask_avg
-                                loss_count = int(loss_mask.sum())
-                                net_gain = gain_count - loss_count
-                                
-                                precision = gain_count / trigger_count if trigger_count > 0 else 0.0
-                                recall = gain_count / total_positives if total_positives > 0 else 0.0
-                                f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-                                
-                                logger.info(f"  [Bottom {p}%] (Thr={thr:.4f}) Trigger: {trigger_count} | Gain: +{gain_count} | Loss: -{loss_count} | Net: {net_gain:+d} | F1: {f1:.4f} | Prec: {precision:.4f} | Rec: {recall:.4f}")
-                                
-                                combined_stats.append({
-                                    'percentile': p,
-                                    'threshold': float(thr),
-                                    'trigger_count': trigger_count,
-                                    'gain': gain_count,
-                                    'loss': loss_count,
-                                    'net_gain': net_gain,
-                                    'f1': f1,
-                                    'recall': recall,
-                                    'precision': precision
-                                })
-                            
-                            curve_obj['pr_analysis'] = combined_stats
-
-                            bins = [i / 10.0 for i in range(11)]
-                            gap_flip_stats = []
-                            logger.info(_purple(f"[{subject}] Gap vs Flip Rate:"))
-                            for i in range(len(bins) - 1):
-                                low, high = bins[i], bins[i+1]
-                                mask = (default_conf >= low) & (default_conf <= high) if i == 9 else (default_conf >= low) & (default_conf < high)
-                                count = int(mask.sum())
-                                flipped = int(arr_flip_trigger_global[mask].sum()) if count > 0 else 0
-                                rate = flipped / count if count > 0 else 0.0
-                                if count > 0:
-                                    logger.info(f"  Gap {low:.1f}~{high:.1f}: {rate*100:.1f}% flipped ({flipped}/{count})")
-                                gap_flip_stats.append({'low': low, 'high': high, 'count': count, 'flipped': flipped, 'rate': rate})
-                            
-                            curve_obj['gap_flip_analysis'] = gap_flip_stats
-
-                        except Exception as e:
-                            logger.warning(f"Analysis Failed: {e}")
-                            import traceback
-                            traceback.print_exc()
-
-                        curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
-                        if getattr(args, 'option_id_set', None):
-                            curve_save_path += f'_id-{args.option_id_set}'
-                        os.makedirs(curve_save_path, exist_ok=True)
-                        save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', [curve_obj], metrics=None)
+                    }
+                    
+                    curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
+                    if getattr(args, 'option_id_set', None): curve_save_path += f'_id-{args.option_id_set}'
+                    os.makedirs(curve_save_path, exist_ok=True)
+                    save_results(f'{curve_save_path}/{subject}_multi_strategy.jsonl', [final_obj], metrics=None)
+                    logger.info(_orange(f"Saved Multi-Strategy curves for: {subject}"))
 
                 except Exception as e:
-                    logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
+                    logger.warning(f"Failed to derive analysis for subject '{subject}': {e}")
                     import traceback
                     traceback.print_exc()
 
