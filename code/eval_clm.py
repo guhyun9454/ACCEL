@@ -553,9 +553,13 @@ def main():
                         logger.info(_purple(f"[{subject}] Beta curve (Full): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_full])))
 
                         # Ours (dynamic cascading ensemble)
+                        # - margin: confidence = top1 - top2
+                        # - conf:   confidence = top1 prob (max softmax)
                         curve_ours = []
+                        curve_ours_conf = []
                         # For W&B: per-beta cascade counts (number of permutations aggregated per sample)
                         ours_cascade_counts_list = []
+                        ours_cascade_counts_list_conf = []
                         try:
                             # Build deterministic permutation order (identity first)
                             order_indices = list(range(len(perm_list)))
@@ -580,7 +584,13 @@ def main():
                                     return 0.0
                                 return float(vals[0] - vals[1])
 
+                            def _conf_top1(pvec: np.ndarray) -> float:
+                                if pvec.shape[0] == 0:
+                                    return 0.0
+                                return float(np.max(pvec))
+
                             default_conf = np.array([_conf_gap(bp) for bp in base_probs_list], dtype=np.float64)
+                            default_conf_top1 = np.array([_conf_top1(bp) for bp in base_probs_list], dtype=np.float64)
                             perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
 
                             for beta in betas:
@@ -589,10 +599,18 @@ def main():
                                     thresh = float(np.quantile(default_conf[:n], perc))
                                 else:
                                     thresh = float(np.quantile(default_conf, perc))
+                                if n > 0:
+                                    thresh_top1 = float(np.quantile(default_conf_top1[:n], perc))
+                                else:
+                                    thresh_top1 = float(np.quantile(default_conf_top1, perc))
 
                                 total_cost = 0.0
                                 corrects = 0
                                 cascade_counts = []
+
+                                total_cost_conf = 0.0
+                                corrects_conf = 0
+                                cascade_counts_conf = []
 
                                 # beta subset: use default only
                                 for i in range(0, n):
@@ -602,6 +620,12 @@ def main():
                                         corrects += 1
                                     total_cost += 1.0
                                     cascade_counts.append(1)
+
+                                    # top1-confidence version (same behavior for beta subset)
+                                    if pred_letter == ideals[i]:
+                                        corrects_conf += 1
+                                    total_cost_conf += 1.0
+                                    cascade_counts_conf.append(1)
 
                                 # (1-beta) subset: cascade if low confidence
                                 for i in range(n, N):
@@ -629,20 +653,55 @@ def main():
                                     total_cost += float(len(selected))
                                     cascade_counts.append(int(len(selected)))
 
+                                    # top1-confidence version: re-run cascade selection using top1 prob
+                                    selected2 = [order_indices[0]]
+                                    agg2 = _aggregate_probs_over_permutations(
+                                        [probs_seq[j].tolist() for j in selected2],
+                                        [perm_list[j] for j in selected2],
+                                        k,
+                                    )
+                                    current_conf2 = _conf_top1(np.asarray(agg2, dtype=np.float64))
+                                    t2 = 1
+                                    while (current_conf2 < thresh_top1) and (t2 < len(order_indices)):
+                                        selected2.append(order_indices[t2])
+                                        agg2 = _aggregate_probs_over_permutations(
+                                            [probs_seq[j].tolist() for j in selected2],
+                                            [perm_list[j] for j in selected2],
+                                            k,
+                                        )
+                                        current_conf2 = _conf_top1(np.asarray(agg2, dtype=np.float64))
+                                        t2 += 1
+                                    pred_letter2 = option_ids[int(np.argmax(agg2))]
+                                    if pred_letter2 == ideals[i]:
+                                        corrects_conf += 1
+                                    total_cost_conf += float(len(selected2))
+                                    cascade_counts_conf.append(int(len(selected2)))
+
                                 acc_ours = (corrects / float(N)) if N > 0 else float('nan')
                                 cost_ours = (total_cost / float(N)) if N > 0 else float('nan')
                                 curve_ours.append((cost_ours, acc_ours))
                                 ours_cascade_counts_list.append(cascade_counts)
 
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours])))
+                                acc_ours_conf = (corrects_conf / float(N)) if N > 0 else float('nan')
+                                cost_ours_conf = (total_cost_conf / float(N)) if N > 0 else float('nan')
+                                curve_ours_conf.append((cost_ours_conf, acc_ours_conf))
+                                ours_cascade_counts_list_conf.append(cascade_counts_conf)
+
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours, margin): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours])))
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours, top1-conf): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_conf])))
                         except Exception as e:
                             logger.warning(f"Failed to compute Ours curve: {e}")
                             curve_ours = []
+                            curve_ours_conf = []
                             ours_cascade_counts_list = []
+                            ours_cascade_counts_list_conf = []
 
                         # Ablations: switch-full and switch-cyclic (no cascading)
+                        # Also compute top1-confidence versions (threshold on max prob instead of margin)
                         curve_ours_switch_full = []
                         curve_ours_switch_cyc = []
+                        curve_ours_switch_full_conf = []
+                        curve_ours_switch_cyc_conf = []
                         try:
                             # per-sample cached structures from above block if available; otherwise build them
                             if 'per_sample_probs' not in locals():
@@ -664,6 +723,12 @@ def main():
                                         return 0.0
                                     return float(vals[0] - vals[1])
                                 default_conf = np.array([_conf_gap2(bp) for bp in base_probs_list], dtype=np.float64)
+                            if 'default_conf_top1' not in locals():
+                                def _conf_top1_2(pvec: np.ndarray) -> float:
+                                    if pvec.shape[0] == 0:
+                                        return 0.0
+                                    return float(np.max(pvec))
+                                default_conf_top1 = np.array([_conf_top1_2(bp) for bp in base_probs_list], dtype=np.float64)
                             perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
 
                             for beta in betas:
@@ -672,6 +737,10 @@ def main():
                                     thresh = float(np.quantile(default_conf[:n], perc))
                                 else:
                                     thresh = float(np.quantile(default_conf, perc))
+                                if n > 0:
+                                    thresh_top1 = float(np.quantile(default_conf_top1[:n], perc))
+                                else:
+                                    thresh_top1 = float(np.quantile(default_conf_top1, perc))
 
                                 # switch-full
                                 total_cost_sf = 0.0
@@ -703,6 +772,34 @@ def main():
                                 cost_sf = (total_cost_sf / float(N)) if N > 0 else float('nan')
                                 curve_ours_switch_full.append((cost_sf, acc_sf))
 
+                                # switch-full (top1-confidence)
+                                total_cost_sf2 = 0.0
+                                corrects_sf2 = 0
+                                for i in range(0, n):
+                                    bp = base_probs_list[i]
+                                    pred_letter = option_ids[int(np.argmax(bp))]
+                                    if pred_letter == ideals[i]:
+                                        corrects_sf2 += 1
+                                    total_cost_sf2 += 1.0
+                                for i in range(n, N):
+                                    probs_seq = per_sample_probs[i]
+                                    if default_conf_top1[i] < thresh_top1:
+                                        agg = _aggregate_probs_over_permutations(
+                                            [probs_seq[j].tolist() for j in range(len(perm_list))],
+                                            [perm_list[j] for j in range(len(perm_list))],
+                                            k,
+                                        )
+                                        total_cost_sf2 += float(len(perm_list))
+                                    else:
+                                        agg = probs_seq[identity_idx]
+                                        total_cost_sf2 += 1.0
+                                    pred_letter = option_ids[int(np.argmax(agg))]
+                                    if pred_letter == ideals[i]:
+                                        corrects_sf2 += 1
+                                acc_sf2 = (corrects_sf2 / float(N)) if N > 0 else float('nan')
+                                cost_sf2 = (total_cost_sf2 / float(N)) if N > 0 else float('nan')
+                                curve_ours_switch_full_conf.append((cost_sf2, acc_sf2))
+
                                 # switch-cyclic
                                 total_cost_sc = 0.0
                                 corrects_sc = 0
@@ -731,12 +828,44 @@ def main():
                                 cost_sc = (total_cost_sc / float(N)) if N > 0 else float('nan')
                                 curve_ours_switch_cyc.append((cost_sc, acc_sc))
 
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-full): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_full])))
-                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-cyclic): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_cyc])))
+                                # switch-cyclic (top1-confidence)
+                                total_cost_sc2 = 0.0
+                                corrects_sc2 = 0
+                                for i in range(0, n):
+                                    bp = base_probs_list[i]
+                                    pred_letter = option_ids[int(np.argmax(bp))]
+                                    if pred_letter == ideals[i]:
+                                        corrects_sc2 += 1
+                                    total_cost_sc2 += 1.0
+                                for i in range(n, N):
+                                    probs_seq = per_sample_probs[i]
+                                    if default_conf_top1[i] < thresh_top1:
+                                        agg = _aggregate_probs_over_permutations(
+                                            [probs_seq[j].tolist() for j in cyclic_indices],
+                                            [perm_list[j] for j in cyclic_indices],
+                                            k,
+                                        )
+                                        total_cost_sc2 += float(k)
+                                    else:
+                                        agg = probs_seq[identity_idx]
+                                        total_cost_sc2 += 1.0
+                                    pred_letter = option_ids[int(np.argmax(agg))]
+                                    if pred_letter == ideals[i]:
+                                        corrects_sc2 += 1
+                                acc_sc2 = (corrects_sc2 / float(N)) if N > 0 else float('nan')
+                                cost_sc2 = (total_cost_sc2 / float(N)) if N > 0 else float('nan')
+                                curve_ours_switch_cyc_conf.append((cost_sc2, acc_sc2))
+
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-full, margin): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_full])))
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-cyclic, margin): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_cyc])))
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-full, top1-conf): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_full_conf])))
+                            logger.info(_purple(f"[{subject}] Beta curve (Ours switch-cyclic, top1-conf): " + ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_ours_switch_cyc_conf])))
                         except Exception as e:
                             logger.warning(f"Failed to compute Ours ablation curves: {e}")
                             curve_ours_switch_full = []
                             curve_ours_switch_cyc = []
+                            curve_ours_switch_full_conf = []
+                            curve_ours_switch_cyc_conf = []
 
                         # Save curve data
                         curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
@@ -758,19 +887,34 @@ def main():
                             },
                         }
                         if len(curve_ours) == len(betas):
-                            curve_obj['ours'] = {
+                            curve_obj['ours_margin'] = {
                                 'costs': [c for c, _ in curve_ours],
                                 'accuracies': [a for _, a in curve_ours],
                             }
+                        if len(curve_ours_conf) == len(betas):
+                            curve_obj['ours_top1_conf'] = {
+                                'costs': [c for c, _ in curve_ours_conf],
+                                'accuracies': [a for _, a in curve_ours_conf],
+                            }
                         if len(curve_ours_switch_full) == len(betas):
-                            curve_obj['ours_switch_full'] = {
+                            curve_obj['ours_switch_full_margin'] = {
                                 'costs': [c for c, _ in curve_ours_switch_full],
                                 'accuracies': [a for _, a in curve_ours_switch_full],
                             }
                         if len(curve_ours_switch_cyc) == len(betas):
-                            curve_obj['ours_switch_cyclic'] = {
+                            curve_obj['ours_switch_cyclic_margin'] = {
                                 'costs': [c for c, _ in curve_ours_switch_cyc],
                                 'accuracies': [a for _, a in curve_ours_switch_cyc],
+                            }
+                        if len(curve_ours_switch_full_conf) == len(betas):
+                            curve_obj['ours_switch_full_top1_conf'] = {
+                                'costs': [c for c, _ in curve_ours_switch_full_conf],
+                                'accuracies': [a for _, a in curve_ours_switch_full_conf],
+                            }
+                        if len(curve_ours_switch_cyc_conf) == len(betas):
+                            curve_obj['ours_switch_cyclic_top1_conf'] = {
+                                'costs': [c for c, _ in curve_ours_switch_cyc_conf],
+                                'accuracies': [a for _, a in curve_ours_switch_cyc_conf],
                             }
 
                         # Oracle analysis: bottom-p% (by default confidence) subset accuracy (1% steps)
@@ -853,15 +997,27 @@ def main():
                                 if len(curve_ours) == len(betas):
                                     ours_costs = [c for c, _ in curve_ours]
                                     ours_accs = [a for _, a in curve_ours]
-                                    plt.plot(ours_costs, ours_accs, marker='o', label='Ours (cascading)')
+                                    plt.plot(ours_costs, ours_accs, marker='o', label='Ours (cascading, margin)')
+                                if 'curve_ours_conf' in locals() and len(curve_ours_conf) == len(betas):
+                                    ours_costs2 = [c for c, _ in curve_ours_conf]
+                                    ours_accs2 = [a for _, a in curve_ours_conf]
+                                    plt.plot(ours_costs2, ours_accs2, marker='o', linestyle='--', label='Ours (cascading, top1-conf)')
                                 if len(curve_ours_switch_full) == len(betas):
                                     sf_costs = [c for c, _ in curve_ours_switch_full]
                                     sf_accs = [a for _, a in curve_ours_switch_full]
-                                    plt.plot(sf_costs, sf_accs, marker='o', label='Ours (switch-full)')
+                                    plt.plot(sf_costs, sf_accs, marker='o', label='Ours (switch-full, margin)')
                                 if len(curve_ours_switch_cyc) == len(betas):
                                     sc_costs = [c for c, _ in curve_ours_switch_cyc]
                                     sc_accs = [a for _, a in curve_ours_switch_cyc]
-                                    plt.plot(sc_costs, sc_accs, marker='o', label='Ours (switch-cyclic)')
+                                    plt.plot(sc_costs, sc_accs, marker='o', label='Ours (switch-cyclic, margin)')
+                                if 'curve_ours_switch_full_conf' in locals() and len(curve_ours_switch_full_conf) == len(betas):
+                                    sf2_costs = [c for c, _ in curve_ours_switch_full_conf]
+                                    sf2_accs = [a for _, a in curve_ours_switch_full_conf]
+                                    plt.plot(sf2_costs, sf2_accs, marker='o', linestyle='--', label='Ours (switch-full, top1-conf)')
+                                if 'curve_ours_switch_cyc_conf' in locals() and len(curve_ours_switch_cyc_conf) == len(betas):
+                                    sc2_costs = [c for c, _ in curve_ours_switch_cyc_conf]
+                                    sc2_accs = [a for _, a in curve_ours_switch_cyc_conf]
+                                    plt.plot(sc2_costs, sc2_accs, marker='o', linestyle='--', label='Ours (switch-cyclic, top1-conf)')
                                 plt.scatter([1.0], [summary_base], marker='*', s=180, c='black', label='Default')
                                 plt.xlabel("Computational Cost (× of default)")
                                 plt.ylabel("Accuracy")
