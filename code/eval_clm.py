@@ -405,7 +405,8 @@ def main():
                     results_top1_cyclic = []     # top1 -> cyclic
                     results_top1_flip_cyclic = []# top1+flip -> cyclic
                     results_avg_gap_cyclic = []  # pure avggap sort -> cyclic
-                    results_gap_guided_avg_gap = [] # [NEW] Gap -> AvgGap -> Cyclic
+                    results_gap_guided_avg_gap = [] # Gap -> AvgGap -> Cyclic
+                    results_gap_guided_pure_flip = [] # [NEW!] Gap -> Flip -> Cyclic (No confidence trigger)
 
                     # Costs
                     C_cyc = float(k)
@@ -478,16 +479,9 @@ def main():
                         acc_avg = (np.sum(arr_cyc_corr[mask_avg]) + np.sum(arr_base_corr[~mask_avg])) / N
                         results_avg_gap_cyclic.append({'beta': beta, 'cost': cost_avg, 'acc': acc_avg, 'thresh': float(thr_avg)})
 
-                        # (G) [NEW!] Gap Guided AvgGap -> Cyclic (User Snippet Logic)
-                        # Logic:
-                        # 1. Check Gap. If Gap > thresh: Stop (Cost 1.0)
-                        # 2. If Gap <= thresh: Check AvgGap.
-                        #    - If AvgGap <= thresh: Cyclic (Cost k)
-                        #    - Else: Stop (Cost 2.0)
-                        # Note: Uses same threshold 'thr_gap' for consistency with snippet
-                        
+                        # (G) Gap Guided AvgGap -> Cyclic (User Snippet Logic)
                         mask_gap_low = mask_gap # Gap <= thresh
-                        mask_avggap_low = (arr_avggap <= thr_gap) # AvgGap <= thresh
+                        mask_avggap_low = (arr_avggap <= thr_gap) # AvgGap <= thresh (Uses Gap Thr)
                         
                         mask_trigger_cyclic = mask_gap_low & mask_avggap_low
                         mask_check_but_no_cyclic = mask_gap_low & (~mask_avggap_low)
@@ -501,10 +495,29 @@ def main():
                         c_checked = np.sum(mask_check_but_no_cyclic) * 2.0
                         c_base = np.sum(mask_no_check) * 1.0
                         cost_guided = (c_trigger + c_checked + c_base) / N
-                        
                         results_gap_guided_avg_gap.append({'beta': beta, 'cost': cost_guided, 'acc': acc_guided, 'thresh': float(thr_gap)})
+
+                        # (H) [NEW!] Gap Guided Pure Flip -> Cyclic
+                        # Logic: For bottom Beta% (by Gap), Check Flip. If Flip -> Cyclic. Else -> Base.
+                        mask_gap_low = mask_gap
+                        mask_is_flipped = arr_flip
                         
-                        logger.info(f"  [Beta {beta:.1f}] SwCyc({acc_sw_cyc:.4f}) | SwFull({acc_sw_full:.4f}) | Top1({acc_top1:.4f}) | T1Flip({acc_hybrid:.4f}) | AvgGap({acc_avg:.4f}) | Guided({acc_guided:.4f})")
+                        mask_trigger_flip = mask_gap_low & mask_is_flipped
+                        mask_check_no_flip = mask_gap_low & (~mask_is_flipped)
+                        mask_no_check = ~mask_gap_low
+                        
+                        acc_flip_only = (np.sum(arr_cyc_corr[mask_trigger_flip]) + 
+                                         np.sum(arr_base_corr[mask_check_no_flip]) + 
+                                         np.sum(arr_base_corr[mask_no_check])) / N
+                        
+                        c_trig_f = np.sum(mask_trigger_flip) * C_cyc
+                        c_check_f = np.sum(mask_check_no_flip) * 2.0
+                        c_base_f = np.sum(mask_no_check) * 1.0
+                        cost_flip_only = (c_trig_f + c_check_f + c_base_f) / N
+                        results_gap_guided_pure_flip.append({'beta': beta, 'cost': cost_flip_only, 'acc': acc_flip_only, 'thresh': float(thr_gap)})
+                        
+                        # [Modified] Log with all 8 strategies + FlipOnly
+                        logger.info(f"  [Beta {beta:.1f}] SwCyc(c={cost_sw_cyc:.2f}, a={acc_sw_cyc:.4f}) | T1Flip(c={cost_hybrid:.2f}, a={acc_hybrid:.4f}) | Guided(c={cost_guided:.2f}, a={acc_guided:.4f}) | FlipOnly(c={cost_flip_only:.2f}, a={acc_flip_only:.4f})")
 
                     # Save All Curves
                     final_obj = {
@@ -521,7 +534,8 @@ def main():
                             'top1_cyclic': results_top1_cyclic,
                             'top1_flip_cyclic': results_top1_flip_cyclic,
                             'avg_gap_cyclic': results_avg_gap_cyclic,
-                            'gap_guided_avg_gap': results_gap_guided_avg_gap
+                            'gap_guided_avg_gap': results_gap_guided_avg_gap,
+                            'gap_guided_pure_flip': results_gap_guided_pure_flip
                         }
                     }
                     
