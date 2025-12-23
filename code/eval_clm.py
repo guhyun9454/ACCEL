@@ -250,12 +250,12 @@ def main():
                     # [Pre-Computation Phase]
                     # Gather all necessary metrics for every sample
                     # -----------------------------------------------------------------
-
+                    
                     full_data_records = []
-
+                    
                     full_total = 0
                     full_corrects = 0
-
+                    
                     # For quick base/cyclic results saving
                     cyclic_results_to_save = []
                     base_results_to_save = []
@@ -269,7 +269,7 @@ def main():
                         probs_seq = data['probs']
                         if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
                             continue
-
+                        
                         probs_seq_np = np.asarray(probs_seq, dtype=np.float64)
                         ideal = data['ideal']
 
@@ -278,7 +278,7 @@ def main():
                         pred_base_idx = int(np.argmax(base_probs))
                         pred_base = option_ids[pred_base_idx]
                         is_base_correct = (pred_base == ideal)
-
+                        
                         base_vals = np.sort(base_probs)[::-1]
                         top1_val = base_vals[0]
                         top2_val = base_vals[1] if len(base_vals) > 1 else 0.0
@@ -295,8 +295,7 @@ def main():
                         agg_full = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
                         pred_full = option_ids[int(np.argmax(agg_full))]
                         is_full_correct = (pred_full == ideal)
-                        if is_full_correct:
-                            full_corrects += 1
+                        if is_full_correct: full_corrects += 1
                         full_total += 1
 
                         # 4. Flip & Swap Logic
@@ -305,17 +304,17 @@ def main():
                         perm_swap = list(identity_perm)
                         perm_swap[t1], perm_swap[t2] = perm_swap[t2], perm_swap[t1]
                         swap_idx = perm_index_map.get(tuple(perm_swap), identity_idx)
-
+                        
                         probs_swap = probs_seq_np[swap_idx]
                         agg_swap = _aggregate_probs_over_permutations([probs_swap.tolist()], [perm_list[swap_idx]], k)
                         pred_swap = option_ids[int(np.argmax(agg_swap))]
-
+                        
                         is_flipped = (pred_base != pred_swap)
-
+                        
                         # Swap Gap
                         vals_swap = np.sort(probs_swap)[::-1]
                         gap_swap = vals_swap[0] - vals_swap[1] if len(vals_swap) > 1 else vals_swap[0]
-
+                        
                         # Avg Gap
                         avg_gap_val = (gap_val + gap_swap) / 2.0
 
@@ -331,11 +330,9 @@ def main():
                             'avg_gap': avg_gap_val
                         })
 
-                        if is_base_correct:
-                            base_correct_count += 1
-                        if is_cyclic_correct:
-                            cyclic_correct_count += 1
-
+                        if is_base_correct: base_correct_count += 1
+                        if is_cyclic_correct: cyclic_correct_count += 1
+                        
                         base_results_to_save.append({
                             'type': 'result',
                             'data': {
@@ -363,30 +360,20 @@ def main():
                     # Save Derived Results (Base / Cyclic)
                     # -----------------------------------------------------------------
                     N = len(full_data_records)
-
+                    
                     cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
-                    if getattr(args, 'option_id_set', None):
-                        cyclic_save_path += f'_id-{args.option_id_set}'
+                    if getattr(args, 'option_id_set', None): cyclic_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(cyclic_save_path, exist_ok=True)
                     cyc_acc = cyclic_correct_count / N if N > 0 else 0.0
-
-                    # ✅ FIX HERE: cyclic_results -> cyclic_results_to_save
-                    save_results(
-                        f'{cyclic_save_path}/{subject}.jsonl',
-                        cyclic_results_to_save,
-                        metrics={'type': 'metric', 'data': {'accuracy': cyc_acc}}
-                    )
-
+                    save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results_to_save, 
+                                 metrics={'type': 'metric', 'data': {'accuracy': cyc_acc}})
+                    
                     base_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}'
-                    if getattr(args, 'option_id_set', None):
-                        base_save_path += f'_id-{args.option_id_set}'
+                    if getattr(args, 'option_id_set', None): base_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(base_save_path, exist_ok=True)
                     base_acc = base_correct_count / N if N > 0 else 0.0
-                    save_results(
-                        f'{base_save_path}/{subject}.jsonl',
-                        base_results_to_save,
-                        metrics={'type': 'metric', 'data': {'accuracy': base_acc}}
-                    )
+                    save_results(f'{base_save_path}/{subject}.jsonl', base_results_to_save, 
+                                 metrics={'type': 'metric', 'data': {'accuracy': base_acc}})
 
                     full_acc = full_corrects / full_total if full_total > 0 else 0.0
                     logger.info(_purple(f"[{subject}] Base: {base_acc:.4f}, Cyclic: {cyc_acc:.4f}, Full: {full_acc:.4f}"))
@@ -395,29 +382,30 @@ def main():
                     # Multi-Strategy Beta Curve Analysis
                     # =================================================================
                     logger.info(_blue(f"Starting Multi-Strategy Analysis for {subject}..."))
-
+                    
                     betas = [i / 10.0 for i in range(11)]
-
+                    
                     # Convert list of dicts to easy-access arrays
                     arr_gap = np.array([r['gap'] for r in full_data_records])
                     arr_top1 = np.array([r['top1'] for r in full_data_records])
                     arr_avggap = np.array([r['avg_gap'] for r in full_data_records])
                     arr_flip = np.array([r['is_flipped'] for r in full_data_records], dtype=bool)
-
+                    
                     arr_base_corr = np.array([r['is_base_correct'] for r in full_data_records], dtype=float)
                     arr_cyc_corr = np.array([r['is_cyclic_correct'] for r in full_data_records], dtype=float)
                     arr_full_corr = np.array([r['is_full_correct'] for r in full_data_records], dtype=float)
 
                     # --- 1. Existing Baselines ---
-                    results_random_cyclic = []   # (a) cyclic permu
-                    results_random_full = []     # (b) full permu
-                    results_switch_full = []     # (c) switch full (gap->full)
-                    results_switch_cyclic = []   # (d) switch cyclic (gap->cyclic) == Pure Gap
-
+                    results_random_cyclic = []   # (a)
+                    results_random_full = []     # (b)
+                    results_switch_full = []     # (c)
+                    results_switch_cyclic = []   # (d) == Pure Gap
+                    
                     # --- 2. New Experiments ---
-                    results_top1_cyclic = []      # top1 -> cyclic
-                    results_top1_flip_cyclic = [] # top1+flip -> cyclic
-                    results_avg_gap_cyclic = []   # avggap -> cyclic
+                    results_top1_cyclic = []     # top1 -> cyclic
+                    results_top1_flip_cyclic = []# top1+flip -> cyclic
+                    results_avg_gap_cyclic = []  # pure avggap sort -> cyclic
+                    results_gap_guided_avg_gap = [] # [NEW] Gap -> AvgGap -> Cyclic
 
                     # Costs
                     C_cyc = float(k)
@@ -425,44 +413,33 @@ def main():
 
                     for beta in betas:
                         n_budget = int(N * beta + 1e-9)
-
+                        
                         # (A) Random Baselines
-                        # Cost & Acc: Linear Interpolation
-                        # Cyclic
                         cost_rnd_cyc = beta * C_cyc + (1.0 - beta) * 1.0
                         acc_rnd_cyc = beta * cyc_acc + (1.0 - beta) * base_acc
                         results_random_cyclic.append({'beta': beta, 'cost': cost_rnd_cyc, 'acc': acc_rnd_cyc})
-                        # Full
+                        
                         cost_rnd_full = beta * C_full + (1.0 - beta) * 1.0
                         acc_rnd_full = beta * full_acc + (1.0 - beta) * base_acc
                         results_random_full.append({'beta': beta, 'cost': cost_rnd_full, 'acc': acc_rnd_full})
 
                         # (B) Thresholding Logic
                         # Gap Threshold
-                        if n_budget == 0:
-                            thr_gap = -1.0
-                        elif n_budget == N:
-                            thr_gap = 1.1
-                        else:
-                            thr_gap = np.sort(arr_gap)[n_budget - 1]
+                        if n_budget == 0: thr_gap = -1.0
+                        elif n_budget == N: thr_gap = 1.1
+                        else: thr_gap = np.sort(arr_gap)[n_budget-1]
                         mask_gap = (arr_gap <= thr_gap)
 
                         # Top1 Threshold
-                        if n_budget == 0:
-                            thr_top1 = -1.0
-                        elif n_budget == N:
-                            thr_top1 = 1.1
-                        else:
-                            thr_top1 = np.sort(arr_top1)[n_budget - 1]
+                        if n_budget == 0: thr_top1 = -1.0
+                        elif n_budget == N: thr_top1 = 1.1
+                        else: thr_top1 = np.sort(arr_top1)[n_budget-1]
                         mask_top1 = (arr_top1 <= thr_top1)
 
                         # AvgGap Threshold
-                        if n_budget == 0:
-                            thr_avg = -1.0
-                        elif n_budget == N:
-                            thr_avg = 1.1
-                        else:
-                            thr_avg = np.sort(arr_avggap)[n_budget - 1]
+                        if n_budget == 0: thr_avg = -1.0
+                        elif n_budget == N: thr_avg = 1.1
+                        else: thr_avg = np.sort(arr_avggap)[n_budget-1]
                         mask_avg = (arr_avggap <= thr_avg)
 
                         # (C) Gap-Based Switching (Existing)
@@ -483,29 +460,51 @@ def main():
 
                         # (E) New Strategy 2: Top1 + Flip -> Cyclic
                         mask_low_conf = mask_top1
-                        mask_flip_triggered = (~mask_low_conf) & (arr_flip)  # High Conf but Flip
+                        mask_flip_triggered = (~mask_low_conf) & (arr_flip) # High Conf but Flip
                         mask_high_conf_no_flip = (~mask_low_conf) & (~arr_flip)
-
-                        acc_hybrid = (
-                            np.sum(arr_cyc_corr[mask_low_conf]) +
-                            np.sum(arr_cyc_corr[mask_flip_triggered]) +
-                            np.sum(arr_base_corr[mask_high_conf_no_flip])
-                        ) / N
-
-                        # Cost Logic: High Conf + Check Flip (Cost 2.0).
+                        
+                        acc_hybrid = (np.sum(arr_cyc_corr[mask_low_conf]) + 
+                                      np.sum(arr_cyc_corr[mask_flip_triggered]) + 
+                                      np.sum(arr_base_corr[mask_high_conf_no_flip])) / N
+                        
                         c_low = np.sum(mask_low_conf) * C_cyc
-                        c_flip = np.sum(mask_flip_triggered) * C_cyc
-                        c_safe = np.sum(mask_high_conf_no_flip) * 2.0
+                        c_flip = np.sum(mask_flip_triggered) * C_cyc 
+                        c_safe = np.sum(mask_high_conf_no_flip) * 2.0 
                         cost_hybrid = (c_low + c_flip + c_safe) / N
-
                         results_top1_flip_cyclic.append({'beta': beta, 'cost': cost_hybrid, 'acc': acc_hybrid, 'thresh': float(thr_top1)})
 
-                        # (F) New Strategy 3: Avg Gap -> Cyclic
+                        # (F) New Strategy 3: Avg Gap -> Cyclic (Pure Sort)
                         cost_avg = np.sum(np.where(mask_avg, C_cyc, 2.0)) / N
                         acc_avg = (np.sum(arr_cyc_corr[mask_avg]) + np.sum(arr_base_corr[~mask_avg])) / N
                         results_avg_gap_cyclic.append({'beta': beta, 'cost': cost_avg, 'acc': acc_avg, 'thresh': float(thr_avg)})
 
-                        logger.info(f"  [Beta {beta:.1f}] SwitchCyc({acc_sw_cyc:.4f}) | SwitchFull({acc_sw_full:.4f})")
+                        # (G) [NEW!] Gap Guided AvgGap -> Cyclic (User Snippet Logic)
+                        # Logic:
+                        # 1. Check Gap. If Gap > thresh: Stop (Cost 1.0)
+                        # 2. If Gap <= thresh: Check AvgGap.
+                        #    - If AvgGap <= thresh: Cyclic (Cost k)
+                        #    - Else: Stop (Cost 2.0)
+                        # Note: Uses same threshold 'thr_gap' for consistency with snippet
+                        
+                        mask_gap_low = mask_gap # Gap <= thresh
+                        mask_avggap_low = (arr_avggap <= thr_gap) # AvgGap <= thresh
+                        
+                        mask_trigger_cyclic = mask_gap_low & mask_avggap_low
+                        mask_check_but_no_cyclic = mask_gap_low & (~mask_avggap_low)
+                        mask_no_check = ~mask_gap_low
+                        
+                        acc_guided = (np.sum(arr_cyc_corr[mask_trigger_cyclic]) + 
+                                      np.sum(arr_base_corr[mask_check_but_no_cyclic]) + 
+                                      np.sum(arr_base_corr[mask_no_check])) / N
+                        
+                        c_trigger = np.sum(mask_trigger_cyclic) * C_cyc
+                        c_checked = np.sum(mask_check_but_no_cyclic) * 2.0
+                        c_base = np.sum(mask_no_check) * 1.0
+                        cost_guided = (c_trigger + c_checked + c_base) / N
+                        
+                        results_gap_guided_avg_gap.append({'beta': beta, 'cost': cost_guided, 'acc': acc_guided, 'thresh': float(thr_gap)})
+                        
+                        logger.info(f"  [Beta {beta:.1f}] SwCyc({acc_sw_cyc:.4f}) | SwFull({acc_sw_full:.4f}) | Top1({acc_top1:.4f}) | T1Flip({acc_hybrid:.4f}) | AvgGap({acc_avg:.4f}) | Guided({acc_guided:.4f})")
 
                     # Save All Curves
                     final_obj = {
@@ -521,13 +520,13 @@ def main():
                             # New Experiments
                             'top1_cyclic': results_top1_cyclic,
                             'top1_flip_cyclic': results_top1_flip_cyclic,
-                            'avg_gap_cyclic': results_avg_gap_cyclic
+                            'avg_gap_cyclic': results_avg_gap_cyclic,
+                            'gap_guided_avg_gap': results_gap_guided_avg_gap
                         }
                     }
-
+                    
                     curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
-                    if getattr(args, 'option_id_set', None):
-                        curve_save_path += f'_id-{args.option_id_set}'
+                    if getattr(args, 'option_id_set', None): curve_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(curve_save_path, exist_ok=True)
                     save_results(f'{curve_save_path}/{subject}_multi_strategy.jsonl', [final_obj], metrics=None)
                     logger.info(_orange(f"Saved Multi-Strategy curves for: {subject}"))
