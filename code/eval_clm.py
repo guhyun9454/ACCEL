@@ -439,7 +439,7 @@ def main():
 
                         perc = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
                         # [NEW] gate2를 더 빡세게: perc2 = perc^2
-                        perc2 = perc * perc
+                        perc2 = perc * 1.5
 
                         # -------------------------
                         # 1) Standard cyclic/full mix
