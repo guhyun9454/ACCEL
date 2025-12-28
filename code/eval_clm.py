@@ -250,7 +250,8 @@ def main():
                         for s in range(k)
                     ]
 
-                    # Derived results containers
+                    cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]  # reuse
+
                     cyclic_results = []
                     base_results = []
 
@@ -263,12 +264,9 @@ def main():
                     base_probs_list = []
                     ideals = []
 
-                    # correctness lists
                     base_correct_list = []
                     cyclic_correct_list = []
                     full_correct_list = []
-
-                    cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]  # reuse
 
                     for r in results:
                         if r.get('type') != 'result':
@@ -297,7 +295,6 @@ def main():
                         agg_cyc = _aggregate_probs_over_permutations(cyc_probs, cyc_perms, k)
                         pred_cyc = option_ids[int(np.argmax(agg_cyc))]
                         corr_cyc = (pred_cyc == data['ideal'])
-
                         cyclic_correct_list.append(corr_cyc)
                         if corr_cyc:
                             cyclic_corrects += 1
@@ -308,7 +305,6 @@ def main():
                         base_probs_list.append(base_probs)
                         pred_base = option_ids[int(np.argmax(base_probs))]
                         corr_base = (pred_base == data['ideal'])
-
                         base_correct_list.append(corr_base)
                         base_results.append({
                             'type': 'result',
@@ -327,7 +323,6 @@ def main():
                         agg_full = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
                         pred_full = option_ids[int(np.argmax(agg_full))]
                         corr_full = (pred_full == data['ideal'])
-
                         full_correct_list.append(corr_full)
                         if corr_full:
                             full_corrects += 1
@@ -336,10 +331,9 @@ def main():
                     # =========================================================
                     # Confidence stats & triggers (precompute)
                     # =========================================================
-                    default_conf = []          # base gap: top1 - top2
-                    base_conf_max = []         # base top1 prob
-                    mean_gap_list = []         # gap(mean(base, swap))
-                    flip_trigger_mask_global = []  # base argmax != swap argmax
+                    default_conf = []               # base gap: top1 - top2
+                    mean_gap_list = []              # gap(mean(base, swap))
+                    flip_trigger_mask_global = []   # base argmax != swap argmax
 
                     for i, bp in enumerate(base_probs_list):
                         vals = np.sort(bp)[::-1]
@@ -347,10 +341,9 @@ def main():
                             top1, top2 = (vals[0], 0.0) if vals.shape[0] > 0 else (0.0, 0.0)
                         else:
                             top1, top2 = vals[0], vals[1]
-                        base_conf_max.append(float(top1))
                         default_conf.append(float(top1 - top2))
 
-                        # swap (top1 <-> top2)
+                        # swap (top1 <-> top2) permutation index
                         sorted_idx = np.argsort(bp)[::-1]
                         top1_idx = int(sorted_idx[0])
                         top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
@@ -382,7 +375,6 @@ def main():
                         flip_trigger_mask_global.append(pred_base_content != pred_swap_content)
 
                     default_conf = np.asarray(default_conf, dtype=np.float64)
-                    base_conf_max = np.asarray(base_conf_max, dtype=np.float64)
                     mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
                     arr_flip_trigger_global = np.asarray(flip_trigger_mask_global, dtype=bool)
 
@@ -460,7 +452,7 @@ def main():
                             curve_full.append((cost_full_mix, acc_full_mix))
 
                         # -------------------------
-                        # 2) switch-full / switch-cyclic (re-added)
+                        # 2) switch-full / switch-cyclic
                         # -------------------------
                         curve_switch_full = []
                         curve_switch_cyc = []
@@ -474,7 +466,6 @@ def main():
                                 total_cost_sc = 0.0
                                 corrects_sc = 0
 
-                                # calibration prefix: base only
                                 for i in range(0, n):
                                     total_cost_sf += 1.0
                                     total_cost_sc += 1.0
@@ -485,7 +476,6 @@ def main():
                                 for i in range(n, N):
                                     is_ambiguous = (float(default_conf[i]) < thresh)
 
-                                    # switch-full
                                     if is_ambiguous:
                                         total_cost_sf += float(len(perm_list))
                                         if full_correct_list[i]:
@@ -495,9 +485,8 @@ def main():
                                         if base_correct_list[i]:
                                             corrects_sf += 1
 
-                                    # switch-cyclic
                                     if is_ambiguous:
-                                        total_cost_sc += float(k)  # total k calls (base included)
+                                        total_cost_sc += float(k)
                                         if cyclic_correct_list[i]:
                                             corrects_sc += 1
                                     else:
@@ -518,7 +507,7 @@ def main():
                             curve_switch_cyc = []
 
                         # -------------------------
-                        # 3) top2flip -> cyclic (low-conf AND flip-changed)
+                        # 3) top2flip -> cyclic
                         # -------------------------
                         curve_top2flip_cyc = []
                         try:
@@ -545,13 +534,12 @@ def main():
                                             corrects += 1
                                         continue
 
-                                    # low-conf => do flip
                                     if bool(arr_flip_trigger_global[i]):
-                                        total_cost += cyc_after_flip_cost  # 2 + (k-1)
+                                        total_cost += cyc_after_flip_cost
                                         if cyclic_correct_list[i]:
                                             corrects += 1
                                     else:
-                                        total_cost += base_plus_flip_cost  # 2
+                                        total_cost += base_plus_flip_cost
                                         if base_correct_list[i]:
                                             corrects += 1
 
@@ -567,8 +555,6 @@ def main():
 
                         # -------------------------
                         # 4) AvgGap(static) -> cyclic
-                        #    gate1: low-conf by default_conf < thresh
-                        #    gate2: mean_conf < thresh => go cyclic
                         # -------------------------
                         curve_avggap_static = []
                         try:
@@ -595,13 +581,12 @@ def main():
                                             corrects += 1
                                         continue
 
-                                    # low-conf => pay base+flip to get mean_conf
+                                    total_cost += base_plus_flip_cost
                                     if float(mean_conf[i]) < thresh:
-                                        total_cost += cyc_after_flip_cost
+                                        total_cost += extra_cyclic_cost
                                         if cyclic_correct_list[i]:
                                             corrects += 1
                                     else:
-                                        total_cost += base_plus_flip_cost
                                         if base_correct_list[i]:
                                             corrects += 1
 
@@ -617,9 +602,10 @@ def main():
 
                         # -------------------------
                         # 5) AvgGap(dynamic) -> cyclic
-                        # IMPORTANT CHANGE:
-                        #   th1 starts at perc (e.g., 0.30 or 0.40) regardless of beta,
-                        #   so --ours_low_conf_percent 40 => th1 starts at 0.40
+                        # FIXES APPLIED:
+                        #   (A) th2 = clamp(th1 + mad)
+                        #   (B) th1 oracle-update 제거 => th1 고정 + th1 붕괴 방지(max with init_th1)
+                        #   (C) init_th1은 beta 무관하게 global quantile(default_conf, perc)
                         # -------------------------
                         curve_avggap_dynamic = []
                         try:
@@ -627,12 +613,11 @@ def main():
                             extra_cyclic_cost = float(k - 1)
 
                             mad_alpha = 0.10
-                            th_lr = 0.05
 
                             def _clamp01(x: float) -> float:
                                 return max(0.0, min(1.0, float(x)))
 
-                            init_th1_fixed = _clamp01(perc)  # <-- 핵심: 30->0.30, 40->0.40
+                            init_th1_fixed = _clamp01(float(np.quantile(default_conf, perc)))  # global quantile, beta-independent
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
@@ -652,14 +637,14 @@ def main():
                                 for i in range(n, N):
                                     gap = float(default_conf[i])
 
-                                    # gate1
+                                    # gate1: confident => base only
                                     if gap >= th1:
                                         total_cost += 1.0
                                         if base_correct_list[i]:
                                             corrects += 1
                                         continue
 
-                                    # low-conf: pay base+flip
+                                    # low-conf: pay base+flip to compute mean_conf
                                     total_cost += base_plus_flip_cost
 
                                     # update MAD using |gap - mean_gap|
@@ -667,26 +652,21 @@ def main():
                                     mad = (1.0 - mad_alpha) * mad + mad_alpha * diff_abs
                                     mad = max(0.0, mad)
 
-                                    th2 = _clamp01(th1 - mad)
+                                    # [FIX #1] th2 sign flipped: th1 + mad
+                                    th2 = _clamp01(th1 + mad)
 
                                     if float(mean_conf[i]) < th2:
                                         # go cyclic: add remaining rotations (k-1)
                                         total_cost += extra_cyclic_cost
                                         if cyclic_correct_list[i]:
                                             corrects += 1
-
-                                        # online update (uses oracle gain/loss)
-                                        if (not base_correct_list[i]) and cyclic_correct_list[i]:
-                                            th1 = _clamp01(th1 + th_lr * (th1 - gap + 1e-6))
-                                        elif base_correct_list[i] and (not cyclic_correct_list[i]):
-                                            th1 = _clamp01(th1 - th_lr * max(th1, 1e-6))
-                                        else:
-                                            th1 = _clamp01(th1 - th_lr * 0.01 * max(th1, 1e-6))
                                     else:
                                         # stop after flip, return base pred
                                         if base_correct_list[i]:
                                             corrects += 1
-                                        th1 = _clamp01(th1 - th_lr * 0.005 * max(th1, 1e-6))
+
+                                    # [FIX #2] th1 fixed (no oracle update) + prevent collapse anyway
+                                    th1 = max(th1, init_th1_fixed)
 
                                 curve_avggap_dynamic.append((total_cost / float(N), corrects / float(N)))
 
@@ -736,15 +716,15 @@ def main():
                                 'accuracies': [float(a) for _, a in curve_avggap_dynamic]
                             },
 
-                            # backward-compat alias (old name)
+                            # backward-compat alias
                             'ours_avggap': {
                                 'costs': [float(c) for c, _ in curve_avggap_static],
                                 'accuracies': [float(a) for _, a in curve_avggap_static]
                             },
 
-                            # record perc for reproducibility
                             'ours_low_conf_percent': float(getattr(args, 'ours_low_conf_percent', 10.0)),
                             'ours_low_conf_frac': float(perc),
+                            'dynamic_init_th1': float(init_th1_fixed),
                         }
 
                         curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
