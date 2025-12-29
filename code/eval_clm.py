@@ -707,7 +707,7 @@ def main():
                                     mad = max(0.0, mad)
 
                                     # threshold2 = threshold1 - mad  (change to + for "th1+MAD")
-                                    th2 = _clamp01(th1 - mad)
+                                    th2 = _clamp01(th1 + mad)
 
                                     # gate2: if mean gap is still small => go cyclic
                                     if mean_gap_fixed < th2:
