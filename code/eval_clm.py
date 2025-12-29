@@ -601,44 +601,61 @@ def main():
                             curve_avggap_static = []
 
                         # -------------------------
-                        # 5) AvgGap(dynamic, ONLINE, th1+MAD) -> cyclic
-                        #   - NO quantile/percentile thresholding
-                        #   - th1: online-updated (oracle-based)
-                        #   - th2: th1 + gamma * mad
-                        #   - mad: EMA of |gap - mean_gap|
+                        # 5) AvgGap(PSEUDO, ONLINE) -> cyclic
+                        #   matches your pseudocode:
+                        #   if (p[t1]-p[t2] > th1) return t1
+                        #   else flip, compute:
+                        #     mean_gap_fixed = ((p[t1]+fp[t1])/2) - ((p[t2]+fp[t2])/2)
+                        #     mad = EMA( | (p[t1]-p[t2]) - mean_gap_fixed | )   (init: th1/2)
+                        #     th2 = th1 - mad   (change to th1 + mad if you want "th1+MAD")
+                        #     if (mean_gap_fixed < th2): do cyclic; update th1 by (tc == t1)
                         # -------------------------
-                        curve_avggap_dynamic = []
+                        curve_avggap_pseudo = []
                         try:
                             base_plus_flip_cost = 2.0
                             extra_cyclic_cost = float(k - 1)
 
-                            # knobs (추천 시작값)
-                            mad_alpha = 0.10   # EMA speed
-                            mad_gamma = 1.00   # th2 = th1 + gamma*mad  (너 요청: th1+MAD -> gamma=1)
-                            th_lr_up = 0.05    # cyclic이 base를 살렸을 때 th1 올리는 속도
-                            th_lr_dn = 0.05    # cyclic이 base를 망쳤을 때 th1 내리는 속도
-                            th_lr_decay = 0.005
+                            # knobs
+                            mad_alpha = float(getattr(args, "ours_mad_alpha", 0.10))
+                            th_lr_up  = float(getattr(args, "ours_th_lr_up", 0.05))
+                            th_lr_dn  = float(getattr(args, "ours_th_lr_dn", 0.05))
 
                             def _clamp01(x: float) -> float:
                                 return max(0.0, min(1.0, float(x)))
 
-                            # percentile/quantile 없이 초기값 잡기:
-                            # - perc 자체를 th1로 쓰면 scale mismatch가 날 수 있음(0.3이 너무 큼 등)
-                            # - 그래서 "작은 값"으로 시작해서 online으로 키우는 걸 추천
-                            init_th1 = _clamp01(getattr(args, "ours_th1_init", 0.05))  # CLI로 조절 가능하게
-                            th1_min = _clamp01(getattr(args, "ours_th1_min", 0.00))
-                            th1_max = _clamp01(getattr(args, "ours_th1_max", 1.00))
+                            # th1 is NOT a quantile here. It's the literal fraction like 0.30 for "30%"
+                            init_th1 = _clamp01(getattr(args, "ours_th1_init", perc))  # perc=ours_low_conf_percent/100
+                            th1_min  = _clamp01(getattr(args, "ours_th1_min", 0.0))
+                            th1_max  = _clamp01(getattr(args, "ours_th1_max", 1.0))
+
+                            # ---------- precompute base top1(t1) / top2(t2) indices ----------
+                            N = len(base_correct_list)
+                            base_top12_idx = []
+                            for i in range(N):
+                                bp = np.asarray(base_probs_list[i], dtype=np.float64)
+                                sidx = np.argsort(bp)[::-1]
+                                t1 = int(sidx[0])
+                                t2 = int(sidx[1]) if len(sidx) > 1 else int(sidx[0])
+                                base_top12_idx.append((t1, t2))
+
+                            # ---------- precompute cyclic predicted index tc (content-space) ----------
+                            cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]
+                            cyclic_pred_idx = []
+                            for i in range(N):
+                                cyc_probs = [per_sample_probs[i][idx] for idx in cyclic_indices]
+                                agg_cyc = _aggregate_probs_over_permutations(cyc_probs, cyc_perms, k)
+                                cyclic_pred_idx.append(int(np.argmax(agg_cyc)))
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
 
                                 th1 = init_th1
-                                mad = th1 / 2.0  # 초기 MAD
+                                mad = th1 / 2.0  # init: threshold1/2
 
                                 total_cost = 0.0
                                 corrects = 0
 
-                                # prefix: base only (기존 beta curve 정의 유지)
+                                # prefix: base only
                                 for i in range(0, n):
                                     total_cost += 1.0
                                     if base_correct_list[i]:
@@ -646,74 +663,86 @@ def main():
 
                                 # online region
                                 for i in range(n, N):
-                                    gap = float(default_conf[i])
+                                    t1, t2 = base_top12_idx[i]
 
-                                    # gate1: confident => base only
-                                    if gap >= th1:
+                                    # base gap: p[t1] - p[t2]
+                                    bp = np.asarray(base_probs_list[i], dtype=np.float64)
+                                    gap = float(bp[t1] - bp[t2])
+
+                                    # gate1: confident => return t1 (base)
+                                    if gap > th1:
                                         total_cost += 1.0
                                         if base_correct_list[i]:
                                             corrects += 1
-                                        # (optional) 너무 보수적으로 굳는 걸 막는 약한 decay
-                                        th1 = _clamp01(th1 - th_lr_decay * th1)
-                                        th1 = min(max(th1, th1_min), th1_max)
                                         continue
 
-                                    # low-conf: pay base+flip to compute mean_conf
+                                    # low-conf => flip and test (base + flip)
                                     total_cost += base_plus_flip_cost
 
-                                    # update MAD
-                                    diff_abs = abs(gap - float(mean_conf[i]))
-                                    mad = (1.0 - mad_alpha) * mad + mad_alpha * diff_abs
+                                    # build swap permutation (swap content positions of t1 and t2)
+                                    perm_swap = list(identity_perm)
+                                    perm_swap[t1], perm_swap[t2] = perm_swap[t2], perm_swap[t1]
+                                    swap_idx = perm_index_map.get(tuple(perm_swap), identity_idx)
+
+                                    probs_base_raw = per_sample_probs[i][identity_idx]
+                                    probs_swap_raw = per_sample_probs[i][swap_idx]
+
+                                    # map letter-probs to content-space probs
+                                    agg_base = _aggregate_probs_over_permutations(
+                                        [probs_base_raw.tolist()], [perm_list[identity_idx]], k
+                                    )
+                                    agg_swap = _aggregate_probs_over_permutations(
+                                        [probs_swap_raw.tolist()], [perm_list[swap_idx]], k
+                                    )
+
+                                    p1, p2   = float(agg_base[t1]), float(agg_base[t2])
+                                    fp1, fp2 = float(agg_swap[t1]), float(agg_swap[t2])
+
+                                    # mean gap with FIXED (t1,t2)
+                                    mean_gap_fixed = ((p1 + fp1) / 2.0) - ((p2 + fp2) / 2.0)
+
+                                    # MAD update: EMA of | base_gap - mean_gap_fixed |
+                                    diff = (p1 - p2) - mean_gap_fixed
+                                    mad = (1.0 - mad_alpha) * mad + mad_alpha * abs(diff)
                                     mad = max(0.0, mad)
 
-                                    # gate2 threshold: th2 = th1 + MAD
-                                    th2 = _clamp01(th1 + mad_gamma * mad)
+                                    # threshold2 = threshold1 - mad  (change to + for "th1+MAD")
+                                    th2 = _clamp01(th1 - mad)
 
-                                    # decision
-                                    go_cyclic = (float(mean_conf[i]) < th2)
-
-                                    if go_cyclic:
+                                    # gate2: if mean gap is still small => go cyclic
+                                    if mean_gap_fixed < th2:
                                         total_cost += extra_cyclic_cost
+
                                         if cyclic_correct_list[i]:
                                             corrects += 1
 
-                                        # ===== oracle online update of th1 =====
-                                        # base wrong & cyclic right => 더 많이 cyclic 보내고 싶다 => th1 ↑
-                                        if (not base_correct_list[i]) and cyclic_correct_list[i]:
-                                            # gap이 th1보다 얼마나 작은지 기반으로 step
-                                            th1 = _clamp01(th1 + th_lr_up * (th1 - gap + 1e-6))
-
-                                        # base right & cyclic wrong => cyclic 줄이고 싶다 => th1 ↓
-                                        elif base_correct_list[i] and (not cyclic_correct_list[i]):
-                                            th1 = _clamp01(th1 - th_lr_dn * max(th1, 1e-6))
-
-                                        # 둘 다 같으면(둘 다 맞/틀) => 약한 decay
+                                        # tc == t1 ? update threshold1 (NO oracle)
+                                        tc = cyclic_pred_idx[i]
+                                        if tc == t1:
+                                            # "increase th1 proportional to (th1 - (p[t1]-p[t2]))"
+                                            th1 = _clamp01(th1 + th_lr_up * max(th1 - gap, 0.0))
                                         else:
-                                            th1 = _clamp01(th1 - th_lr_decay * max(th1, 1e-6))
+                                            # "decrease th1 proportional to (p[t1]-p[t2])"
+                                            th1 = _clamp01(th1 - th_lr_dn * max(gap, 0.0))
+
+                                        th1 = min(max(th1, th1_min), th1_max)
 
                                     else:
-                                        # stop after flip, return base pred
+                                        # return t1 (base)
                                         if base_correct_list[i]:
                                             corrects += 1
 
-                                        # cyclic 안 갔는데 base가 틀렸으면 -> th1을 조금 올려서 다음에 더 잡게(선택)
-                                        if not base_correct_list[i]:
-                                            th1 = _clamp01(th1 + 0.25 * th_lr_up * (th1 - gap + 1e-6))
-                                        else:
-                                            th1 = _clamp01(th1 - th_lr_decay * th1)
-
-                                    th1 = min(max(th1, th1_min), th1_max)
-
-                                curve_avggap_dynamic.append((total_cost / float(N), corrects / float(N)))
+                                curve_avggap_pseudo.append((total_cost / float(N), corrects / float(N)))
 
                             logger.info(_purple(
-                                f"[{subject}] Beta curve (Ours AvgGap(ONLINE,th1+MAD)->cyclic): " +
-                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_avggap_dynamic])
+                                f"[{subject}] Beta curve (AvgGap PSEUDO online): " +
+                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_avggap_pseudo])
                             ))
 
                         except Exception as e:
-                            logger.warning(f"Failed to compute AvgGap(dynamic online th1+MAD)->cyclic curve: {e}")
-                            curve_avggap_dynamic = []
+                            logger.warning(f"Failed to compute AvgGap(PSEUDO) curve: {e}")
+                            curve_avggap_pseudo = []
+
 
                         # Save curves
                         curve_obj = {
