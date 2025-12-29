@@ -111,7 +111,7 @@ def main():
     wandb_run = None
     if getattr(args, 'wandb', False):
         try:
-            import wandb
+            import wandb  # type: ignore
             project = args.wandb_project
             run_name = args.wandb_run_name or f"{args.model_name}-{args.eval_names[0]}"
             wandb_run = wandb.init(
@@ -668,6 +668,106 @@ def main():
                             logger.warning(f"Failed to compute Ours AvgGap->cyclic curve: {e}")
                             curve_ours_avg_gap_cyc = []
 
+                        # =========================================================
+                        # [NEW] Absolute-threshold grid (thr1/thr2) for AvgGap Strategy
+                        #   - x-axis: thr1 (base gap threshold)
+                        #   - y-axis: thr2 (avg gap threshold)
+                        #   - values: accuracy of policy:
+                        #       if default_gap > thr1: base
+                        #       else if mean_gap < thr2: cyclic
+                        #       else: base
+                        # =========================================================
+                        abs_thr_grid = None
+                        try:
+                            thr_step = 0.1  # 10% unit in absolute probability gap space
+                            thr1_vals = np.round(np.arange(0.0, 1.0 + 1e-9, thr_step), 10)
+                            thr2_vals = np.round(np.arange(0.0, 1.0 + 1e-9, thr_step), 10)
+
+                            acc_grid = np.zeros((len(thr2_vals), len(thr1_vals)), dtype=np.float64)
+                            for yi, thr2 in enumerate(thr2_vals):
+                                for xi, thr1 in enumerate(thr1_vals):
+                                    use_cyclic = (default_conf <= thr1) & (mean_conf < thr2)
+                                    acc_grid[yi, xi] = float(np.mean(np.where(use_cyclic, arr_cyclic_correct, arr_base_correct)))
+
+                            best_y, best_x = np.unravel_index(int(np.argmax(acc_grid)), acc_grid.shape)
+                            best_thr1 = float(thr1_vals[best_x])
+                            best_thr2 = float(thr2_vals[best_y])
+                            best_acc = float(acc_grid[best_y, best_x])
+
+                            abs_thr_grid = {
+                                'thr_step': float(thr_step),
+                                'thr1_vals': [float(v) for v in thr1_vals.tolist()],
+                                'thr2_vals': [float(v) for v in thr2_vals.tolist()],
+                                'acc_grid': acc_grid.tolist(),
+                                'best': {'thr1': best_thr1, 'thr2': best_thr2, 'acc': best_acc},
+                            }
+
+                            logger.info(_purple(
+                                f"[{subject}] AvgGap abs-threshold grid best: "
+                                f"acc={best_acc:.4f} @ (thr1={best_thr1:.1f}, thr2={best_thr2:.1f})"
+                            ))
+
+                            # W&B heatmap logging (image) - only if enabled
+                            if wandb_run is not None:
+                                import matplotlib
+                                # Avoid backend switching errors across repeated subject loops
+                                if "matplotlib.pyplot" not in sys.modules:
+                                    matplotlib.use("Agg")
+                                import matplotlib.pyplot as plt
+
+                                fig_w = max(8.0, 0.55 * len(thr1_vals) + 3.0)
+                                fig_h = max(8.0, 0.55 * len(thr2_vals) + 3.0)
+                                fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+                                im = ax.imshow(
+                                    acc_grid,
+                                    origin='lower',
+                                    vmin=0.0,
+                                    vmax=1.0,
+                                    cmap='viridis',
+                                    aspect='auto',
+                                )
+                                ax.set_xticks(np.arange(len(thr1_vals)))
+                                ax.set_xticklabels([f"{v:.1f}" for v in thr1_vals], rotation=45, ha='right')
+                                ax.set_yticks(np.arange(len(thr2_vals)))
+                                ax.set_yticklabels([f"{v:.1f}" for v in thr2_vals])
+                                ax.set_xlabel("thr1 (base gap)")
+                                ax.set_ylabel("thr2 (avg gap)")
+                                ax.set_title(f"{subject} | AvgGap abs-threshold grid (acc)")
+                                cbar = fig.colorbar(im, ax=ax)
+                                cbar.set_label("accuracy")
+
+                                # Annotate each cell with accuracy
+                                for yi in range(acc_grid.shape[0]):
+                                    for xi in range(acc_grid.shape[1]):
+                                        val = acc_grid[yi, xi]
+                                        text_color = "white" if im.norm(val) < 0.5 else "black"
+                                        ax.text(
+                                            xi, yi, f"{val:.3f}",
+                                            ha="center", va="center",
+                                            color=text_color,
+                                            fontsize=8,
+                                        )
+
+                                # Highlight best cell
+                                ax.scatter([best_x], [best_y], s=140, facecolors='none', edgecolors='red', linewidths=2)
+
+                                fig.tight_layout()
+
+                                import wandb  # type: ignore
+                                wandb.log({
+                                    f"{subject}/avggap_abs_thr_acc_grid": wandb.Image(fig),
+                                    f"{subject}/avggap_abs_thr_best_acc": best_acc,
+                                    f"{subject}/avggap_abs_thr_best_thr1": best_thr1,
+                                    f"{subject}/avggap_abs_thr_best_thr2": best_thr2,
+                                })
+                                plt.close(fig)
+
+                        except Exception as e:
+                            logger.warning(f"Failed to compute/log AvgGap abs-threshold grid: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            abs_thr_grid = None
+
                         curve_obj = {
                             'subject': subject,
                             'k': k,
@@ -677,6 +777,9 @@ def main():
                             'ours_top2flip': {'costs': [c for c, _ in curve_ours_top2flip_cyc], 'accuracies': [a for _, a in curve_ours_top2flip_cyc]},
                             'ours_avggap': {'costs': [c for c, _ in curve_ours_avg_gap_cyc], 'accuracies': [a for _, a in curve_ours_avg_gap_cyc]},
                         }
+
+                        if abs_thr_grid is not None:
+                            curve_obj['abs_threshold_grid_avggap'] = abs_thr_grid
 
                         # =========================================================
                         # [NEW] Gain/Loss & Net Accuracy Analysis (AvgGap Strategy)
@@ -759,7 +862,7 @@ def main():
     # Finalize W&B
     try:
         if wandb_run is not None:
-            import wandb
+            import wandb  # type: ignore
             wandb.finish()
     except Exception:
         pass
