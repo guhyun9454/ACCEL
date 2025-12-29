@@ -601,9 +601,10 @@ def main():
                             curve_avggap_static = []
 
                         # -------------------------
-                        # 5) AvgGap(dynamic) -> cyclic  (perc2 + MAD online)
-                        #   - th1: 고정 (perc quantile of default_conf)
-                        #   - th2: th2_base(perc2 quantile of mean_conf) + gamma * mad
+                        # 5) AvgGap(dynamic, ONLINE, th1+MAD) -> cyclic
+                        #   - NO quantile/percentile thresholding
+                        #   - th1: online-updated (oracle-based)
+                        #   - th2: th1 + gamma * mad
                         #   - mad: EMA of |gap - mean_gap|
                         # -------------------------
                         curve_avggap_dynamic = []
@@ -611,44 +612,33 @@ def main():
                             base_plus_flip_cost = 2.0
                             extra_cyclic_cost = float(k - 1)
 
-                            # knobs
+                            # knobs (추천 시작값)
                             mad_alpha = 0.10   # EMA speed
-                            mad_gamma = 0.50   # how strongly MAD increases th2
-                            th2_cap_to_th1 = True
+                            mad_gamma = 1.00   # th2 = th1 + gamma*mad  (너 요청: th1+MAD -> gamma=1)
+                            th_lr_up = 0.05    # cyclic이 base를 살렸을 때 th1 올리는 속도
+                            th_lr_dn = 0.05    # cyclic이 base를 망쳤을 때 th1 내리는 속도
+                            th_lr_decay = 0.005
 
                             def _clamp01(x: float) -> float:
                                 return max(0.0, min(1.0, float(x)))
 
-                            # perc2: "제곱 방식" (cost 줄이기용)
-                            perc2 = _clamp01(perc * perc)
-
-                            # th1 anchor (beta-independent)
-                            init_th1_fixed = _clamp01(float(np.quantile(default_conf, perc)))
-
-                            # th2 global anchor (fallback)
-                            init_th2_global = _clamp01(float(np.quantile(mean_conf, perc2)))
+                            # percentile/quantile 없이 초기값 잡기:
+                            # - perc 자체를 th1로 쓰면 scale mismatch가 날 수 있음(0.3이 너무 큼 등)
+                            # - 그래서 "작은 값"으로 시작해서 online으로 키우는 걸 추천
+                            init_th1 = _clamp01(getattr(args, "ours_th1_init", 0.05))  # CLI로 조절 가능하게
+                            th1_min = _clamp01(getattr(args, "ours_th1_min", 0.00))
+                            th1_max = _clamp01(getattr(args, "ours_th1_max", 1.00))
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
 
-                                th1 = init_th1_fixed
-
-                                # th2_base: perc2 quantile on prefix mean_conf (or global fallback)
-                                if n > 0:
-                                    th2_base = _clamp01(float(np.quantile(mean_conf[:n], perc2)))
-                                else:
-                                    th2_base = init_th2_global
-
-                                # initialize mad robustly if possible
-                                if n >= 10:
-                                    mad = float(np.median(np.abs(default_conf[:n] - mean_conf[:n])))
-                                else:
-                                    mad = th2_base / 2.0
+                                th1 = init_th1
+                                mad = th1 / 2.0  # 초기 MAD
 
                                 total_cost = 0.0
                                 corrects = 0
 
-                                # prefix: base only
+                                # prefix: base only (기존 beta curve 정의 유지)
                                 for i in range(0, n):
                                     total_cost += 1.0
                                     if base_correct_list[i]:
@@ -663,39 +653,66 @@ def main():
                                         total_cost += 1.0
                                         if base_correct_list[i]:
                                             corrects += 1
+                                        # (optional) 너무 보수적으로 굳는 걸 막는 약한 decay
+                                        th1 = _clamp01(th1 - th_lr_decay * th1)
+                                        th1 = min(max(th1, th1_min), th1_max)
                                         continue
 
                                     # low-conf: pay base+flip to compute mean_conf
                                     total_cost += base_plus_flip_cost
 
-                                    # update MAD using |gap - mean_gap|
+                                    # update MAD
                                     diff_abs = abs(gap - float(mean_conf[i]))
                                     mad = (1.0 - mad_alpha) * mad + mad_alpha * diff_abs
                                     mad = max(0.0, mad)
 
-                                    # dynamic th2
-                                    th2 = _clamp01(th2_base + mad_gamma * mad)
-                                    if th2_cap_to_th1:
-                                        th2 = min(th2, th1)
+                                    # gate2 threshold: th2 = th1 + MAD
+                                    th2 = _clamp01(th1 + mad_gamma * mad)
 
-                                    if float(mean_conf[i]) < th2:
-                                        # go cyclic: add remaining rotations (k-1)
+                                    # decision
+                                    go_cyclic = (float(mean_conf[i]) < th2)
+
+                                    if go_cyclic:
                                         total_cost += extra_cyclic_cost
                                         if cyclic_correct_list[i]:
                                             corrects += 1
+
+                                        # ===== oracle online update of th1 =====
+                                        # base wrong & cyclic right => 더 많이 cyclic 보내고 싶다 => th1 ↑
+                                        if (not base_correct_list[i]) and cyclic_correct_list[i]:
+                                            # gap이 th1보다 얼마나 작은지 기반으로 step
+                                            th1 = _clamp01(th1 + th_lr_up * (th1 - gap + 1e-6))
+
+                                        # base right & cyclic wrong => cyclic 줄이고 싶다 => th1 ↓
+                                        elif base_correct_list[i] and (not cyclic_correct_list[i]):
+                                            th1 = _clamp01(th1 - th_lr_dn * max(th1, 1e-6))
+
+                                        # 둘 다 같으면(둘 다 맞/틀) => 약한 decay
+                                        else:
+                                            th1 = _clamp01(th1 - th_lr_decay * max(th1, 1e-6))
+
                                     else:
                                         # stop after flip, return base pred
                                         if base_correct_list[i]:
                                             corrects += 1
 
+                                        # cyclic 안 갔는데 base가 틀렸으면 -> th1을 조금 올려서 다음에 더 잡게(선택)
+                                        if not base_correct_list[i]:
+                                            th1 = _clamp01(th1 + 0.25 * th_lr_up * (th1 - gap + 1e-6))
+                                        else:
+                                            th1 = _clamp01(th1 - th_lr_decay * th1)
+
+                                    th1 = min(max(th1, th1_min), th1_max)
+
                                 curve_avggap_dynamic.append((total_cost / float(N), corrects / float(N)))
 
                             logger.info(_purple(
-                                f"[{subject}] Beta curve (Ours AvgGap(dynamic,perc2+MAD)->cyclic): " +
+                                f"[{subject}] Beta curve (Ours AvgGap(ONLINE,th1+MAD)->cyclic): " +
                                 ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_avggap_dynamic])
                             ))
+
                         except Exception as e:
-                            logger.warning(f"Failed to compute AvgGap(dynamic)->cyclic curve: {e}")
+                            logger.warning(f"Failed to compute AvgGap(dynamic online th1+MAD)->cyclic curve: {e}")
                             curve_avggap_dynamic = []
 
                         # Save curves
