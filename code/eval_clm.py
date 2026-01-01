@@ -684,27 +684,73 @@ def main():
                             thr2_vals = np.round(np.arange(0.0, 1.0 + 1e-9, thr_step), 10)
 
                             acc_grid = np.zeros((len(thr2_vals), len(thr1_vals)), dtype=np.float64)
+                            # Cost model (consistent with earlier AvgGap->cyclic cost analysis):
+                            # - base-only: 1
+                            # - if low-conf then compute flip-check (base+swap): 2
+                            # - if triggered -> cyclic: k
+                            cost_grid = np.zeros((len(thr2_vals), len(thr1_vals)), dtype=np.float64)
+                            cell_rows = []
                             for yi, thr2 in enumerate(thr2_vals):
                                 for xi, thr1 in enumerate(thr1_vals):
-                                    use_cyclic = (default_conf <= thr1) & (mean_conf < thr2)
-                                    acc_grid[yi, xi] = float(np.mean(np.where(use_cyclic, arr_cyclic_correct, arr_base_correct)))
+                                    # Policy:
+                                    # - if default_gap > thr1: base
+                                    # - else if mean_gap < thr2: cyclic
+                                    # - else: base (after flip-check)
+                                    low_conf = (default_conf <= thr1)
+                                    use_cyclic = low_conf & (mean_conf < thr2)
+                                    use_flipcheck_only = low_conf & (~use_cyclic)
 
-                            best_y, best_x = np.unravel_index(int(np.argmax(acc_grid)), acc_grid.shape)
+                                    acc_grid[yi, xi] = float(np.mean(np.where(use_cyclic, arr_cyclic_correct, arr_base_correct)))
+                                    # Cost per-sample:
+                                    # - cyclic -> k
+                                    # - low_conf but not cyclic -> 2 (base + swap check)
+                                    # - otherwise -> 1
+                                    per_sample_cost = np.where(use_cyclic, float(k), np.where(use_flipcheck_only, 2.0, 1.0))
+                                    cost_grid[yi, xi] = float(np.mean(per_sample_cost))
+                                    cell_rows.append({
+                                        'thr1': float(thr1),
+                                        'thr2': float(thr2),
+                                        'acc': float(acc_grid[yi, xi]),
+                                        'cost': float(cost_grid[yi, xi]),
+                                        'xi': int(xi),
+                                        'yi': int(yi),
+                                    })
+
+                            # Best by accuracy; break ties by lower cost (and then smaller thresholds for determinism)
+                            max_acc = float(np.max(acc_grid))
+                            cand_ys, cand_xs = np.where(acc_grid == max_acc)
+                            if len(cand_ys) == 0:
+                                best_y, best_x = 0, 0
+                            else:
+                                cand_costs = cost_grid[cand_ys, cand_xs]
+                                min_cost = float(np.min(cand_costs))
+                                keep = (cand_costs == min_cost)
+                                cand_ys2 = cand_ys[keep]
+                                cand_xs2 = cand_xs[keep]
+                                # deterministic: pick smallest thr2 then thr1
+                                order = np.lexsort((cand_xs2, cand_ys2))
+                                best_y = int(cand_ys2[order[0]])
+                                best_x = int(cand_xs2[order[0]])
+
                             best_thr1 = float(thr1_vals[best_x])
                             best_thr2 = float(thr2_vals[best_y])
                             best_acc = float(acc_grid[best_y, best_x])
+                            best_cost = float(cost_grid[best_y, best_x])
 
                             abs_thr_grid = {
                                 'thr_step': float(thr_step),
                                 'thr1_vals': [float(v) for v in thr1_vals.tolist()],
                                 'thr2_vals': [float(v) for v in thr2_vals.tolist()],
                                 'acc_grid': acc_grid.tolist(),
-                                'best': {'thr1': best_thr1, 'thr2': best_thr2, 'acc': best_acc},
+                                'cost_grid': cost_grid.tolist(),
+                                'cells': cell_rows,
+                                'cost_model': {'base': 1.0, 'base_plus_flipcheck': 2.0, 'cyclic': float(k)},
+                                'best': {'thr1': best_thr1, 'thr2': best_thr2, 'acc': best_acc, 'cost': best_cost},
                             }
 
                             logger.info(_purple(
                                 f"[{subject}] AvgGap abs-threshold grid best: "
-                                f"acc={best_acc:.4f} @ (thr1={best_thr1:.1f}, thr2={best_thr2:.1f})"
+                                f"acc={best_acc:.4f}, cost={best_cost:.2f} @ (thr1={best_thr1:.1f}, thr2={best_thr2:.1f})"
                             ))
 
                             # W&B heatmap logging (image) - only if enabled
@@ -732,20 +778,21 @@ def main():
                                 ax.set_yticklabels([f"{v:.1f}" for v in thr2_vals])
                                 ax.set_xlabel("thr1 (base gap)")
                                 ax.set_ylabel("thr2 (avg gap)")
-                                ax.set_title(f"{subject} | AvgGap abs-threshold grid (acc)")
+                                ax.set_title(f"{subject} | AvgGap abs-threshold grid (acc / cost)")
                                 cbar = fig.colorbar(im, ax=ax)
                                 cbar.set_label("accuracy")
 
-                                # Annotate each cell with accuracy
+                                # Annotate each cell with accuracy + cost
                                 for yi in range(acc_grid.shape[0]):
                                     for xi in range(acc_grid.shape[1]):
-                                        val = acc_grid[yi, xi]
-                                        text_color = "white" if im.norm(val) < 0.5 else "black"
+                                        val_acc = float(acc_grid[yi, xi])
+                                        val_cost = float(cost_grid[yi, xi])
+                                        text_color = "white" if im.norm(val_acc) < 0.5 else "black"
                                         ax.text(
-                                            xi, yi, f"{val:.3f}",
+                                            xi, yi, f"{val_acc:.3f}\n{val_cost:.2f}",
                                             ha="center", va="center",
                                             color=text_color,
-                                            fontsize=8,
+                                            fontsize=7,
                                         )
 
                                 # Highlight best cell
@@ -757,6 +804,7 @@ def main():
                                 wandb.log({
                                     f"{subject}/avggap_abs_thr_acc_grid": wandb.Image(fig),
                                     f"{subject}/avggap_abs_thr_best_acc": best_acc,
+                                    f"{subject}/avggap_abs_thr_best_cost": best_cost,
                                     f"{subject}/avggap_abs_thr_best_thr1": best_thr1,
                                     f"{subject}/avggap_abs_thr_best_thr2": best_thr2,
                                 })
