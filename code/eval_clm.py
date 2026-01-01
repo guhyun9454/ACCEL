@@ -764,11 +764,25 @@ def main():
                                 fig_w = max(8.0, 0.55 * len(thr1_vals) + 3.0)
                                 fig_h = max(8.0, 0.55 * len(thr2_vals) + 3.0)
                                 fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+                                # Relative color scaling (auto) so small differences are visible.
+                                # Use robust percentiles to avoid a single outlier flattening the colormap.
+                                flat = acc_grid[np.isfinite(acc_grid)].reshape(-1)
+                                if flat.size > 0:
+                                    vmin = float(np.percentile(flat, 5))
+                                    vmax = float(np.percentile(flat, 95))
+                                    if vmax - vmin < 1e-8:
+                                        vmin = float(np.min(flat))
+                                        vmax = float(np.max(flat))
+                                    if vmax - vmin < 1e-8:
+                                        vmin = max(0.0, vmin - 0.01)
+                                        vmax = min(1.0, vmax + 0.01)
+                                else:
+                                    vmin, vmax = 0.0, 1.0
                                 im = ax.imshow(
                                     acc_grid,
                                     origin='lower',
-                                    vmin=0.0,
-                                    vmax=1.0,
+                                    vmin=vmin,
+                                    vmax=vmax,
                                     cmap='viridis',
                                     aspect='auto',
                                 )
