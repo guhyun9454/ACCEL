@@ -89,6 +89,19 @@ def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
     return agg
 
 
+# ---- helper: normalized negative entropy confidence in [0,1] ----
+def _nent_conf(p: np.ndarray, eps: float = 1e-12) -> float:
+    p = np.asarray(p, dtype=np.float64)
+    p = np.clip(p, eps, 1.0)
+    s = float(p.sum())
+    if s <= 0:
+        return 0.0
+    p = p / s
+    H = -float(np.sum(p * np.log(p)))
+    # higher = more confident
+    return float(1.0 - H / max(1e-12, np.log(len(p))))
+
+
 def _read_results_file(file_path):
     try:
         lines = [json.loads(line) for line in open(file_path)]
@@ -339,7 +352,7 @@ def main():
                     # Confidence stats & triggers (precompute)
                     # =========================================================
                     default_conf = []               # base gap: top1 - top2
-                    mean_gap_list = []              # gap(mean(base, swap))
+                    mean_gap_list = []              # gap(mean(base, swap))  (STATIC helper curve)
                     flip_trigger_mask_global = []   # base argmax != swap argmax
 
                     for i, bp in enumerate(base_probs_list):
@@ -606,42 +619,28 @@ def main():
                             logger.warning(f"Failed to compute AvgGap(static)->cyclic curve: {e}")
                             curve_avggap_static = []
 
-                        # -------------------------
-                        # 5) AvgGap(PSEUDO, ONLINE) -> cyclic
-                        #   - MAD is EMA of |gap - mean_gap_fixed|
-                        #   - th2 = th1 (+/-) MAD (default: plus)
-                        #   - optional debug logs
-                        # -------------------------
-                        curve_avggap_pseudo = []
-                        curve_avggap_dynamic = []
+                        # =========================================================
+                        # 5) Mean-vs-Cyclic Disagree (Teacher-gated BCE update for th2)
+                        #
+                        #   Stage1: if gap(base_top1-top2) > th1 => stop (base)
+                        #   Stage2: run flip, mean_probs = (base+swap)/2, c2 = NENT(mean_probs)
+                        #           if c2 >= th2 => stop (mean prediction)
+                        #   Stage3: else run cyclic; if teacher conf (NENT(cyc)) >= gamma:
+                        #           label y = 1 if cyclic_pred != mean_pred else 0 (soft/hard)
+                        #           update th2 via logistic BCE gradient
+                        #   th1 tracks th2 (+delta) by EMA
+                        # =========================================================
+                        curve_avggap_dynamic = []   # keep name for backward compat in curve_obj
                         init_th1_fixed = float('nan')
-                        dynamic_th2_mode = "unknown"
+                        init_th2_fixed = float('nan')
                         try:
                             base_plus_flip_cost = 2.0
                             extra_cyclic_cost = float(k - 1)
 
-                            # knobs
-                            mad_alpha = float(getattr(args, "ours_mad_alpha", 0.10))
-                            th_lr_up  = float(getattr(args, "ours_th_lr_up", 0.05))
-                            th_lr_dn  = float(getattr(args, "ours_th_lr_dn", 0.05))
-
-                            # th2 mode: "plus" (default) or "minus"
-                            th2_mode = str(getattr(args, "ours_th2_mode", "plus")).lower()
-
-                            # debug prints
-                            debug_mad = bool(getattr(args, "ours_debug_mad", False))
-                            debug_mad_n = int(getattr(args, "ours_debug_mad_n", 5))
-
                             def _clamp01(x: float) -> float:
                                 return max(0.0, min(1.0, float(x)))
 
-                            # th1 is literal fraction (e.g., 0.30 for "30%"), NOT a quantile
-                            init_th1 = _clamp01(getattr(args, "ours_th1_init", perc))  # perc=ours_low_conf_percent/100
-                            th1_min  = _clamp01(getattr(args, "ours_th1_min", 0.0))
-                            th1_max  = _clamp01(getattr(args, "ours_th1_max", 1.0))
-
-                            # ---------- precompute base top1(t1) / top2(t2) indices ----------
-                            N = len(base_correct_list)
+                            # ---------- precompute base top1/top2 indices ----------
                             base_top12_idx = []
                             for i in range(N):
                                 bp = np.asarray(base_probs_list[i], dtype=np.float64)
@@ -650,25 +649,54 @@ def main():
                                 t2 = int(sidx[1]) if len(sidx) > 1 else int(sidx[0])
                                 base_top12_idx.append((t1, t2))
 
-                            # ---------- precompute cyclic predicted index tc (content-space) ----------
-                            cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]
+                            # ---------- precompute ideal index (content-space) ----------
+                            ideal_idx_list = []
+                            for i in range(N):
+                                try:
+                                    ideal_idx_list.append(int(option_ids.index(ideals[i])))
+                                except Exception:
+                                    ideal_idx_list.append(-1)
+
+                            # ---------- (precompute) cyclic agg/conf (teacher gating) ----------
+                            cyc_agg_list = []
+                            cyc_conf_list = []
                             cyclic_pred_idx = []
                             for i in range(N):
                                 cyc_probs = [per_sample_probs[i][idx] for idx in cyclic_indices]
                                 agg_cyc = _aggregate_probs_over_permutations(cyc_probs, cyc_perms, k)
+                                cyc_agg_list.append(agg_cyc)
                                 cyclic_pred_idx.append(int(np.argmax(agg_cyc)))
+                                cyc_conf_list.append(_nent_conf(agg_cyc))
 
-                            init_th1_fixed = init_th1
+                            # knobs (safe defaults)
+                            gate_tau = float(getattr(args, "ours_gate_tau", 0.05))          # τ
+                            th2_lr   = float(getattr(args, "ours_th2_lr", 0.05))            # η2
+                            th1_ema  = float(getattr(args, "ours_th1_ema", 0.01))           # η1
+                            th_delta = float(getattr(args, "ours_th_delta", 0.02))          # δ
+                            teach_gamma = float(getattr(args, "ours_teacher_gamma", 0.60))  # γ
+                            teach_soft  = bool(getattr(args, "ours_teacher_soft", True))
+                            teach_weight= bool(getattr(args, "ours_teacher_weight", True))  # w=c_cyc?
+
+                            init_th1 = _clamp01(getattr(args, "ours_th1_init", perc))
+                            init_th2 = _clamp01(getattr(args, "ours_th2_init", init_th1 - th_delta))
+                            # enforce ordering: th1 >= th2 + δ
+                            init_th1 = _clamp01(max(init_th1, init_th2 + th_delta))
+
+                            init_th1_fixed = float(init_th1)
+                            init_th2_fixed = float(init_th2)
+
+                            # debug (optional)
+                            debug_teacher = bool(getattr(args, "ours_debug_teacher", False))
+                            debug_teacher_n = int(getattr(args, "ours_debug_teacher_n", 5))
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
 
-                                th1 = init_th1
-                                mad = th1 / 2.0  # init: th1/2
+                                th1 = float(init_th1)
+                                th2 = float(init_th2)
 
                                 total_cost = 0.0
                                 corrects = 0
-
                                 dbg_printed = 0
 
                                 # prefix: base only
@@ -680,10 +708,8 @@ def main():
                                 # online region
                                 for i in range(n, N):
                                     t1, t2 = base_top12_idx[i]
-
-                                    # base gap: p[t1] - p[t2]
                                     bp = np.asarray(base_probs_list[i], dtype=np.float64)
-                                    gap = float(bp[t1] - bp[t2])
+                                    gap = float(bp[t1] - bp[t2])  # c1 (gap)
 
                                     # gate1: confident => return base
                                     if gap > th1:
@@ -692,10 +718,9 @@ def main():
                                             corrects += 1
                                         continue
 
-                                    # low-conf => flip and test (base + flip)
+                                    # low-conf => flip and compute mean_probs
                                     total_cost += base_plus_flip_cost
 
-                                    # build swap permutation (swap content positions of t1 and t2)
                                     perm_swap = list(identity_perm)
                                     perm_swap[t1], perm_swap[t2] = perm_swap[t2], perm_swap[t1]
                                     swap_idx = perm_index_map.get(tuple(perm_swap), identity_idx)
@@ -703,76 +728,92 @@ def main():
                                     probs_base_raw = per_sample_probs[i][identity_idx]
                                     probs_swap_raw = per_sample_probs[i][swap_idx]
 
-                                    # map letter-probs to content-space probs
                                     agg_base = _aggregate_probs_over_permutations(
-                                        [probs_base_raw.tolist()], [perm_list[identity_idx]], k
+                                        [probs_base_raw.tolist()],
+                                        [perm_list[identity_idx]],
+                                        k
                                     )
                                     agg_swap = _aggregate_probs_over_permutations(
-                                        [probs_swap_raw.tolist()], [perm_list[swap_idx]], k
+                                        [probs_swap_raw.tolist()],
+                                        [perm_list[swap_idx]],
+                                        k
                                     )
+                                    mean_probs = (agg_base + agg_swap) / 2.0
+                                    mean_pred_idx = int(np.argmax(mean_probs))
 
-                                    p1, p2   = float(agg_base[t1]), float(agg_base[t2])
-                                    fp1, fp2 = float(agg_swap[t1]), float(agg_swap[t2])
+                                    # c2: entropy(mean_probs) -> confidence in [0,1]
+                                    c2 = float(_nent_conf(mean_probs))
 
-                                    # mean gap with FIXED (t1,t2)
-                                    mean_gap_fixed = ((p1 + fp1) / 2.0) - ((p2 + fp2) / 2.0)
+                                    go_cyclic = (c2 < th2)
 
-                                    # MAD update: EMA of | base_gap - mean_gap_fixed |
-                                    diff = (p1 - p2) - mean_gap_fixed
-                                    mad = (1.0 - mad_alpha) * mad + mad_alpha * abs(diff)
-                                    mad = max(0.0, mad)
-
-                                    # threshold2 = th1 (+/-) mad
-                                    if th2_mode in ["minus", "sub", "-"]:
-                                        th2_raw = th1 - mad
-                                    else:
-                                        th2_raw = th1 + mad
-                                    th2 = _clamp01(th2_raw)
-
-                                    go_cyclic = (mean_gap_fixed < th2)
-
-                                    if debug_mad and dbg_printed < debug_mad_n:
-                                        logger.info(_purple(
-                                            f"[{subject}] [PSEUDO] beta={beta:.1f} i={i} "
-                                            f"gap={gap:.4f} mean_gap={mean_gap_fixed:.4f} "
-                                            f"th1={th1:.4f} mad={mad:.4f} th2={th2:.4f} "
-                                            f"-> {'CYCLIC' if go_cyclic else 'BASE'}"
-                                        ))
-                                        dbg_printed += 1
-
-                                    if go_cyclic:
-                                        total_cost += extra_cyclic_cost
-                                        if cyclic_correct_list[i]:
+                                    if not go_cyclic:
+                                        # stop at stage2, output MEAN prediction
+                                        ideal_idx = ideal_idx_list[i]
+                                        if ideal_idx >= 0 and mean_pred_idx == ideal_idx:
                                             corrects += 1
 
-                                        # tc == t1 ? update th1 (NO oracle)
-                                        tc = cyclic_pred_idx[i]
-                                        if tc == t1:
-                                            th1 = _clamp01(th1 + th_lr_up * max(th1 - gap, 0.0))
+                                        # th1 slowly tracks th2 (+delta)
+                                        th1 = _clamp01((1.0 - th1_ema) * th1 + th1_ema * (th2 + th_delta))
+                                        th1 = max(th1, _clamp01(th2 + th_delta))
+                                        continue
+
+                                    # go cyclic
+                                    total_cost += extra_cyclic_cost
+                                    if cyclic_correct_list[i]:
+                                        corrects += 1
+
+                                    # ===== teacher-gated BCE update for th2 (mean vs cyclic disagree) =====
+                                    c_cyc = float(cyc_conf_list[i])
+                                    if c_cyc >= teach_gamma:
+                                        cyc_pred = int(cyclic_pred_idx[i])
+                                        disagree = (cyc_pred != mean_pred_idx)
+
+                                        if teach_soft:
+                                            y = (c_cyc if disagree else 0.0)  # soft label in [0,1]
                                         else:
-                                            th1 = _clamp01(th1 - th_lr_dn * max(gap, 0.0))
-                                        th1 = min(max(th1, th1_min), th1_max)
-                                    else:
-                                        if base_correct_list[i]:
-                                            corrects += 1
+                                            y = (1.0 if disagree else 0.0)
 
-                                curve_avggap_pseudo.append((total_cost / float(N), corrects / float(N)))
+                                        tau = max(1e-8, float(gate_tau))
+                                        z = (float(th2) - float(c2)) / tau
+                                        # sigmoid
+                                        if z >= 0:
+                                            ez = math.exp(-z)
+                                            pi = 1.0 / (1.0 + ez)
+                                        else:
+                                            ez = math.exp(z)
+                                            pi = ez / (1.0 + ez)
+
+                                        w = (c_cyc if teach_weight else 1.0)
+
+                                        # gradient step on th2 (logistic BCE): th2 += lr * w * (y - pi)/tau
+                                        th2 = _clamp01(float(th2) + float(th2_lr) * float(w) * (float(y) - float(pi)) / tau)
+
+                                        if debug_teacher and dbg_printed < debug_teacher_n:
+                                            logger.info(_purple(
+                                                f"[{subject}] [TEACH] beta={beta:.1f} i={i} "
+                                                f"gap={gap:.4f} c2={c2:.4f} th1={th1:.4f} th2={th2:.4f} "
+                                                f"c_cyc={c_cyc:.4f} y={float(y):.3f} pi={float(pi):.3f} "
+                                                f"mean={mean_pred_idx} cyc={cyc_pred} "
+                                                f"{'DIS' if disagree else 'AGR'}"
+                                            ))
+                                            dbg_printed += 1
+
+                                    # th1 EMA-follow th2+δ (always after cyclic branch)
+                                    th1 = _clamp01((1.0 - th1_ema) * th1 + th1_ema * (th2 + th_delta))
+                                    th1 = max(th1, _clamp01(th2 + th_delta))
+
+                                curve_avggap_dynamic.append((total_cost / float(N), corrects / float(N)))
 
                             logger.info(_purple(
-                                f"[{subject}] Beta curve (AvgGap PSEUDO online): " +
-                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_avggap_pseudo])
+                                f"[{subject}] Beta curve (Mean-vs-Cyclic TEACH online): " +
+                                ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_avggap_dynamic])
                             ))
 
-                            # alias for curve_obj legacy naming
-                            curve_avggap_dynamic = curve_avggap_pseudo
-                            dynamic_th2_mode = th2_mode
-
                         except Exception as e:
-                            logger.warning(f"Failed to compute AvgGap(PSEUDO) curve: {e}")
-                            curve_avggap_pseudo = []
+                            logger.warning(f"Failed to compute Mean-vs-Cyclic TEACH curve: {e}")
                             curve_avggap_dynamic = []
                             init_th1_fixed = float('nan')
-                            dynamic_th2_mode = "unknown"
+                            init_th2_fixed = float('nan')
 
                         # Save curves
                         curve_obj = {
@@ -807,12 +848,14 @@ def main():
                                 'costs': [float(c) for c, _ in curve_avggap_static],
                                 'accuracies': [float(a) for _, a in curve_avggap_static]
                             },
+
+                            # NEW dynamic curve goes here (kept under avggap_dynamic key for compatibility)
                             'ours_avggap_dynamic': {
                                 'costs': [float(c) for c, _ in curve_avggap_dynamic],
                                 'accuracies': [float(a) for _, a in curve_avggap_dynamic]
                             },
 
-                            # backward-compat alias
+                            # backward-compat alias: keep old name pointing to static
                             'ours_avggap': {
                                 'costs': [float(c) for c, _ in curve_avggap_static],
                                 'accuracies': [float(a) for _, a in curve_avggap_static]
@@ -821,10 +864,16 @@ def main():
                             'ours_low_conf_percent': float(getattr(args, 'ours_low_conf_percent', 10.0)),
                             'ours_low_conf_frac': float(perc),
 
-                            # (debug/meta)
+                            # meta/debug for dynamic
                             'dynamic_init_th1': float(init_th1_fixed),
-                            'dynamic_mad_alpha': float(getattr(args, "ours_mad_alpha", 0.10)),
-                            'dynamic_th2_mode': str(dynamic_th2_mode),
+                            'dynamic_init_th2': float(init_th2_fixed),
+                            'dynamic_gate_tau': float(getattr(args, "ours_gate_tau", 0.05)),
+                            'dynamic_th2_lr': float(getattr(args, "ours_th2_lr", 0.05)),
+                            'dynamic_th1_ema': float(getattr(args, "ours_th1_ema", 0.01)),
+                            'dynamic_th_delta': float(getattr(args, "ours_th_delta", 0.02)),
+                            'dynamic_teacher_gamma': float(getattr(args, "ours_teacher_gamma", 0.60)),
+                            'dynamic_teacher_soft': bool(getattr(args, "ours_teacher_soft", True)),
+                            'dynamic_teacher_weight': bool(getattr(args, "ours_teacher_weight", True)),
 
                             # legacy extra
                             'dynamic_perc2': float(min(1.0, max(0.0, perc * perc))),
