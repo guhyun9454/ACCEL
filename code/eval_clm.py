@@ -72,6 +72,13 @@ def _rotations(k: int):
 
 
 def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
+    """
+    probs_seq: list of length = (#permutations used)
+      each element: list/array of length k (letter-space probs)
+    permuted_indices: list of permutations p where p[j] is content-index at letter position j.
+    Returns:
+      agg: length k, content-space aggregated probabilities (mean over permutations)
+    """
     agg = np.zeros(k, dtype=np.float64)
     for perm_idx, p in enumerate(permuted_indices):
         letter_probs = np.asarray(probs_seq[perm_idx], dtype=np.float64)
@@ -560,7 +567,6 @@ def main():
                         try:
                             base_plus_flip_cost = 2.0
                             extra_cyclic_cost = float(k - 1)
-                            cyc_after_flip_cost = base_plus_flip_cost + extra_cyclic_cost  # k+1
 
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
@@ -602,15 +608,14 @@ def main():
 
                         # -------------------------
                         # 5) AvgGap(PSEUDO, ONLINE) -> cyclic
-                        #   matches your pseudocode:
-                        #   if (p[t1]-p[t2] > th1) return t1
-                        #   else flip, compute:
-                        #     mean_gap_fixed = ((p[t1]+fp[t1])/2) - ((p[t2]+fp[t2])/2)
-                        #     mad = EMA( | (p[t1]-p[t2]) - mean_gap_fixed | )   (init: th1/2)
-                        #     th2 = th1 - mad   (change to th1 + mad if you want "th1+MAD")
-                        #     if (mean_gap_fixed < th2): do cyclic; update th1 by (tc == t1)
+                        #   - MAD is EMA of |gap - mean_gap_fixed|
+                        #   - th2 = th1 (+/-) MAD (default: plus)
+                        #   - optional debug logs
                         # -------------------------
                         curve_avggap_pseudo = []
+                        curve_avggap_dynamic = []
+                        init_th1_fixed = float('nan')
+                        dynamic_th2_mode = "unknown"
                         try:
                             base_plus_flip_cost = 2.0
                             extra_cyclic_cost = float(k - 1)
@@ -620,10 +625,17 @@ def main():
                             th_lr_up  = float(getattr(args, "ours_th_lr_up", 0.05))
                             th_lr_dn  = float(getattr(args, "ours_th_lr_dn", 0.05))
 
+                            # th2 mode: "plus" (default) or "minus"
+                            th2_mode = str(getattr(args, "ours_th2_mode", "plus")).lower()
+
+                            # debug prints
+                            debug_mad = bool(getattr(args, "ours_debug_mad", False))
+                            debug_mad_n = int(getattr(args, "ours_debug_mad_n", 5))
+
                             def _clamp01(x: float) -> float:
                                 return max(0.0, min(1.0, float(x)))
 
-                            # th1 is NOT a quantile here. It's the literal fraction like 0.30 for "30%"
+                            # th1 is literal fraction (e.g., 0.30 for "30%"), NOT a quantile
                             init_th1 = _clamp01(getattr(args, "ours_th1_init", perc))  # perc=ours_low_conf_percent/100
                             th1_min  = _clamp01(getattr(args, "ours_th1_min", 0.0))
                             th1_max  = _clamp01(getattr(args, "ours_th1_max", 1.0))
@@ -646,14 +658,18 @@ def main():
                                 agg_cyc = _aggregate_probs_over_permutations(cyc_probs, cyc_perms, k)
                                 cyclic_pred_idx.append(int(np.argmax(agg_cyc)))
 
+                            init_th1_fixed = init_th1
+
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
 
                                 th1 = init_th1
-                                mad = th1 / 2.0  # init: threshold1/2
+                                mad = th1 / 2.0  # init: th1/2
 
                                 total_cost = 0.0
                                 corrects = 0
+
+                                dbg_printed = 0
 
                                 # prefix: base only
                                 for i in range(0, n):
@@ -669,7 +685,7 @@ def main():
                                     bp = np.asarray(base_probs_list[i], dtype=np.float64)
                                     gap = float(bp[t1] - bp[t2])
 
-                                    # gate1: confident => return t1 (base)
+                                    # gate1: confident => return base
                                     if gap > th1:
                                         total_cost += 1.0
                                         if base_correct_list[i]:
@@ -706,29 +722,37 @@ def main():
                                     mad = (1.0 - mad_alpha) * mad + mad_alpha * abs(diff)
                                     mad = max(0.0, mad)
 
-                                    # threshold2 = threshold1 - mad  (change to + for "th1+MAD")
-                                    th2 = _clamp01(th1 + mad)
+                                    # threshold2 = th1 (+/-) mad
+                                    if th2_mode in ["minus", "sub", "-"]:
+                                        th2_raw = th1 - mad
+                                    else:
+                                        th2_raw = th1 + mad
+                                    th2 = _clamp01(th2_raw)
 
-                                    # gate2: if mean gap is still small => go cyclic
-                                    if mean_gap_fixed < th2:
+                                    go_cyclic = (mean_gap_fixed < th2)
+
+                                    if debug_mad and dbg_printed < debug_mad_n:
+                                        logger.info(_purple(
+                                            f"[{subject}] [PSEUDO] beta={beta:.1f} i={i} "
+                                            f"gap={gap:.4f} mean_gap={mean_gap_fixed:.4f} "
+                                            f"th1={th1:.4f} mad={mad:.4f} th2={th2:.4f} "
+                                            f"-> {'CYCLIC' if go_cyclic else 'BASE'}"
+                                        ))
+                                        dbg_printed += 1
+
+                                    if go_cyclic:
                                         total_cost += extra_cyclic_cost
-
                                         if cyclic_correct_list[i]:
                                             corrects += 1
 
-                                        # tc == t1 ? update threshold1 (NO oracle)
+                                        # tc == t1 ? update th1 (NO oracle)
                                         tc = cyclic_pred_idx[i]
                                         if tc == t1:
-                                            # "increase th1 proportional to (th1 - (p[t1]-p[t2]))"
                                             th1 = _clamp01(th1 + th_lr_up * max(th1 - gap, 0.0))
                                         else:
-                                            # "decrease th1 proportional to (p[t1]-p[t2])"
                                             th1 = _clamp01(th1 - th_lr_dn * max(gap, 0.0))
-
                                         th1 = min(max(th1, th1_min), th1_max)
-
                                     else:
-                                        # return t1 (base)
                                         if base_correct_list[i]:
                                             corrects += 1
 
@@ -739,10 +763,16 @@ def main():
                                 ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_avggap_pseudo])
                             ))
 
+                            # alias for curve_obj legacy naming
+                            curve_avggap_dynamic = curve_avggap_pseudo
+                            dynamic_th2_mode = th2_mode
+
                         except Exception as e:
                             logger.warning(f"Failed to compute AvgGap(PSEUDO) curve: {e}")
                             curve_avggap_pseudo = []
-
+                            curve_avggap_dynamic = []
+                            init_th1_fixed = float('nan')
+                            dynamic_th2_mode = "unknown"
 
                         # Save curves
                         curve_obj = {
@@ -790,7 +820,13 @@ def main():
 
                             'ours_low_conf_percent': float(getattr(args, 'ours_low_conf_percent', 10.0)),
                             'ours_low_conf_frac': float(perc),
+
+                            # (debug/meta)
                             'dynamic_init_th1': float(init_th1_fixed),
+                            'dynamic_mad_alpha': float(getattr(args, "ours_mad_alpha", 0.10)),
+                            'dynamic_th2_mode': str(dynamic_th2_mode),
+
+                            # legacy extra
                             'dynamic_perc2': float(min(1.0, max(0.0, perc * perc))),
                         }
 
