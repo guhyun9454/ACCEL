@@ -29,9 +29,16 @@ logger = logging.getLogger(__name__)
 
 
 def parse_arguments():
-    logger.info(f'cuda is available {torch.cuda.is_available()}')
-    logger.info(f'cuda device count {torch.cuda.device_count()}')
-    logger.info(f'cuda device name {torch.cuda.get_device_name()}')
+    # ---- Safe CUDA logging (GPU 없을 때도 안 터지게) ----
+    try:
+        cuda_ok = torch.cuda.is_available()
+        n_dev = torch.cuda.device_count() if cuda_ok else 0
+        dev_name = torch.cuda.get_device_name(0) if (cuda_ok and n_dev > 0) else "N/A"
+        logger.info(f'cuda is available {cuda_ok}')
+        logger.info(f'cuda device count {n_dev}')
+        logger.info(f'cuda device name {dev_name}')
+    except Exception as e:
+        logger.warning(f'CUDA info logging failed: {e}')
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--pretrained_model_path", type=str, required=True)
@@ -47,6 +54,7 @@ def parse_arguments():
                         help='Provide exactly two option ID sets to compare (e.g., "ABCD abcd")')
     parser.add_argument("--test", action="store_true",
                         help='Test mode: evaluate only 100 samples instead of all samples')
+
     # W&B logging flags
     parser.add_argument("--wandb", action="store_true",
                         help="Enable Weights & Biases logging")
@@ -56,13 +64,49 @@ def parse_arguments():
                         help="W&B run name")
     parser.add_argument("--wandb_sample_idx", type=int, default=None,
                         help="Sample idx to log detailed prompts/probs; default: first sample")
-    # Ours method hyperparameters
+
+    # Ours method hyperparameters (existing)
     parser.add_argument("--ours_low_conf_percent", type=float, default=10.0,
                         help="Bottom percentile (e.g., 10.0) of confidence (from beta subset) to trigger cascading ensemble")
     parser.add_argument("--ours_top2_gap_frac", type=float, default=0.3,
                         help="If (top1 - top2) / top1 <= this, treat as 'very ambiguous' and send directly to cyclic (use 0.0 to disable).")
+
+    # =========================================================
+    # [ADD] AvgGap(PSEUDO, ONLINE) knobs (eval_clm.py에서 getattr로 쓰는 것들)
+    # =========================================================
+    # debug: allow usage like --ours_debug_mad 1
+    parser.add_argument("--ours_debug_mad", type=int, default=0,
+                        help="(0/1) Print MAD/threshold debug logs.")
+    parser.add_argument("--ours_debug_mad_n", type=int, default=5,
+                        help="Max debug prints per beta.")
+
+    # MAD EMA alpha
+    parser.add_argument("--ours_mad_alpha", type=float, default=0.10,
+                        help="EMA alpha for MAD update.")
+
+    # th1 online update lr
+    parser.add_argument("--ours_th_lr_up", type=float, default=0.05,
+                        help="th1 increase lr (when tc==t1).")
+    parser.add_argument("--ours_th_lr_dn", type=float, default=0.05,
+                        help="th1 decrease lr (when tc!=t1).")
+
+    # th2 = th1 (+/-) MAD
+    parser.add_argument("--ours_th2_mode", type=str, default="plus",
+                        choices=["plus", "minus", "sub", "-"],
+                        help="th2 = th1 + MAD (plus) or th1 - MAD (minus).")
+
+    # th1 init / clamp range (all in [0,1])
+    # NOTE: eval_clm.py에서 None이면 perc로 자동 설정하도록 처리하는 걸 권장
+    parser.add_argument("--ours_th1_init", type=float, default=None,
+                        help="Initial th1 in [0,1]. If omitted, auto=ours_low_conf_percent/100.")
+    parser.add_argument("--ours_th1_min", type=float, default=0.0,
+                        help="Min clamp for th1.")
+    parser.add_argument("--ours_th1_max", type=float, default=1.0,
+                        help="Max clamp for th1.")
+
     parser.add_argument("--force", action="store_true",
                         help="Overwrite existing results files if they exist")
+
     args = parser.parse_args()
 
     args.model_name = args.pretrained_model_path.split('/')[-1]
@@ -70,9 +114,7 @@ def parse_arguments():
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
         task = eval_args[0]
-        if task not in [
-            'mmlu', 'arc', 'csqa',
-        ]:
+        if task not in ['mmlu', 'arc', 'csqa']:
             raise ValueError(f"Unknown task: {task}")
 
         num_few_shot = int(eval_args[1])
