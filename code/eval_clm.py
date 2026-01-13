@@ -144,6 +144,7 @@ def main():
                     "eval_names": args.eval_names,
                     "option_id_set": args.option_id_set,
                     "ours_low_conf_percent": getattr(args, "ours_low_conf_percent", None),
+                    "ours_th1_ema": getattr(args, "ours_th1_ema", None),
                 },
             )
         except Exception as e:
@@ -351,11 +352,15 @@ def main():
                     # =========================================================
                     # Confidence stats & triggers (precompute)
                     # =========================================================
-                    default_conf = []               # base gap: top1 - top2
-                    mean_gap_list = []              # gap(mean(base, swap))  (STATIC helper curve)
-                    flip_trigger_mask_global = []   # base argmax != swap argmax
+                    default_conf = []               # base gap: top1 - top2 (legacy curves)
+                    mean_gap_list = []              # (legacy) gap(mean(base, swap)) used by AvgGap(static)
+                    flip_trigger_mask_global = []   # (legacy) base argmax != swap argmax
+
+                    # ✅ entropy conf for base (used in NEW dynamic)
+                    base_nent_conf = []
 
                     for i, bp in enumerate(base_probs_list):
+                        # gap
                         vals = np.sort(bp)[::-1]
                         if vals.shape[0] < 2:
                             top1, top2 = (vals[0], 0.0) if vals.shape[0] > 0 else (0.0, 0.0)
@@ -363,7 +368,10 @@ def main():
                             top1, top2 = vals[0], vals[1]
                         default_conf.append(float(top1 - top2))
 
-                        # swap (top1 <-> top2) permutation index
+                        # base entropy-conf
+                        base_nent_conf.append(_nent_conf(bp))
+
+                        # swap (top1 <-> top2) permutation index (legacy)
                         sorted_idx = np.argsort(bp)[::-1]
                         top1_idx = int(sorted_idx[0])
                         top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
@@ -397,6 +405,7 @@ def main():
                     default_conf = np.asarray(default_conf, dtype=np.float64)
                     mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
                     arr_flip_trigger_global = np.asarray(flip_trigger_mask_global, dtype=bool)
+                    base_nent_conf = np.asarray(base_nent_conf, dtype=np.float64)
 
                     arr_base_correct = np.asarray(base_correct_list, dtype=bool)
                     arr_cyclic_correct = np.asarray(cyclic_correct_list, dtype=bool)
@@ -472,7 +481,7 @@ def main():
                             curve_full.append((cost_full_mix, acc_full_mix))
 
                         # -------------------------
-                        # 2) switch-full / switch-cyclic
+                        # 2) switch-full / switch-cyclic (legacy, gap 기반)
                         # -------------------------
                         curve_switch_full = []
                         curve_switch_cyc = []
@@ -527,7 +536,7 @@ def main():
                             curve_switch_cyc = []
 
                         # -------------------------
-                        # 3) top2flip -> cyclic
+                        # 3) top2flip -> cyclic (legacy)
                         # -------------------------
                         curve_top2flip_cyc = []
                         try:
@@ -574,7 +583,7 @@ def main():
                             curve_top2flip_cyc = []
 
                         # -------------------------
-                        # 4) AvgGap(static) -> cyclic
+                        # 4) AvgGap(static) -> cyclic (legacy)
                         # -------------------------
                         curve_avggap_static = []
                         try:
@@ -620,27 +629,45 @@ def main():
                             curve_avggap_static = []
 
                         # =========================================================
-                        # 5) Mean-vs-Cyclic Disagree (Teacher-gated BCE update for th2)
+                        # 5) NEW: Entropy-based 3-stage policy with minimal HP
                         #
-                        #   Stage1: if gap(base_top1-top2) > th1 => stop (base)
-                        #   Stage2: run flip, mean_probs = (base+swap)/2, c2 = NENT(mean_probs)
-                        #           if c2 >= th2 => stop (mean prediction)
-                        #   Stage3: else run cyclic; if teacher conf (NENT(cyc)) >= gamma:
-                        #           label y = 1 if cyclic_pred != mean_pred else 0 (soft/hard)
-                        #           update th2 via logistic BCE gradient
-                        #   th1 tracks th2 (+delta) by EMA
+                        #   HP only:
+                        #     - ours_low_conf_percent  -> init th1 (quantile on base entropy-conf)
+                        #     - ours_th1_ema           -> EMA rate (used for th2 update magnitude AND th1 tracking)
+                        #
+                        #   Stage1 (base only):
+                        #     c1 = NENT(base_probs)
+                        #     if c1 >= th1: stop (base pred)
+                        #
+                        #   Stage2 (1-shot probe cyclic rotation):
+                        #     pick shift so that top1 goes to A (if top1==A, send top2 to A)
+                        #     agg2 = mean over {identity, shift}
+                        #     c2 = NENT(agg2)
+                        #     if c2 >= th2: stop (pred2)
+                        #
+                        #   Stage3 (complete cyclic):
+                        #     pred_cyc from full cyclic agg
+                        #
+                        #   Teacher update (no extra HP):
+                        #     y = 1 if pred_cyc != pred2 else 0
+                        #     w = c_cyc (teacher confidence = NENT(full cyclic agg))  in [0,1]
+                        #     th2 <- th2 + ema * w * (2*y-1) * (th2 - c2)   (clamped)
+                        #     th1 <- EMA(th2)   (same ema)
                         # =========================================================
-                        curve_avggap_dynamic = []   # keep name for backward compat in curve_obj
+                        curve_avggap_dynamic = []
                         init_th1_fixed = float('nan')
                         init_th2_fixed = float('nan')
                         try:
-                            base_plus_flip_cost = 2.0
-                            extra_cyclic_cost = float(k - 1)
+                            base_plus_probe_cost = 2.0          # identity + probe
+                            extra_cyclic_cost = float(k - 2)    # remaining rotations after (identity, probe)
 
                             def _clamp01(x: float) -> float:
                                 return max(0.0, min(1.0, float(x)))
 
-                            # ---------- precompute base top1/top2 indices ----------
+                            ema = float(getattr(args, "ours_th1_ema", 0.01))
+                            ema = max(0.0, min(1.0, ema))
+
+                            # ---------- precompute base top1/top2 indices (content index) ----------
                             base_top12_idx = []
                             for i in range(N):
                                 bp = np.asarray(base_probs_list[i], dtype=np.float64)
@@ -657,33 +684,16 @@ def main():
                                 except Exception:
                                     ideal_idx_list.append(-1)
 
-                            # ---------- (precompute) cyclic agg/conf (teacher gating) ----------
-                            cyc_agg_list = []
+                            # ---------- precompute cyclic agg/pred/conf (teacher uses this) ----------
                             cyc_conf_list = []
                             cyclic_pred_idx = []
                             for i in range(N):
                                 cyc_probs = [per_sample_probs[i][idx] for idx in cyclic_indices]
                                 agg_cyc = _aggregate_probs_over_permutations(cyc_probs, cyc_perms, k)
-                                cyc_agg_list.append(agg_cyc)
                                 cyclic_pred_idx.append(int(np.argmax(agg_cyc)))
                                 cyc_conf_list.append(_nent_conf(agg_cyc))
-
-                            # knobs (safe defaults)
-                            gate_tau = float(getattr(args, "ours_gate_tau", 0.05))          # τ
-                            th2_lr   = float(getattr(args, "ours_th2_lr", 0.05))            # η2
-                            th1_ema  = float(getattr(args, "ours_th1_ema", 0.01))           # η1
-                            th_delta = float(getattr(args, "ours_th_delta", 0.02))          # δ
-                            teach_gamma = float(getattr(args, "ours_teacher_gamma", 0.60))  # γ
-                            teach_soft  = bool(getattr(args, "ours_teacher_soft", True))
-                            teach_weight= bool(getattr(args, "ours_teacher_weight", True))  # w=c_cyc?
-
-                            init_th1 = _clamp01(getattr(args, "ours_th1_init", perc))
-                            init_th2 = _clamp01(getattr(args, "ours_th2_init", init_th1 - th_delta))
-                            # enforce ordering: th1 >= th2 + δ
-                            init_th1 = _clamp01(max(init_th1, init_th2 + th_delta))
-
-                            init_th1_fixed = float(init_th1)
-                            init_th2_fixed = float(init_th2)
+                            cyc_conf_list = np.asarray(cyc_conf_list, dtype=np.float64)
+                            cyclic_pred_idx = np.asarray(cyclic_pred_idx, dtype=np.int64)
 
                             # debug (optional)
                             debug_teacher = bool(getattr(args, "ours_debug_teacher", False))
@@ -692,8 +702,16 @@ def main():
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
 
-                                th1 = float(init_th1)
-                                th2 = float(init_th2)
+                                # init th1 from base entropy-conf quantile (bottom perc are "ambiguous")
+                                th1 = float(np.quantile(base_nent_conf[:n], perc)) if n > 0 else float(np.quantile(base_nent_conf, perc))
+                                th1 = _clamp01(th1)
+
+                                # minimal init: th2 starts from th1
+                                th2 = float(th1)
+
+                                if math.isnan(init_th1_fixed):
+                                    init_th1_fixed = float(th1)
+                                    init_th2_fixed = float(th2)
 
                                 total_cost = 0.0
                                 corrects = 0
@@ -707,110 +725,90 @@ def main():
 
                                 # online region
                                 for i in range(n, N):
-                                    t1, t2 = base_top12_idx[i]
-                                    bp = np.asarray(base_probs_list[i], dtype=np.float64)
-                                    gap = float(bp[t1] - bp[t2])  # c1 (gap)
-
-                                    # gate1: confident => return base
-                                    if gap > th1:
+                                    # -------- Stage1: base entropy gate --------
+                                    c1 = float(base_nent_conf[i])
+                                    if c1 >= th1:
                                         total_cost += 1.0
                                         if base_correct_list[i]:
                                             corrects += 1
                                         continue
 
-                                    # low-conf => flip and compute mean_probs
-                                    total_cost += base_plus_flip_cost
+                                    # -------- Stage2: 1-shot cyclic probe (top1->A priority) --------
+                                    total_cost += base_plus_probe_cost
 
-                                    perm_swap = list(identity_perm)
-                                    perm_swap[t1], perm_swap[t2] = perm_swap[t2], perm_swap[t1]
-                                    swap_idx = perm_index_map.get(tuple(perm_swap), identity_idx)
+                                    t1, t2 = base_top12_idx[i]
 
-                                    probs_base_raw = per_sample_probs[i][identity_idx]
-                                    probs_swap_raw = per_sample_probs[i][swap_idx]
+                                    # ✅ probe shift rule:
+                                    #   if top1 != A: send top1 to A
+                                    #   else: send top2 to A
+                                    if int(t1) != 0:
+                                        shift = int(t1)
+                                    else:
+                                        shift = int(t2)
+                                        if shift == 0:
+                                            shift = 1
 
-                                    agg_base = _aggregate_probs_over_permutations(
-                                        [probs_base_raw.tolist()],
-                                        [perm_list[identity_idx]],
+                                    probs_id = per_sample_probs[i][identity_idx]
+                                    probs_probe = per_sample_probs[i][cyclic_indices[shift]]
+
+                                    agg2 = _aggregate_probs_over_permutations(
+                                        [probs_id.tolist(), probs_probe.tolist()],
+                                        [cyc_perms[0], cyc_perms[shift]],
                                         k
                                     )
-                                    agg_swap = _aggregate_probs_over_permutations(
-                                        [probs_swap_raw.tolist()],
-                                        [perm_list[swap_idx]],
-                                        k
-                                    )
-                                    mean_probs = (agg_base + agg_swap) / 2.0
-                                    mean_pred_idx = int(np.argmax(mean_probs))
 
-                                    # c2: entropy(mean_probs) -> confidence in [0,1]
-                                    c2 = float(_nent_conf(mean_probs))
+                                    pred2 = int(np.argmax(agg2))
+                                    c2 = float(_nent_conf(agg2))
 
                                     go_cyclic = (c2 < th2)
 
                                     if not go_cyclic:
-                                        # stop at stage2, output MEAN prediction
+                                        # stop at stage2
                                         ideal_idx = ideal_idx_list[i]
-                                        if ideal_idx >= 0 and mean_pred_idx == ideal_idx:
+                                        if ideal_idx >= 0 and pred2 == ideal_idx:
                                             corrects += 1
 
-                                        # th1 slowly tracks th2 (+delta)
-                                        th1 = _clamp01((1.0 - th1_ema) * th1 + th1_ema * (th2 + th_delta))
-                                        th1 = max(th1, _clamp01(th2 + th_delta))
+                                        # th1 tracks th2 via EMA (minimal HP)
+                                        th1 = _clamp01((1.0 - ema) * th1 + ema * th2)
                                         continue
 
-                                    # go cyclic
+                                    # -------- Stage3: complete cyclic (remaining k-2) --------
                                     total_cost += extra_cyclic_cost
                                     if cyclic_correct_list[i]:
                                         corrects += 1
 
-                                    # ===== teacher-gated BCE update for th2 (mean vs cyclic disagree) =====
-                                    c_cyc = float(cyc_conf_list[i])
-                                    if c_cyc >= teach_gamma:
-                                        cyc_pred = int(cyclic_pred_idx[i])
-                                        disagree = (cyc_pred != mean_pred_idx)
+                                    # -------- Teacher update for th2 (minimal HP, hard label + confidence weight) --------
+                                    pred_cyc = int(cyclic_pred_idx[i])
+                                    y = 1.0 if pred_cyc != pred2 else 0.0  # hard teacher
+                                    w = float(cyc_conf_list[i])            # in [0,1], no extra threshold
 
-                                        if teach_soft:
-                                            y = (c_cyc if disagree else 0.0)  # soft label in [0,1]
-                                        else:
-                                            y = (1.0 if disagree else 0.0)
+                                    # push th2 up if y=1, down if y=0 (scaled by distance to c2)
+                                    # (2y-1) ∈ {+1,-1}
+                                    th2 = _clamp01(th2 + ema * w * ((2.0 * y) - 1.0) * (th2 - c2))
 
-                                        tau = max(1e-8, float(gate_tau))
-                                        z = (float(th2) - float(c2)) / tau
-                                        # sigmoid
-                                        if z >= 0:
-                                            ez = math.exp(-z)
-                                            pi = 1.0 / (1.0 + ez)
-                                        else:
-                                            ez = math.exp(z)
-                                            pi = ez / (1.0 + ez)
+                                    # th1 tracks th2 via EMA
+                                    th1 = _clamp01((1.0 - ema) * th1 + ema * th2)
 
-                                        w = (c_cyc if teach_weight else 1.0)
-
-                                        # gradient step on th2 (logistic BCE): th2 += lr * w * (y - pi)/tau
-                                        th2 = _clamp01(float(th2) + float(th2_lr) * float(w) * (float(y) - float(pi)) / tau)
-
-                                        if debug_teacher and dbg_printed < debug_teacher_n:
-                                            logger.info(_purple(
-                                                f"[{subject}] [TEACH] beta={beta:.1f} i={i} "
-                                                f"gap={gap:.4f} c2={c2:.4f} th1={th1:.4f} th2={th2:.4f} "
-                                                f"c_cyc={c_cyc:.4f} y={float(y):.3f} pi={float(pi):.3f} "
-                                                f"mean={mean_pred_idx} cyc={cyc_pred} "
-                                                f"{'DIS' if disagree else 'AGR'}"
-                                            ))
-                                            dbg_printed += 1
-
-                                    # th1 EMA-follow th2+δ (always after cyclic branch)
-                                    th1 = _clamp01((1.0 - th1_ema) * th1 + th1_ema * (th2 + th_delta))
-                                    th1 = max(th1, _clamp01(th2 + th_delta))
+                                    if debug_teacher and dbg_printed < debug_teacher_n:
+                                        logger.info(_purple(
+                                            f"[{subject}] [TEACH-MIN] beta={beta:.1f} i={i} "
+                                            f"c1={c1:.4f} th1={th1:.4f} "
+                                            f"c2={c2:.4f} th2={th2:.4f} "
+                                            f"shift={shift} "
+                                            f"w(cyc_conf)={w:.4f} y={y:.0f} "
+                                            f"pred2={pred2} pred_cyc={pred_cyc} "
+                                            f"{'DIS' if y > 0.5 else 'AGR'}"
+                                        ))
+                                        dbg_printed += 1
 
                                 curve_avggap_dynamic.append((total_cost / float(N), corrects / float(N)))
 
                             logger.info(_purple(
-                                f"[{subject}] Beta curve (Mean-vs-Cyclic TEACH online): " +
+                                f"[{subject}] Beta curve (Entropy probe(top1->A)->cyclic, minimal HP): " +
                                 ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_avggap_dynamic])
                             ))
-
                         except Exception as e:
-                            logger.warning(f"Failed to compute Mean-vs-Cyclic TEACH curve: {e}")
+                            logger.warning(f"Failed to compute NEW dynamic curve: {e}")
                             curve_avggap_dynamic = []
                             init_th1_fixed = float('nan')
                             init_th2_fixed = float('nan')
@@ -849,10 +847,10 @@ def main():
                                 'accuracies': [float(a) for _, a in curve_avggap_static]
                             },
 
-                            # NEW dynamic curve goes here (kept under avggap_dynamic key for compatibility)
+                            # NEW dynamic curve
                             'ours_avggap_dynamic': {
-                                'costs': [float(c) for c, _ in curve_avggap_dynamic],
-                                'accuracies': [float(a) for _, a in curve_avggap_dynamic]
+                                'costs': [float(c) for c, a in curve_avggap_dynamic],
+                                'accuracies': [float(a) for c, a in curve_avggap_dynamic]
                             },
 
                             # backward-compat alias: keep old name pointing to static
@@ -864,19 +862,11 @@ def main():
                             'ours_low_conf_percent': float(getattr(args, 'ours_low_conf_percent', 10.0)),
                             'ours_low_conf_frac': float(perc),
 
-                            # meta/debug for dynamic
+                            # meta/debug for NEW dynamic (minimal HP)
                             'dynamic_init_th1': float(init_th1_fixed),
                             'dynamic_init_th2': float(init_th2_fixed),
-                            'dynamic_gate_tau': float(getattr(args, "ours_gate_tau", 0.05)),
-                            'dynamic_th2_lr': float(getattr(args, "ours_th2_lr", 0.05)),
-                            'dynamic_th1_ema': float(getattr(args, "ours_th1_ema", 0.01)),
-                            'dynamic_th_delta': float(getattr(args, "ours_th_delta", 0.02)),
-                            'dynamic_teacher_gamma': float(getattr(args, "ours_teacher_gamma", 0.60)),
-                            'dynamic_teacher_soft': bool(getattr(args, "ours_teacher_soft", True)),
-                            'dynamic_teacher_weight': bool(getattr(args, "ours_teacher_weight", True)),
-
-                            # legacy extra
-                            'dynamic_perc2': float(min(1.0, max(0.0, perc * perc))),
+                            'dynamic_ema': float(getattr(args, "ours_th1_ema", 0.01)),
+                            'dynamic_note': "entropy_conf stage1+stage2, probe uses cyclic shift(top1->A, else top2->A), th2 updated by teacher(cyclic vs pred2) weighted by cyclic entropy-conf",
                         }
 
                         curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
