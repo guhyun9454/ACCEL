@@ -79,6 +79,8 @@ def parse_arguments():
                         help="(0/1) Print MAD/threshold debug logs.")
     parser.add_argument("--ours_debug_mad_n", type=int, default=5,
                         help="Max debug prints per beta.")
+    
+    parser.add_argument("--ours_th1_ema", type=float, default=0.01, help="EMA rate used in entropy probe policy: (1) th2 teacher update step size, (2) th1 tracking to th2.")
 
     # MAD EMA alpha
     parser.add_argument("--ours_mad_alpha", type=float, default=0.10,
@@ -241,6 +243,8 @@ def prepare_eval(args, eval_name):
         options = df.apply(lambda x: [str(x[e]) for e in option_ids_header], axis=1).to_list()
         ideals = df.apply(lambda x: option_ids[option_ids_header.index(x["Answer"])], axis=1).to_list()
         return list(zip(inputs, options, ideals))
+    
+    
 
     # prepare_eval_fn
     if setting in ['noid']:
