@@ -653,10 +653,16 @@ def main():
                         #     w = c_cyc (teacher confidence = NENT(full cyclic agg))  in [0,1]
                         #     th2 <- th2 + ema * w * (2*y-1) * (th2 - c2)   (clamped)
                         #     th1 <- EMA(th2)   (same ema)
+                        #
+                        #   [ADDED] threshold trace:
+                        #     - logs beta-wise init/final th1/th2
+                        #     - saves downsampled per-sample trace into beta_curve.jsonl
                         # =========================================================
                         curve_avggap_dynamic = []
                         init_th1_fixed = float('nan')
                         init_th2_fixed = float('nan')
+                        th_trace_by_beta = []  # saved into curve_obj
+
                         try:
                             base_plus_probe_cost = 2.0          # identity + probe
                             extra_cyclic_cost = float(k - 2)    # remaining rotations after (identity, probe)
@@ -699,6 +705,12 @@ def main():
                             debug_teacher = bool(getattr(args, "ours_debug_teacher", False))
                             debug_teacher_n = int(getattr(args, "ours_debug_teacher_n", 5))
 
+                            # =========================================================
+                            # threshold trace configs (no new CLI args required)
+                            # =========================================================
+                            TRACE_STRIDE = 200
+                            TRACE_MAX_PER_BETA = 300
+
                             for beta in betas:
                                 n = int(N * beta + 1e-9)
 
@@ -706,8 +718,17 @@ def main():
                                 th1 = float(np.quantile(base_nent_conf[:n], perc)) if n > 0 else float(np.quantile(base_nent_conf, perc))
                                 th1 = _clamp01(th1)
 
+                                # optional override (works only if parse_arguments provides it; otherwise ignored)
+                                if hasattr(args, "ours_th1_init") and args.ours_th1_init is not None:
+                                    th1 = _clamp01(float(args.ours_th1_init))
+
                                 # minimal init: th2 starts from th1
                                 th2 = float(th1)
+                                if hasattr(args, "ours_th2_init") and args.ours_th2_init is not None:
+                                    th2 = _clamp01(float(args.ours_th2_init))
+
+                                th1_init_beta = float(th1)
+                                th2_init_beta = float(th2)
 
                                 if math.isnan(init_th1_fixed):
                                     init_th1_fixed = float(th1)
@@ -717,6 +738,44 @@ def main():
                                 corrects = 0
                                 dbg_printed = 0
 
+                                # counters
+                                cnt_stage1_stop = 0
+                                cnt_stage2_stop = 0
+                                cnt_stage3_cyc = 0
+                                cnt_teacher_agree = 0
+                                cnt_teacher_disagree = 0
+                                cnt_th2_updates = 0
+
+                                beta_trace = []  # downsampled list
+
+                                def _push_trace(i: int, stage: int, decision: str,
+                                                c1: float = None, c2: float = None, shift: int = None,
+                                                pred2: int = None, pred_cyc: int = None,
+                                                w: float = None, y: float = None,
+                                                force: bool = False):
+                                    if len(beta_trace) >= TRACE_MAX_PER_BETA:
+                                        return
+                                    if (not force) and (i >= n) and ((i - n) % TRACE_STRIDE != 0):
+                                        return
+                                    rec = {
+                                        "i": int(i),
+                                        "stage": int(stage),
+                                        "decision": str(decision),
+                                        "th1": float(th1),
+                                        "th2": float(th2),
+                                    }
+                                    if c1 is not None: rec["c1"] = float(c1)
+                                    if c2 is not None: rec["c2"] = float(c2)
+                                    if shift is not None: rec["shift"] = int(shift)
+                                    if pred2 is not None: rec["pred2"] = int(pred2)
+                                    if pred_cyc is not None: rec["pred_cyc"] = int(pred_cyc)
+                                    if w is not None: rec["w"] = float(w)
+                                    if y is not None: rec["y"] = float(y)
+                                    beta_trace.append(rec)
+
+                                # init snapshot
+                                _push_trace(i=n, stage=0, decision="init", force=True)
+
                                 # prefix: base only
                                 for i in range(0, n):
                                     total_cost += 1.0
@@ -725,22 +784,23 @@ def main():
 
                                 # online region
                                 for i in range(n, N):
-                                    # -------- Stage1: base entropy gate --------
+                                    # Stage1: base entropy gate
                                     c1 = float(base_nent_conf[i])
                                     if c1 >= th1:
                                         total_cost += 1.0
+                                        cnt_stage1_stop += 1
                                         if base_correct_list[i]:
                                             corrects += 1
+                                        _push_trace(i=i, stage=1, decision="stop_base", c1=c1)
                                         continue
 
-                                    # -------- Stage2: 1-shot cyclic probe (top1->A priority) --------
+                                    # Stage2: 1-shot cyclic probe (top1->A priority; else top2->A)
                                     total_cost += base_plus_probe_cost
-
                                     t1, t2 = base_top12_idx[i]
 
-                                    # ✅ probe shift rule:
-                                    #   if top1 != A: send top1 to A
-                                    #   else: send top2 to A
+                                    # shift rule:
+                                    #   if top1 != A: send top1 to A (shift = t1)
+                                    #   else: send top2 to A (shift = t2; if t2==A then shift=1)
                                     if int(t1) != 0:
                                         shift = int(t1)
                                     else:
@@ -763,31 +823,46 @@ def main():
                                     go_cyclic = (c2 < th2)
 
                                     if not go_cyclic:
-                                        # stop at stage2
+                                        cnt_stage2_stop += 1
                                         ideal_idx = ideal_idx_list[i]
                                         if ideal_idx >= 0 and pred2 == ideal_idx:
                                             corrects += 1
 
-                                        # th1 tracks th2 via EMA (minimal HP)
+                                        # th1 tracks th2 via EMA
                                         th1 = _clamp01((1.0 - ema) * th1 + ema * th2)
+
+                                        _push_trace(i=i, stage=2, decision="stop_probe",
+                                                    c1=c1, c2=c2, shift=shift, pred2=pred2)
                                         continue
 
-                                    # -------- Stage3: complete cyclic (remaining k-2) --------
+                                    # Stage3: complete cyclic
                                     total_cost += extra_cyclic_cost
+                                    cnt_stage3_cyc += 1
                                     if cyclic_correct_list[i]:
                                         corrects += 1
 
-                                    # -------- Teacher update for th2 (minimal HP, hard label + confidence weight) --------
+                                    # Teacher update for th2
                                     pred_cyc = int(cyclic_pred_idx[i])
-                                    y = 1.0 if pred_cyc != pred2 else 0.0  # hard teacher
-                                    w = float(cyc_conf_list[i])            # in [0,1], no extra threshold
+                                    y = 1.0 if pred_cyc != pred2 else 0.0
+                                    w = float(cyc_conf_list[i])
 
-                                    # push th2 up if y=1, down if y=0 (scaled by distance to c2)
-                                    # (2y-1) ∈ {+1,-1}
+                                    if y > 0.5:
+                                        cnt_teacher_disagree += 1
+                                    else:
+                                        cnt_teacher_agree += 1
+
+                                    th2_prev = th2
                                     th2 = _clamp01(th2 + ema * w * ((2.0 * y) - 1.0) * (th2 - c2))
+                                    if abs(th2 - th2_prev) > 0.0:
+                                        cnt_th2_updates += 1
 
-                                    # th1 tracks th2 via EMA
+                                    # th1 tracks th2
                                     th1 = _clamp01((1.0 - ema) * th1 + ema * th2)
+
+                                    # update is a key point -> force trace
+                                    _push_trace(i=i, stage=3, decision="go_cyclic_update",
+                                                c1=c1, c2=c2, shift=shift,
+                                                pred2=pred2, pred_cyc=pred_cyc, w=w, y=y, force=True)
 
                                     if debug_teacher and dbg_printed < debug_teacher_n:
                                         logger.info(_purple(
@@ -801,7 +876,38 @@ def main():
                                         ))
                                         dbg_printed += 1
 
+                                # curve point
                                 curve_avggap_dynamic.append((total_cost / float(N), corrects / float(N)))
+
+                                online_cnt = max(0, N - n)
+                                logger.info(_purple(
+                                    f"[{subject}] [TH-TRACE] beta={beta:.1f} (n={n}/{N}, online={online_cnt}) "
+                                    f"init(th1={th1_init_beta:.4f}, th2={th2_init_beta:.4f}) "
+                                    f"final(th1={th1:.4f}, th2={th2:.4f}) "
+                                    f"stage1_stop={cnt_stage1_stop}, stage2_stop={cnt_stage2_stop}, stage3_cyc={cnt_stage3_cyc} "
+                                    f"teacher(dis={cnt_teacher_disagree}, agr={cnt_teacher_agree}), th2_updates={cnt_th2_updates}"
+                                ))
+
+                                th_trace_by_beta.append({
+                                    "beta": float(beta),
+                                    "n": int(n),
+                                    "N": int(N),
+                                    "ema": float(ema),
+                                    "perc": float(perc),
+                                    "init_th1": float(th1_init_beta),
+                                    "init_th2": float(th2_init_beta),
+                                    "final_th1": float(th1),
+                                    "final_th2": float(th2),
+                                    "stage1_stop": int(cnt_stage1_stop),
+                                    "stage2_stop": int(cnt_stage2_stop),
+                                    "stage3_cyc": int(cnt_stage3_cyc),
+                                    "teacher_disagree": int(cnt_teacher_disagree),
+                                    "teacher_agree": int(cnt_teacher_agree),
+                                    "th2_updates": int(cnt_th2_updates),
+                                    "trace_stride": int(TRACE_STRIDE),
+                                    "trace_max": int(TRACE_MAX_PER_BETA),
+                                    "trace": beta_trace,
+                                })
 
                             logger.info(_purple(
                                 f"[{subject}] Beta curve (Entropy probe(top1->A)->cyclic, minimal HP): " +
@@ -812,6 +918,7 @@ def main():
                             curve_avggap_dynamic = []
                             init_th1_fixed = float('nan')
                             init_th2_fixed = float('nan')
+                            th_trace_by_beta = []
 
                         # Save curves
                         curve_obj = {
@@ -867,6 +974,9 @@ def main():
                             'dynamic_init_th2': float(init_th2_fixed),
                             'dynamic_ema': float(getattr(args, "ours_th1_ema", 0.01)),
                             'dynamic_note': "entropy_conf stage1+stage2, probe uses cyclic shift(top1->A, else top2->A), th2 updated by teacher(cyclic vs pred2) weighted by cyclic entropy-conf",
+
+                            # ✅ ADDED: threshold traces (beta-wise, downsampled per-sample)
+                            'dynamic_th_trace': th_trace_by_beta,
                         }
 
                         curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
