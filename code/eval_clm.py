@@ -630,38 +630,15 @@ def main():
 
                         # =========================================================
                         # 5) NEW: Entropy-based 3-stage policy with minimal HP
-                        #
-                        #   HP only:
-                        #     - ours_low_conf_percent  -> init th1 (quantile on base entropy-conf)
-                        #     - ours_th1_ema           -> EMA rate (used for th2 update magnitude AND th1 tracking)
-                        #
-                        #   Stage1 (base only):
-                        #     c1 = NENT(base_probs)
-                        #     if c1 >= th1: stop (base pred)
-                        #
-                        #   Stage2 (1-shot probe cyclic rotation):
-                        #     pick shift so that top1 goes to A (if top1==A, send top2 to A)
-                        #     agg2 = mean over {identity, shift}
-                        #     c2 = NENT(agg2)
-                        #     if c2 >= th2: stop (pred2)
-                        #
-                        #   Stage3 (complete cyclic):
-                        #     pred_cyc from full cyclic agg
-                        #
-                        #   Teacher update (no extra HP):
-                        #     y = 1 if pred_cyc != pred2 else 0
-                        #     w = c_cyc (teacher confidence = NENT(full cyclic agg))  in [0,1]
-                        #     th2 <- th2 + ema * w * (2*y-1) * (th2 - c2)   (clamped)
-                        #     th1 <- EMA(th2)   (same ema)
-                        #
-                        #   [ADDED] threshold trace:
-                        #     - logs beta-wise init/final th1/th2
-                        #     - saves downsampled per-sample trace into beta_curve.jsonl
                         # =========================================================
                         curve_avggap_dynamic = []
                         init_th1_fixed = float('nan')
                         init_th2_fixed = float('nan')
                         th_trace_by_beta = []  # saved into curve_obj
+
+                        # ✅ ADDED (5b): pseudo top2flip dynamic
+                        curve_pseudo_top2flip_dynamic = []
+                        pseudo_th_trace_by_beta = []
 
                         try:
                             base_plus_probe_cost = 2.0          # identity + probe
@@ -913,12 +890,234 @@ def main():
                                 f"[{subject}] Beta curve (Entropy probe(top1->A)->cyclic, minimal HP): " +
                                 ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_avggap_dynamic])
                             ))
+
+                            # =========================================================
+                            # 5b) PSEUDO top2flip set (cost=4) + same 3-stage + teacher update
+                            #    perms: ABCD / BADC / CDAB / DCBA
+                            # =========================================================
+                            try:
+                                if k != 4:
+                                    logger.info(_purple(f"[{subject}] PseudoTop2Flip skipped (k={k}, only supports k=4)."))
+                                else:
+                                    pseudo_perms = [
+                                        (0, 1, 2, 3),  # ABCD
+                                        (1, 0, 3, 2),  # BADC
+                                        (2, 3, 0, 1),  # CDAB
+                                        (3, 2, 1, 0),  # DCBA
+                                    ]
+                                    pseudo_perm_indices = [perm_index_map.get(p, None) for p in pseudo_perms]
+                                    if any(idx is None for idx in pseudo_perm_indices):
+                                        raise RuntimeError(f"Pseudo perms not found in perm_index_map: {pseudo_perm_indices}")
+
+                                    # teacher: pseudo4 ensemble pred/conf/correct
+                                    pseudo_conf_list = []
+                                    pseudo_pred_idx = []
+                                    pseudo_correct_list = []
+
+                                    for i in range(N):
+                                        probs_all = [per_sample_probs[i][idx] for idx in pseudo_perm_indices]
+                                        agg_p = _aggregate_probs_over_permutations(
+                                            [p.tolist() for p in probs_all],
+                                            pseudo_perms,
+                                            k
+                                        )
+                                        pred_p = int(np.argmax(agg_p))
+                                        pseudo_pred_idx.append(pred_p)
+                                        pseudo_conf_list.append(_nent_conf(agg_p))
+
+                                        ideal_idx = ideal_idx_list[i]
+                                        pseudo_correct_list.append(bool(ideal_idx >= 0 and pred_p == ideal_idx))
+
+                                    pseudo_conf_list = np.asarray(pseudo_conf_list, dtype=np.float64)
+                                    pseudo_pred_idx = np.asarray(pseudo_pred_idx, dtype=np.int64)
+                                    pseudo_correct_list = np.asarray(pseudo_correct_list, dtype=bool)
+
+                                    base_plus_probe_cost_p = 2.0
+                                    extra_pseudo_cost = float(len(pseudo_perms) - 2)  # 2.0
+
+                                    TRACE_STRIDE_P = 200
+                                    TRACE_MAX_PER_BETA_P = 300
+
+                                    for beta in betas:
+                                        n = int(N * beta + 1e-9)
+
+                                        th1 = float(np.quantile(base_nent_conf[:n], perc)) if n > 0 else float(np.quantile(base_nent_conf, perc))
+                                        th1 = _clamp01(th1)
+                                        if hasattr(args, "ours_th1_init") and args.ours_th1_init is not None:
+                                            th1 = _clamp01(float(args.ours_th1_init))
+
+                                        th2 = float(th1)
+                                        if hasattr(args, "ours_th2_init") and args.ours_th2_init is not None:
+                                            th2 = _clamp01(float(args.ours_th2_init))
+
+                                        th1_init_beta = float(th1)
+                                        th2_init_beta = float(th2)
+
+                                        total_cost = 0.0
+                                        corrects = 0
+
+                                        cnt_stage1_stop = 0
+                                        cnt_stage2_stop = 0
+                                        cnt_stage3_pseudo = 0
+                                        cnt_teacher_agree = 0
+                                        cnt_teacher_disagree = 0
+                                        cnt_th2_updates = 0
+
+                                        beta_trace = []
+
+                                        def _push_trace_p(i: int, stage: int, decision: str,
+                                                          c1: float = None, c2: float = None, probe_pos: int = None,
+                                                          pred2: int = None, pred_pseudo: int = None,
+                                                          w: float = None, y: float = None,
+                                                          force: bool = False):
+                                            if len(beta_trace) >= TRACE_MAX_PER_BETA_P:
+                                                return
+                                            if (not force) and (i >= n) and ((i - n) % TRACE_STRIDE_P != 0):
+                                                return
+                                            rec = {
+                                                "i": int(i),
+                                                "stage": int(stage),
+                                                "decision": str(decision),
+                                                "th1": float(th1),
+                                                "th2": float(th2),
+                                            }
+                                            if c1 is not None: rec["c1"] = float(c1)
+                                            if c2 is not None: rec["c2"] = float(c2)
+                                            if probe_pos is not None: rec["probe_pos"] = int(probe_pos)
+                                            if pred2 is not None: rec["pred2"] = int(pred2)
+                                            if pred_pseudo is not None: rec["pred_pseudo"] = int(pred_pseudo)
+                                            if w is not None: rec["w"] = float(w)
+                                            if y is not None: rec["y"] = float(y)
+                                            beta_trace.append(rec)
+
+                                        _push_trace_p(i=n, stage=0, decision="init", force=True)
+
+                                        # prefix: base only
+                                        for i in range(0, n):
+                                            total_cost += 1.0
+                                            if base_correct_list[i]:
+                                                corrects += 1
+
+                                        for i in range(n, N):
+                                            c1 = float(base_nent_conf[i])
+                                            if c1 >= th1:
+                                                total_cost += 1.0
+                                                cnt_stage1_stop += 1
+                                                if base_correct_list[i]:
+                                                    corrects += 1
+                                                _push_trace_p(i=i, stage=1, decision="stop_base", c1=c1)
+                                                continue
+
+                                            # Stage2: pseudo probe (top1->A else top2->A)
+                                            total_cost += base_plus_probe_cost_p
+                                            t1, t2 = base_top12_idx[i]
+
+                                            if int(t1) != 0:
+                                                probe_pos = int(t1)
+                                            else:
+                                                probe_pos = int(t2)
+                                                if probe_pos == 0:
+                                                    probe_pos = 1  # ensure probe != identity
+
+                                            probs_id = per_sample_probs[i][pseudo_perm_indices[0]]          # ABCD
+                                            probs_probe = per_sample_probs[i][pseudo_perm_indices[probe_pos]]  # BADC/CDAB/DCBA
+
+                                            agg2 = _aggregate_probs_over_permutations(
+                                                [probs_id.tolist(), probs_probe.tolist()],
+                                                [pseudo_perms[0], pseudo_perms[probe_pos]],
+                                                k
+                                            )
+                                            pred2 = int(np.argmax(agg2))
+                                            c2 = float(_nent_conf(agg2))
+
+                                            go_pseudo = (c2 < th2)
+                                            if not go_pseudo:
+                                                cnt_stage2_stop += 1
+                                                ideal_idx = ideal_idx_list[i]
+                                                if ideal_idx >= 0 and pred2 == ideal_idx:
+                                                    corrects += 1
+
+                                                th1 = _clamp01((1.0 - ema) * th1 + ema * th2)
+
+                                                _push_trace_p(i=i, stage=2, decision="stop_probe",
+                                                              c1=c1, c2=c2, probe_pos=probe_pos, pred2=pred2)
+                                                continue
+
+                                            # Stage3: complete pseudo4 (cost=4)
+                                            total_cost += extra_pseudo_cost
+                                            cnt_stage3_pseudo += 1
+                                            if pseudo_correct_list[i]:
+                                                corrects += 1
+
+                                            pred_p = int(pseudo_pred_idx[i])
+                                            y = 1.0 if pred_p != pred2 else 0.0
+                                            w = float(pseudo_conf_list[i])
+
+                                            if y > 0.5:
+                                                cnt_teacher_disagree += 1
+                                            else:
+                                                cnt_teacher_agree += 1
+
+                                            th2_prev = th2
+                                            th2 = _clamp01(th2 + ema * w * ((2.0 * y) - 1.0) * (th2 - c2))
+                                            if abs(th2 - th2_prev) > 0.0:
+                                                cnt_th2_updates += 1
+
+                                            th1 = _clamp01((1.0 - ema) * th1 + ema * th2)
+
+                                            _push_trace_p(i=i, stage=3, decision="go_pseudo_update",
+                                                          c1=c1, c2=c2, probe_pos=probe_pos,
+                                                          pred2=pred2, pred_pseudo=pred_p, w=w, y=y, force=True)
+
+                                        curve_pseudo_top2flip_dynamic.append((total_cost / float(N), corrects / float(N)))
+
+                                        online_cnt = max(0, N - n)
+                                        logger.info(_purple(
+                                            f"[{subject}] [PSEUDO-TH-TRACE] beta={beta:.1f} (n={n}/{N}, online={online_cnt}) "
+                                            f"init(th1={th1_init_beta:.4f}, th2={th2_init_beta:.4f}) "
+                                            f"final(th1={th1:.4f}, th2={th2:.4f}) "
+                                            f"stage1_stop={cnt_stage1_stop}, stage2_stop={cnt_stage2_stop}, stage3_pseudo={cnt_stage3_pseudo} "
+                                            f"teacher(dis={cnt_teacher_disagree}, agr={cnt_teacher_agree}), th2_updates={cnt_th2_updates}"
+                                        ))
+
+                                        pseudo_th_trace_by_beta.append({
+                                            "beta": float(beta),
+                                            "n": int(n),
+                                            "N": int(N),
+                                            "ema": float(ema),
+                                            "perc": float(perc),
+                                            "init_th1": float(th1_init_beta),
+                                            "init_th2": float(th2_init_beta),
+                                            "final_th1": float(th1),
+                                            "final_th2": float(th2),
+                                            "stage1_stop": int(cnt_stage1_stop),
+                                            "stage2_stop": int(cnt_stage2_stop),
+                                            "stage3_pseudo": int(cnt_stage3_pseudo),
+                                            "teacher_disagree": int(cnt_teacher_disagree),
+                                            "teacher_agree": int(cnt_teacher_agree),
+                                            "th2_updates": int(cnt_th2_updates),
+                                            "trace_stride": int(TRACE_STRIDE_P),
+                                            "trace_max": int(TRACE_MAX_PER_BETA_P),
+                                            "trace": beta_trace,
+                                        })
+
+                                    logger.info(_purple(
+                                        f"[{subject}] Beta curve (PseudoTop2Flip entropy probe->pseudo4, cost=4): " +
+                                        ", ".join([f"(cost={c:.2f}, acc={a:.4f})" for c, a in curve_pseudo_top2flip_dynamic])
+                                    ))
+                            except Exception as e:
+                                logger.warning(f"Failed to compute PseudoTop2Flip dynamic curve: {e}")
+                                curve_pseudo_top2flip_dynamic = []
+                                pseudo_th_trace_by_beta = []
+
                         except Exception as e:
                             logger.warning(f"Failed to compute NEW dynamic curve: {e}")
                             curve_avggap_dynamic = []
                             init_th1_fixed = float('nan')
                             init_th2_fixed = float('nan')
                             th_trace_by_beta = []
+                            curve_pseudo_top2flip_dynamic = []
+                            pseudo_th_trace_by_beta = []
 
                         # Save curves
                         curve_obj = {
@@ -959,6 +1158,13 @@ def main():
                                 'costs': [float(c) for c, a in curve_avggap_dynamic],
                                 'accuracies': [float(a) for c, a in curve_avggap_dynamic]
                             },
+
+                            # ✅ NEW (5b): pseudo top2flip dynamic curve (k=4 only)
+                            'ours_pseudo_top2flip_dynamic': {
+                                'costs': [float(c) for c, a in curve_pseudo_top2flip_dynamic],
+                                'accuracies': [float(a) for c, a in curve_pseudo_top2flip_dynamic]
+                            },
+                            'pseudo_th_trace': pseudo_th_trace_by_beta,
 
                             # backward-compat alias: keep old name pointing to static
                             'ours_avggap': {
