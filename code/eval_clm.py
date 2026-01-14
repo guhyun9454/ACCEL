@@ -72,13 +72,6 @@ def _rotations(k: int):
 
 
 def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
-    """
-    probs_seq: list of length = (#permutations used)
-      each element: list/array of length k (letter-space probs)
-    permuted_indices: list of permutations p where p[j] is content-index at letter position j.
-    Returns:
-      agg: length k, content-space aggregated probabilities (mean over permutations)
-    """
     agg = np.zeros(k, dtype=np.float64)
     for perm_idx, p in enumerate(permuted_indices):
         letter_probs = np.asarray(probs_seq[perm_idx], dtype=np.float64)
@@ -89,7 +82,6 @@ def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
     return agg
 
 
-# ---- helper: normalized negative entropy confidence in [0,1] ----
 def _nent_conf(p: np.ndarray, eps: float = 1e-12) -> float:
     p = np.asarray(p, dtype=np.float64)
     p = np.clip(p, eps, 1.0)
@@ -98,7 +90,6 @@ def _nent_conf(p: np.ndarray, eps: float = 1e-12) -> float:
         return 0.0
     p = p / s
     H = -float(np.sum(p * np.log(p)))
-    # higher = more confident
     return float(1.0 - H / max(1e-12, np.log(len(p))))
 
 
@@ -178,6 +169,8 @@ def main():
          prepare_eval_samples, prepare_eval_fn) = prepare_eval(args, eval_name)
 
         for subject in subjects[::1]:
+            # [FIX] ensure args.save_path exists if it is used in cached_path
+            # But normally we just create the dir right before saving.
             cached_path = f'{args.save_path}/{subject}.jsonl'
             use_cached = (not getattr(args, 'force', False)) and os.path.exists(cached_path)
 
@@ -246,13 +239,21 @@ def main():
             logger.info(_orange(f"Run completed: {subject}"))
 
             if not use_cached:
+                # [FIX START] Ensure directory exists before saving main results
+                dir_name = os.path.dirname(cached_path)
+                if dir_name:
+                    os.makedirs(dir_name, exist_ok=True)
+                # [FIX END]
+                
                 save_results(cached_path, results, metrics)
                 logger.info(f"Results saved: {subject}")
 
             # =========================================================
-            # Derived policies: only when args.setting == 'full'
+            # Derived policies: only when args.setting == 'full' (OR 'perm')
             # =========================================================
-            if args.setting == 'full' and len(results) > 0:
+            # [FIX START] Allow 'perm' setting to trigger derivation logic as well
+            if args.setting in ['full', 'perm'] and len(results) > 0:
+            # [FIX END]
                 try:
                     if getattr(args, 'option_id_set', None):
                         option_ids = list(args.option_id_set)
@@ -348,7 +349,6 @@ def main():
                         if corr_full:
                             full_corrects += 1
                         full_total += 1
-
                     # =========================================================
                     # Confidence stats & triggers (precompute)
                     # =========================================================
@@ -410,7 +410,7 @@ def main():
                     arr_base_correct = np.asarray(base_correct_list, dtype=bool)
                     arr_cyclic_correct = np.asarray(cyclic_correct_list, dtype=bool)
 
-                    # =========================================================
+# =========================================================
                     # Save cyclic/base derived results
                     # =========================================================
                     cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
@@ -1010,4 +1010,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()  
