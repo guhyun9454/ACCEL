@@ -72,6 +72,19 @@ def parse_arguments():
                         help="If (top1 - top2) / top1 <= this, treat as 'very ambiguous' and send directly to cyclic (use 0.0 to disable).")
 
     # =========================================================
+    # [ADD] PriDe / PRIDE-style prior correction (baseline vs pride)
+    # =========================================================
+    parser.add_argument("--disable_pride", action="store_true",
+                        help="Disable PRIDE (PriDe-style) probability correction & comparison outputs.")
+    parser.add_argument("--pride_ratio_prefix_samples", type=float, default=0.05,
+                        help="Fraction of samples used to estimate global prior (default=0.05).")
+    parser.add_argument("--pride_prefix_selector", type=str, default="random",
+                        choices=["random", "low_conf"],
+                        help="How to pick prefix samples for prior estimation: random or low_conf (lowest entropy-confidence).")
+    parser.add_argument("--pride_seed", type=int, default=0,
+                        help="Base seed for PRIDE prefix sampling (deterministic per subject).")
+
+    # =========================================================
     # [ADD] AvgGap(PSEUDO, ONLINE) knobs (eval_clm.py에서 getattr로 쓰는 것들)
     # =========================================================
     # debug: allow usage like --ours_debug_mad 1
