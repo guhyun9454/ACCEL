@@ -233,6 +233,94 @@ def _plot_compare_beta_curve_png(baseline_curve_obj: dict,
     plt.close()
 
 
+def _plot_compare_method_curve_png(baseline_curve_obj: dict,
+                                   pride_curve_obj: dict,
+                                   method_key: str,
+                                   out_path: str,
+                                   title: str) -> None:
+    """
+    Overlay a specific method curve (cost vs accuracy) for baseline vs PRIDE.
+    method_key: e.g., 'ours_avggap_static'
+    """
+    if method_key not in baseline_curve_obj or method_key not in pride_curve_obj:
+        return
+
+    b = baseline_curve_obj[method_key]
+    p = pride_curve_obj[method_key]
+    b_costs = b.get("costs", [])
+    b_accs = b.get("accuracies", [])
+    p_costs = p.get("costs", [])
+    p_accs = p.get("accuracies", [])
+    if len(b_costs) == 0 or len(p_costs) == 0:
+        return
+
+    plt.figure(figsize=(7.5, 5.0), dpi=160)
+    plt.plot(b_costs, b_accs, marker='o', label=f'Baseline {method_key}')
+    plt.plot(p_costs, p_accs, marker='o', linestyle='--', label=f'PRIDE {method_key}')
+    plt.xlabel("Computational Cost (× of default)")
+    plt.ylabel("Accuracy")
+    plt.title(title)
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.legend()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
+def _avggap_policy_acc_cost_grid(default_conf: np.ndarray,
+                                 mean_conf: np.ndarray,
+                                 base_correct: np.ndarray,
+                                 cyclic_correct: np.ndarray,
+                                 k: int,
+                                 th_values: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    AvgGap policy:
+      if gap_base >= th1: choose base (cost=1)
+      else:
+        run flip (so far cost=2)
+        if gap_mean < th2: choose cyclic (extra cost=k-1, total=k+1)
+        else: choose base (total cost=2)
+    Returns (acc_grid, cost_grid) with shape (len(th_values), len(th_values)) for (th2,y) × (th1,x).
+    """
+    default_conf = np.asarray(default_conf, dtype=np.float64)
+    mean_conf = np.asarray(mean_conf, dtype=np.float64)
+    base_correct = np.asarray(base_correct, dtype=bool)
+    cyclic_correct = np.asarray(cyclic_correct, dtype=bool)
+    N = int(len(default_conf))
+    assert len(mean_conf) == N and len(base_correct) == N and len(cyclic_correct) == N
+
+    T = len(th_values)
+    acc = np.zeros((T, T), dtype=np.float64)
+    cost = np.zeros((T, T), dtype=np.float64)
+
+    base_cost = 1.0
+    base_plus_flip_cost = 2.0
+    extra_cyclic_cost = float(k - 1)
+    cyc_after_flip_cost = base_plus_flip_cost + extra_cyclic_cost  # k+1
+
+    for yi, th2 in enumerate(th_values):
+        for xi, th1 in enumerate(th_values):
+            stage1 = (default_conf >= float(th1))
+            # stage2 decision only for stage1==False
+            to_cyclic = (~stage1) & (mean_conf < float(th2))
+            choose_base = stage1 | ((~stage1) & (~to_cyclic))
+
+            correct = np.zeros(N, dtype=bool)
+            correct[choose_base] = base_correct[choose_base]
+            correct[to_cyclic] = cyclic_correct[to_cyclic]
+
+            c = np.zeros(N, dtype=np.float64)
+            c[stage1] = base_cost
+            c[(~stage1) & (~to_cyclic)] = base_plus_flip_cost
+            c[to_cyclic] = cyc_after_flip_cost
+
+            acc[yi, xi] = float(np.mean(correct)) if N > 0 else float("nan")
+            cost[yi, xi] = float(np.mean(c)) if N > 0 else float("nan")
+
+    return acc, cost
+
+
 def main():
     patch_open()
 
@@ -1259,6 +1347,81 @@ def main():
                                 logger.info(_orange(f"W&B uploaded compare PNG: {compare_png_path}"))
                         except Exception as e:
                             logger.warning(f"W&B compare PNG upload failed: {e}")
+
+                        # ---------------------------------------------------------
+                        # [ADD] AvgGap(static) baseline vs PRIDE compare PNG (uses ours_low_conf_percent as-is)
+                        # ---------------------------------------------------------
+                        try:
+                            if (wandb_run is not None) and (baseline_curve_obj is not None) and (pride_curve_obj is not None):
+                                avggap_png_path = os.path.join(curve_save_path_pride, f"{subject}_avggap_static_compare.png")
+                                _plot_compare_method_curve_png(
+                                    baseline_curve_obj=baseline_curve_obj,
+                                    pride_curve_obj=pride_curve_obj,
+                                    method_key="ours_avggap_static",
+                                    out_path=avggap_png_path,
+                                    title=f"{args.task} {subject} — AvgGap(static) (p={float(getattr(args,'ours_low_conf_percent',10.0)):.1f}%) Baseline vs PRIDE",
+                                )
+                                import wandb
+                                wandb_run.log({
+                                    f"avggap_static_compare/{subject}": wandb.Image(avggap_png_path),
+                                })
+                                logger.info(_orange(f"W&B uploaded AvgGap(static) compare PNG: {avggap_png_path}"))
+                        except Exception as e:
+                            logger.warning(f"W&B AvgGap(static) compare PNG upload failed: {e}")
+
+                        # ---------------------------------------------------------
+                        # [ADD] th1×th2 grid heatmap (absolute thresholds 0.1..1.0): delta(PRIDE - baseline)
+                        # ---------------------------------------------------------
+                        try:
+                            if (wandb_run is not None):
+                                th_values = np.round(np.linspace(0.1, 1.0, 10), 2)
+                                acc_base_grid, cost_base_grid = _avggap_policy_acc_cost_grid(
+                                    default_conf=default_conf,
+                                    mean_conf=mean_conf,
+                                    base_correct=np.asarray(base_correct_list, dtype=bool),
+                                    cyclic_correct=np.asarray(cyclic_correct_list, dtype=bool),
+                                    k=k,
+                                    th_values=th_values,
+                                )
+                                acc_pride_grid, cost_pride_grid = _avggap_policy_acc_cost_grid(
+                                    default_conf=default_conf_pride,
+                                    mean_conf=mean_conf_pride,
+                                    base_correct=np.asarray(base_correct_list_pride, dtype=bool),
+                                    cyclic_correct=np.asarray(cyclic_correct_list_pride, dtype=bool),
+                                    k=k,
+                                    th_values=th_values,
+                                )
+
+                                delta_acc = (acc_pride_grid - acc_base_grid) * 100.0  # percentage points
+
+                                grid_png_path = os.path.join(curve_save_path_pride, f"{subject}_avggap_grid_delta_acc.png")
+                                plt.figure(figsize=(7.8, 6.2), dpi=160)
+                                vmax = float(np.nanmax(np.abs(delta_acc))) if np.isfinite(delta_acc).any() else 1.0
+                                vmax = max(1e-6, vmax)
+                                im = plt.imshow(
+                                    delta_acc,
+                                    origin="lower",
+                                    cmap="RdBu_r",
+                                    vmin=-vmax,
+                                    vmax=vmax,
+                                    aspect="auto",
+                                    extent=[float(th_values[0]), float(th_values[-1]), float(th_values[0]), float(th_values[-1])],
+                                )
+                                plt.colorbar(im, label="Δ Accuracy (PRIDE − Baseline), pp")
+                                plt.xlabel("th1 (base gap) [absolute]")
+                                plt.ylabel("th2 (avg gap after flip) [absolute]")
+                                plt.title(f"{args.task} {subject} — AvgGap(th1,th2) ΔAcc (PRIDE−Baseline), th∈[0.1,1.0]")
+                                plt.tight_layout()
+                                plt.savefig(grid_png_path)
+                                plt.close()
+
+                                import wandb
+                                wandb_run.log({
+                                    f"avggap_grid_delta_acc/{subject}": wandb.Image(grid_png_path),
+                                })
+                                logger.info(_orange(f"W&B uploaded AvgGap grid delta PNG: {grid_png_path}"))
+                        except Exception as e:
+                            logger.warning(f"W&B AvgGap grid PNG upload failed: {e}")
 
                 except Exception as e:
                     logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
