@@ -21,6 +21,11 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import logging as hf_logging
 
+# Matplotlib (for saving beta-curve PNGs in headless envs)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from eval_clm_utils import (
     parse_arguments,
     prepare_eval,
@@ -187,6 +192,45 @@ def _estimate_pride_global_prior(per_sample_probs: List[np.ndarray],
         "base_seed": int(base_seed),
     }
     return prior_global, meta
+
+
+def _plot_compare_beta_curve_png(baseline_curve_obj: dict,
+                                 pride_curve_obj: dict,
+                                 out_path: str,
+                                 title: str = "Accuracy vs. Computational Cost") -> None:
+    """
+    baseline_curve_obj/pride_curve_obj: curve objects saved by eval_clm.py (single subject)
+    Saves a single overlay plot (baseline vs pride) to out_path.
+    """
+    def _extract(obj: dict):
+        cyc_costs = obj["cyclic"]["costs"]
+        cyc_accs = obj["cyclic"]["accuracies"]
+        full_costs = obj["full"]["costs"]
+        full_accs = obj["full"]["accuracies"]
+        default_acc = float(obj.get("default_accuracy", float("nan")))
+        return cyc_costs, cyc_accs, full_costs, full_accs, default_acc
+
+    b_cyc_costs, b_cyc_accs, b_full_costs, b_full_accs, b_def = _extract(baseline_curve_obj)
+    p_cyc_costs, p_cyc_accs, p_full_costs, p_full_accs, p_def = _extract(pride_curve_obj)
+
+    plt.figure(figsize=(7.5, 5.0), dpi=160)
+    plt.plot(b_cyc_costs, b_cyc_accs, marker='o', label='Baseline Cyclic')
+    plt.plot(b_full_costs, b_full_accs, marker='o', label='Baseline Full')
+    plt.scatter([1.0], [b_def], marker='*', s=180, c='black', label='Baseline Default')
+
+    plt.plot(p_cyc_costs, p_cyc_accs, marker='o', linestyle='--', label='PRIDE Cyclic')
+    plt.plot(p_full_costs, p_full_accs, marker='o', linestyle='--', label='PRIDE Full')
+    plt.scatter([1.0], [p_def], marker='*', s=180, c='gray', label='PRIDE Default')
+
+    plt.xlabel("Computational Cost (× of default)")
+    plt.ylabel("Accuracy")
+    plt.title(title)
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.legend()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
 
 
 def main():
@@ -449,9 +493,9 @@ def main():
                         extra_meta: Optional[dict] = None,
                     ):
                         if len(base_correct_list_) == 0:
-                            return
+                            return None
                         if not (len(base_correct_list_) == len(cyclic_correct_list_) == len(full_correct_list_)):
-                            return
+                            return None
 
                         N_ = len(base_correct_list_)
                         betas_ = [i / 10.0 for i in range(11)]
@@ -906,6 +950,7 @@ def main():
 
                         os.makedirs(curve_save_path_, exist_ok=True)
                         save_results(f'{curve_save_path_}/{subject}_beta_curve.jsonl', [curve_obj_], metrics=None)
+                        return curve_obj_
 
 
                     # =========================================================
@@ -1014,7 +1059,7 @@ def main():
                     curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
                     if getattr(args, 'option_id_set', None):
                         curve_save_path += f'_id-{args.option_id_set}'
-                    _compute_and_save_beta_curve(
+                    baseline_curve_obj = _compute_and_save_beta_curve(
                         curve_save_path_=curve_save_path,
                         tag="baseline",
                         per_sample_probs_=per_sample_probs,
@@ -1173,7 +1218,7 @@ def main():
                         if getattr(args, 'option_id_set', None):
                             curve_save_path_pride += f'_id-{args.option_id_set}'
 
-                        _compute_and_save_beta_curve(
+                        pride_curve_obj = _compute_and_save_beta_curve(
                             curve_save_path_=curve_save_path_pride,
                             tag="pride",
                             per_sample_probs_=per_sample_probs_pride,
@@ -1194,6 +1239,26 @@ def main():
                                 }
                             },
                         )
+
+                        # ---------------------------------------------------------
+                        # Save + upload compare PNG to W&B (same run) if enabled
+                        # ---------------------------------------------------------
+                        try:
+                            if (wandb_run is not None) and (baseline_curve_obj is not None) and (pride_curve_obj is not None):
+                                compare_png_path = os.path.join(curve_save_path_pride, f"{subject}_beta_curve_compare.png")
+                                _plot_compare_beta_curve_png(
+                                    baseline_curve_obj=baseline_curve_obj,
+                                    pride_curve_obj=pride_curve_obj,
+                                    out_path=compare_png_path,
+                                    title=f"{args.task} {subject} — Baseline vs PRIDE",
+                                )
+                                import wandb  # safe: only when wandb_run exists
+                                wandb_run.log({
+                                    f"beta_curve_compare/{subject}": wandb.Image(compare_png_path),
+                                })
+                                logger.info(_orange(f"W&B uploaded compare PNG: {compare_png_path}"))
+                        except Exception as e:
+                            logger.warning(f"W&B compare PNG upload failed: {e}")
 
                 except Exception as e:
                     logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
