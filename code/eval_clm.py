@@ -10,18 +10,14 @@ import logging
 import random
 import math
 import zlib
-from functools import partial
 from typing import List, Optional, Tuple
-from collections import Counter
 
 import numpy as np
-import pandas as pd
 import torch
-import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import logging as hf_logging
 
-# Matplotlib (for saving beta-curve PNGs in headless envs)
+# Matplotlib (headless)
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -60,7 +56,6 @@ def logging_cuda_memory_usage():
         logger.info("******** Memory usage ********")
         logger.info("NVML unavailable; skipping GPU memory usage logging.")
         return
-
     logger.info("******** Memory usage ********")
     n_gpus = pynvml.nvmlDeviceGetCount()
     for i in range(n_gpus):
@@ -76,6 +71,7 @@ def logging_cuda_memory_usage():
 
 
 def _rotations(k: int):
+    """cyclic rotations: ABCD, BCDA, CDAB, DABC"""
     return [tuple((i + s) % k for i in range(k)) for s in range(k)]
 
 
@@ -97,22 +93,38 @@ def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
     return agg
 
 
-# ---- helper: normalized negative entropy confidence in [0,1] ----
-def _nent_conf(p: np.ndarray, eps: float = 1e-12) -> float:
-    p = np.asarray(p, dtype=np.float64)
-    p = np.clip(p, eps, 1.0)
-    s = float(p.sum())
-    if s <= 0:
-        return 0.0
-    p = p / s
-    H = -float(np.sum(p * np.log(p)))
-    # higher = more confident
-    return float(1.0 - H / max(1e-12, np.log(len(p))))
+def _probe_shift_cyclic_put_top2_into_top1_slot(base_probs: np.ndarray, k: int) -> Tuple[int, int, int]:
+    """
+    핵심 규칙(너가 원한 것):
+      - base에서 top1 인덱스 t1, top2 인덱스 t2를 찾고,
+      - cyclic rotations(ABCD/BCDA/CDAB/DABC) 안에서
+        "top2가 top1 슬롯(원래 top1 위치)으로 오도록" shift s를 고른다.
+
+    수식:
+      shift s = (t2 - t1) mod k
+
+    예시(k=4):
+      - top1=A(0), top2=C(2) => s=(2-0)=2 => CDAB
+      - top1=D(3), top2=C(2) => s=(2-3)=3 => DABC
+
+    return: (shift s, top1_idx t1, top2_idx t2)
+    """
+    bp = np.asarray(base_probs, dtype=np.float64)
+    sidx = np.argsort(bp)[::-1]
+    t1 = int(sidx[0])
+    t2 = int(sidx[1]) if len(sidx) > 1 else int(sidx[0])
+
+    s = int((t2 - t1) % int(k))
+    # s==0이면 probe가 base랑 똑같아서 의미 없음 → 그냥 1로 밀기(가능한 경우)
+    if s == 0:
+        s = 1 if k > 1 else 0
+    return s, t1, t2
 
 
 def _read_results_file(file_path):
     try:
-        lines = [json.loads(line) for line in open(file_path)]
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = [json.loads(line) for line in f]
         lines = [e for e in lines if e.get('type') == 'result']
         lines = sorted(lines, key=lambda x: int(x['data']['idx']))
         return lines
@@ -152,6 +164,10 @@ def _estimate_pride_global_prior(per_sample_probs: List[np.ndarray],
     """
     Estimate global prior (PriDe) from a small subset of samples using cyclic permutations only.
     Returns (prior_global, meta).
+
+    prefix_selector:
+      - "random": deterministic random by subject_key+seed
+      - "low_conf": base_conf(=base gap) 작은 샘플들로 prefix 구성
     """
     N = len(per_sample_probs)
     ratio = float(max(0.0, min(1.0, ratio_prefix_samples)))
@@ -176,9 +192,9 @@ def _estimate_pride_global_prior(per_sample_probs: List[np.ndarray],
 
     priors = []
     for i in prefix_ids:
-        # observed matrix using cyclic rotations (k x k)
+        # observed matrix using cyclic rotations only (k x k)
         observed = np.asarray([per_sample_probs[i][j] for j in cyclic_indices], dtype=np.float64)
-        _, _, prior_i = debias_simple(observed)
+        _, _, prior_i = debias_simple(observed)  # returns (debiased, ... , prior)
         priors.append(prior_i)
 
     prior_global = np.mean(np.asarray(priors, dtype=np.float64), axis=0)
@@ -199,8 +215,7 @@ def _plot_compare_beta_curve_png(baseline_curve_obj: dict,
                                  out_path: str,
                                  title: str = "Accuracy vs. Computational Cost") -> None:
     """
-    baseline_curve_obj/pride_curve_obj: curve objects saved by eval_clm.py (single subject)
-    Saves a single overlay plot (baseline vs pride) to out_path.
+    Overlay baseline vs PRIDE (cyclic/full/default) and save PNG.
     """
     def _extract(obj: dict):
         cyc_costs = obj["cyclic"]["costs"]
@@ -240,7 +255,7 @@ def _plot_compare_method_curve_png(baseline_curve_obj: dict,
                                    title: str) -> None:
     """
     Overlay a specific method curve (cost vs accuracy) for baseline vs PRIDE.
-    method_key: e.g., 'ours_avggap_static'
+    method_key: 'ours_avggap' or 'ours_top2flip'
     """
     if method_key not in baseline_curve_obj or method_key not in pride_curve_obj:
         return
@@ -268,59 +283,6 @@ def _plot_compare_method_curve_png(baseline_curve_obj: dict,
     plt.close()
 
 
-def _avggap_policy_acc_cost_grid(default_conf: np.ndarray,
-                                 mean_conf: np.ndarray,
-                                 base_correct: np.ndarray,
-                                 cyclic_correct: np.ndarray,
-                                 k: int,
-                                 th_values: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    AvgGap policy:
-      if gap_base >= th1: choose base (cost=1)
-      else:
-        run flip (so far cost=2)
-        if gap_mean < th2: choose cyclic (extra cost=k-1, total=k+1)
-        else: choose base (total cost=2)
-    Returns (acc_grid, cost_grid) with shape (len(th_values), len(th_values)) for (th2,y) × (th1,x).
-    """
-    default_conf = np.asarray(default_conf, dtype=np.float64)
-    mean_conf = np.asarray(mean_conf, dtype=np.float64)
-    base_correct = np.asarray(base_correct, dtype=bool)
-    cyclic_correct = np.asarray(cyclic_correct, dtype=bool)
-    N = int(len(default_conf))
-    assert len(mean_conf) == N and len(base_correct) == N and len(cyclic_correct) == N
-
-    T = len(th_values)
-    acc = np.zeros((T, T), dtype=np.float64)
-    cost = np.zeros((T, T), dtype=np.float64)
-
-    base_cost = 1.0
-    base_plus_flip_cost = 2.0
-    extra_cyclic_cost = float(k - 1)
-    cyc_after_flip_cost = base_plus_flip_cost + extra_cyclic_cost  # k+1
-
-    for yi, th2 in enumerate(th_values):
-        for xi, th1 in enumerate(th_values):
-            stage1 = (default_conf >= float(th1))
-            # stage2 decision only for stage1==False
-            to_cyclic = (~stage1) & (mean_conf < float(th2))
-            choose_base = stage1 | ((~stage1) & (~to_cyclic))
-
-            correct = np.zeros(N, dtype=bool)
-            correct[choose_base] = base_correct[choose_base]
-            correct[to_cyclic] = cyclic_correct[to_cyclic]
-
-            c = np.zeros(N, dtype=np.float64)
-            c[stage1] = base_cost
-            c[(~stage1) & (~to_cyclic)] = base_plus_flip_cost
-            c[to_cyclic] = cyc_after_flip_cost
-
-            acc[yi, xi] = float(np.mean(correct)) if N > 0 else float("nan")
-            cost[yi, xi] = float(np.mean(c)) if N > 0 else float("nan")
-
-    return acc, cost
-
-
 def main():
     patch_open()
 
@@ -334,7 +296,7 @@ def main():
     if len(args.eval_names) == 0:
         return
 
-    # Optional: W&B init
+    # Optional W&B init
     wandb_run = None
     if getattr(args, 'wandb', False):
         try:
@@ -349,9 +311,12 @@ def main():
                     "pretrained_model_path": args.pretrained_model_path,
                     "model_name": args.model_name,
                     "eval_names": args.eval_names,
-                    "option_id_set": args.option_id_set,
+                    "option_id_set": getattr(args, "option_id_set", None),
                     "ours_low_conf_percent": getattr(args, "ours_low_conf_percent", None),
-                    "ours_th1_ema": getattr(args, "ours_th1_ema", None),
+                    "disable_pride": getattr(args, "disable_pride", False),
+                    "pride_ratio_prefix_samples": getattr(args, "pride_ratio_prefix_samples", 0.05),
+                    "pride_prefix_selector": getattr(args, "pride_prefix_selector", "random"),
+                    "pride_seed": getattr(args, "pride_seed", 0),
                 },
             )
         except Exception as e:
@@ -377,9 +342,6 @@ def main():
 
     logging_cuda_memory_usage()
 
-    # ---------------------------------------------------------
-    # 2) Single-run mode
-    # ---------------------------------------------------------
     for eval_name in args.eval_names[::1]:
         (subjects, prepare_few_shot_samples,
          prepare_eval_samples, prepare_eval_fn) = prepare_eval(args, eval_name)
@@ -408,6 +370,9 @@ def main():
                 gc.collect()
                 torch.cuda.empty_cache()
 
+            # -------------------------
+            # metrics (for existing settings)
+            # -------------------------
             metrics = None
             if len(results) > 0:
                 if args.setting in ['perm', 'full', 'cyclic']:
@@ -446,9 +411,6 @@ def main():
                     metrics = {'type': 'metric', 'data': {}}
                     metrics['data']['accuracy'] = get_accuracy(results)
                     metrics['data']['boostrap_std'] = get_bootstrap_accuracy_std(results)
-                    logger.info("Final report:")
-                    for key, value in metrics['data'].items():
-                        logger.info(f"{key}: {value}")
 
             logger.info(_orange(f"Run completed: {subject}"))
 
@@ -457,10 +419,11 @@ def main():
                 logger.info(f"Results saved: {subject}")
 
             # =========================================================
-            # Derived policies: only when args.setting == 'full'
+            # Derived policies & beta curves (ONLY when args.setting == 'full')
             # =========================================================
             if args.setting == 'full' and len(results) > 0:
                 try:
+                    # option IDs / k
                     if getattr(args, 'option_id_set', None):
                         option_ids = list(args.option_id_set)
                     else:
@@ -470,23 +433,16 @@ def main():
 
                     from itertools import permutations
                     perm_list = list(sorted(permutations(range(k))))
-                    perm_index_map = {p: idx for idx, p in enumerate(perm_list)}
                     identity_idx = perm_list.index(tuple(range(k)))
-                    identity_perm = perm_list[identity_idx]
+
                     cyclic_indices = [
                         perm_list.index(tuple((i + s) % k for i in range(k)))
                         for s in range(k)
                     ]
-
-                    cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]  # reuse
+                    cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]
 
                     cyclic_results = []
                     base_results = []
-
-                    full_total = 0
-                    full_corrects = 0
-                    cyclic_total = 0
-                    cyclic_corrects = 0
 
                     per_sample_probs = []
                     base_probs_list = []
@@ -499,11 +455,19 @@ def main():
                     cyclic_correct_list = []
                     full_correct_list = []
 
+                    full_total = 0
+                    full_corrects = 0
+                    cyclic_total = 0
+                    cyclic_corrects = 0
+
+                    # -------------------------
+                    # Build base/cyclic/full correctness lists
+                    # -------------------------
                     for r in results:
                         if r.get('type') != 'result':
                             continue
                         data = r['data']
-                        probs_seq = data['probs']
+                        probs_seq = data.get('probs')
                         if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
                             continue
 
@@ -514,7 +478,7 @@ def main():
                         sample_prompts.append(data.get('prompt'))
                         sample_options_list.append(data.get('options'))
 
-                        # Cyclic
+                        # Cyclic (k rotations)
                         cyc_probs = [probs_seq[idx] for idx in cyclic_indices]
                         cyclic_results.append({
                             'type': 'result',
@@ -534,7 +498,7 @@ def main():
                             cyclic_corrects += 1
                         cyclic_total += 1
 
-                        # Base
+                        # Base (identity only)
                         base_probs = np.asarray(probs_seq[identity_idx], dtype=np.float64)
                         base_probs_list.append(base_probs)
                         pred_base = option_ids[int(np.argmax(base_probs))]
@@ -553,7 +517,7 @@ def main():
                             },
                         })
 
-                        # Full
+                        # Full (all perms)
                         agg_full = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
                         pred_full = option_ids[int(np.argmax(agg_full))]
                         corr_full = (pred_full == data['ideal'])
@@ -568,32 +532,28 @@ def main():
                     def _compute_and_save_beta_curve(
                         curve_save_path_: str,
                         tag: str,
-                        per_sample_probs_: List[np.ndarray],
-                        base_probs_list_: List[np.ndarray],
-                        ideals_: List[str],
                         base_correct_list_: List[bool],
                         cyclic_correct_list_: List[bool],
                         full_correct_list_: List[bool],
-                        default_conf_: np.ndarray,
-                        mean_conf_: np.ndarray,
+                        default_conf_: np.ndarray,          # base gap
+                        mean_conf_: np.ndarray,             # gap(mean(base,probe))
                         arr_flip_trigger_global_: np.ndarray,
-                        base_nent_conf_: np.ndarray,
+                        arr_probe2_correct_: np.ndarray,    # correctness when stopping after probe
                         extra_meta: Optional[dict] = None,
                     ):
                         if len(base_correct_list_) == 0:
                             return None
-                        if not (len(base_correct_list_) == len(cyclic_correct_list_) == len(full_correct_list_)):
+                        if not (len(base_correct_list_) == len(cyclic_correct_list_) == len(full_correct_list_) == len(arr_probe2_correct_)):
                             return None
 
                         N_ = len(base_correct_list_)
                         betas_ = [i / 10.0 for i in range(11)]
-                        C_cyc_ = float(k)
-                        C_full_ = float(math.factorial(k))
                         perc_ = max(min(getattr(args, 'ours_low_conf_percent', 10.0), 100.0), 0.0) / 100.0
 
-                        # -------------------------
-                        # 1) Standard cyclic/full mix
-                        # -------------------------
+                        C_cyc_ = float(k)
+                        C_full_ = float(math.factorial(k))
+
+                        # 1) beta mix curves (cyclic/full)
                         curve_cyc_ = []
                         curve_full_ = []
                         for beta in betas_:
@@ -610,382 +570,126 @@ def main():
                             curve_cyc_.append((cost_cyc, acc_cyc_mix))
                             curve_full_.append((cost_full_mix, acc_full_mix))
 
-                        # -------------------------
-                        # 2) switch-full / switch-cyclic (legacy, gap 기반)
-                        # -------------------------
+                        # 2) switch curves (threshold=quantile, per beta)
                         curve_switch_full_ = []
                         curve_switch_cyc_ = []
-                        try:
-                            for beta in betas_:
-                                n = int(N_ * beta + 1e-9)
-                                thresh = float(np.quantile(default_conf_[:n], perc_)) if n > 0 else float(np.quantile(default_conf_, perc_))
+                        for beta in betas_:
+                            n = int(N_ * beta + 1e-9)
+                            thresh = float(np.quantile(default_conf_[:n], perc_)) if n > 0 else float(np.quantile(default_conf_, perc_))
 
-                                total_cost_sf = 0.0
-                                corrects_sf = 0
-                                total_cost_sc = 0.0
-                                corrects_sc = 0
+                            total_cost_sf = 0.0
+                            corrects_sf = 0
+                            total_cost_sc = 0.0
+                            corrects_sc = 0
 
-                                for i in range(0, n):
+                            # online prefix
+                            for i in range(0, n):
+                                total_cost_sf += 1.0
+                                total_cost_sc += 1.0
+                                if base_correct_list_[i]:
+                                    corrects_sf += 1
+                                    corrects_sc += 1
+
+                            # decision region
+                            for i in range(n, N_):
+                                is_ambiguous = (float(default_conf_[i]) < thresh)
+
+                                # switch_full
+                                if is_ambiguous:
+                                    total_cost_sf += float(len(perm_list))  # full perms
+                                    if full_correct_list_[i]:
+                                        corrects_sf += 1
+                                else:
                                     total_cost_sf += 1.0
-                                    total_cost_sc += 1.0
                                     if base_correct_list_[i]:
                                         corrects_sf += 1
+
+                                # switch_cyclic
+                                if is_ambiguous:
+                                    total_cost_sc += float(k)  # cyclic rotations
+                                    if cyclic_correct_list_[i]:
+                                        corrects_sc += 1
+                                else:
+                                    total_cost_sc += 1.0
+                                    if base_correct_list_[i]:
                                         corrects_sc += 1
 
-                                for i in range(n, N_):
-                                    is_ambiguous = (float(default_conf_[i]) < thresh)
+                            curve_switch_full_.append((total_cost_sf / float(N_), corrects_sf / float(N_)))
+                            curve_switch_cyc_.append((total_cost_sc / float(N_), corrects_sc / float(N_)))
 
-                                    if is_ambiguous:
-                                        total_cost_sf += float(len(perm_list))
-                                        if full_correct_list_[i]:
-                                            corrects_sf += 1
-                                    else:
-                                        total_cost_sf += 1.0
-                                        if base_correct_list_[i]:
-                                            corrects_sf += 1
-
-                                    if is_ambiguous:
-                                        total_cost_sc += float(k)
-                                        if cyclic_correct_list_[i]:
-                                            corrects_sc += 1
-                                    else:
-                                        total_cost_sc += 1.0
-                                        if base_correct_list_[i]:
-                                            corrects_sc += 1
-
-                                curve_switch_full_.append((total_cost_sf / float(N_), corrects_sf / float(N_)))
-                                curve_switch_cyc_.append((total_cost_sc / float(N_), corrects_sc / float(N_)))
-                        except Exception as e:
-                            logger.warning(f"[{subject}] ({tag}) Failed to compute switch curves: {e}")
-                            curve_switch_full_ = []
-                            curve_switch_cyc_ = []
-
-                        # -------------------------
-                        # 3) top2flip -> cyclic (legacy)
-                        # -------------------------
+                        # 3) ours_top2flip: base -> probe(shift s) -> (flip? cyclic : stop at probe)
+                        #    - th1 = quantile(default_conf) per beta
+                        #    - if cyclic => total cost = k (NOT k+1)
                         curve_top2flip_cyc_ = []
-                        try:
-                            base_plus_flip_cost = 2.0
-                            extra_cyclic_cost = float(k - 1)
-                            cyc_after_flip_cost = base_plus_flip_cost + extra_cyclic_cost  # k+1
+                        for beta in betas_:
+                            n = int(N_ * beta + 1e-9)
+                            th1 = float(np.quantile(default_conf_[:n], perc_)) if n > 0 else float(np.quantile(default_conf_, perc_))
 
-                            for beta in betas_:
-                                n = int(N_ * beta + 1e-9)
-                                thresh = float(np.quantile(default_conf_[:n], perc_)) if n > 0 else float(np.quantile(default_conf_, perc_))
+                            total_cost = 0.0
+                            corrects = 0
 
-                                total_cost = 0.0
-                                corrects = 0
+                            # online prefix
+                            for i in range(0, n):
+                                total_cost += 1.0
+                                if base_correct_list_[i]:
+                                    corrects += 1
 
-                                for i in range(0, n):
+                            # decision region
+                            for i in range(n, N_):
+                                if float(default_conf_[i]) >= th1:
                                     total_cost += 1.0
                                     if base_correct_list_[i]:
                                         corrects += 1
+                                    continue
 
-                                for i in range(n, N_):
-                                    if float(default_conf_[i]) >= thresh:
-                                        total_cost += 1.0
-                                        if base_correct_list_[i]:
-                                            corrects += 1
-                                        continue
-
-                                    if bool(arr_flip_trigger_global_[i]):
-                                        total_cost += cyc_after_flip_cost
-                                        if cyclic_correct_list_[i]:
-                                            corrects += 1
-                                    else:
-                                        total_cost += base_plus_flip_cost
-                                        if base_correct_list_[i]:
-                                            corrects += 1
-
-                                curve_top2flip_cyc_.append((total_cost / float(N_), corrects / float(N_)))
-                        except Exception as e:
-                            logger.warning(f"[{subject}] ({tag}) Failed to compute top2flip->cyclic curve: {e}")
-                            curve_top2flip_cyc_ = []
-
-                        # -------------------------
-                        # 4) AvgGap(static) -> cyclic (legacy)
-                        # -------------------------
-                        curve_avggap_static_ = []
-                        try:
-                            base_plus_flip_cost = 2.0
-                            extra_cyclic_cost = float(k - 1)
-
-                            for beta in betas_:
-                                n = int(N_ * beta + 1e-9)
-                                thresh = float(np.quantile(default_conf_[:n], perc_)) if n > 0 else float(np.quantile(default_conf_, perc_))
-
-                                total_cost = 0.0
-                                corrects = 0
-
-                                for i in range(0, n):
-                                    total_cost += 1.0
-                                    if base_correct_list_[i]:
-                                        corrects += 1
-
-                                for i in range(n, N_):
-                                    if float(default_conf_[i]) >= thresh:
-                                        total_cost += 1.0
-                                        if base_correct_list_[i]:
-                                            corrects += 1
-                                        continue
-
-                                    total_cost += base_plus_flip_cost
-                                    if float(mean_conf_[i]) < thresh:
-                                        total_cost += extra_cyclic_cost
-                                        if cyclic_correct_list_[i]:
-                                            corrects += 1
-                                    else:
-                                        if base_correct_list_[i]:
-                                            corrects += 1
-
-                                curve_avggap_static_.append((total_cost / float(N_), corrects / float(N_)))
-                        except Exception as e:
-                            logger.warning(f"[{subject}] ({tag}) Failed to compute AvgGap(static)->cyclic curve: {e}")
-                            curve_avggap_static_ = []
-
-                        # =========================================================
-                        # 5) NEW: Entropy-based 3-stage policy with minimal HP
-                        # =========================================================
-                        curve_avggap_dynamic_ = []
-                        init_th1_fixed_ = float('nan')
-                        init_th2_fixed_ = float('nan')
-                        th_trace_by_beta_ = []
-                        try:
-                            base_plus_probe_cost = 2.0
-                            extra_cyclic_cost = float(k - 2)
-
-                            def _clamp01(x: float) -> float:
-                                return max(0.0, min(1.0, float(x)))
-
-                            ema = float(getattr(args, "ours_th1_ema", getattr(args, "ours_mad_alpha", 0.01)))
-                            ema = max(0.0, min(1.0, ema))
-
-                            # precompute base top1/top2 indices
-                            base_top12_idx = []
-                            for i in range(N_):
-                                bp = np.asarray(base_probs_list_[i], dtype=np.float64)
-                                sidx = np.argsort(bp)[::-1]
-                                t1 = int(sidx[0])
-                                t2 = int(sidx[1]) if len(sidx) > 1 else int(sidx[0])
-                                base_top12_idx.append((t1, t2))
-
-                            # ideal indices (content-space == option_ids index)
-                            ideal_idx_list = []
-                            for i in range(N_):
-                                try:
-                                    ideal_idx_list.append(int(option_ids.index(ideals_[i])))
-                                except Exception:
-                                    ideal_idx_list.append(-1)
-
-                            # cyclic teacher precompute
-                            cyc_conf_list = []
-                            cyclic_pred_idx = []
-                            for i in range(N_):
-                                cyc_probs = [per_sample_probs_[i][idx] for idx in cyclic_indices]
-                                agg_cyc = _aggregate_probs_over_permutations(cyc_probs, cyc_perms, k)
-                                cyclic_pred_idx.append(int(np.argmax(agg_cyc)))
-                                cyc_conf_list.append(_nent_conf(agg_cyc))
-                            cyc_conf_list = np.asarray(cyc_conf_list, dtype=np.float64)
-                            cyclic_pred_idx = np.asarray(cyclic_pred_idx, dtype=np.int64)
-
-                            debug_teacher = bool(getattr(args, "ours_debug_teacher", False))
-                            debug_teacher_n = int(getattr(args, "ours_debug_teacher_n", 5))
-
-                            TRACE_STRIDE = 200
-                            TRACE_MAX_PER_BETA = 300
-
-                            for beta in betas_:
-                                n = int(N_ * beta + 1e-9)
-                                th1 = float(np.quantile(base_nent_conf_[:n], perc_)) if n > 0 else float(np.quantile(base_nent_conf_, perc_))
-                                th1 = _clamp01(th1)
-
-                                if hasattr(args, "ours_th1_init") and args.ours_th1_init is not None:
-                                    th1 = _clamp01(float(args.ours_th1_init))
-
-                                th2 = float(th1)
-                                if hasattr(args, "ours_th2_init") and args.ours_th2_init is not None:
-                                    th2 = _clamp01(float(args.ours_th2_init))
-
-                                th1_init_beta = float(th1)
-                                th2_init_beta = float(th2)
-
-                                if math.isnan(init_th1_fixed_):
-                                    init_th1_fixed_ = float(th1)
-                                    init_th2_fixed_ = float(th2)
-
-                                total_cost = 0.0
-                                corrects = 0
-                                dbg_printed = 0
-
-                                cnt_stage1_stop = 0
-                                cnt_stage2_stop = 0
-                                cnt_stage3_cyc = 0
-                                cnt_teacher_agree = 0
-                                cnt_teacher_disagree = 0
-                                cnt_th2_updates = 0
-
-                                stage3_total = 0
-                                stage3_pred2_correct = 0
-                                stage3_predcyc_correct = 0
-
-                                beta_trace = []
-
-                                def _push_trace(i: int, stage: int, decision: str,
-                                                c1: float = None, c2: float = None, shift: int = None,
-                                                pred2: int = None, pred_cyc: int = None,
-                                                w: float = None, y: float = None,
-                                                force: bool = False):
-                                    if len(beta_trace) >= TRACE_MAX_PER_BETA:
-                                        return
-                                    if (not force) and (i >= n) and ((i - n) % TRACE_STRIDE != 0):
-                                        return
-                                    rec = {"i": int(i), "stage": int(stage), "decision": str(decision),
-                                           "th1": float(th1), "th2": float(th2)}
-                                    if c1 is not None: rec["c1"] = float(c1)
-                                    if c2 is not None: rec["c2"] = float(c2)
-                                    if shift is not None: rec["shift"] = int(shift)
-                                    if pred2 is not None: rec["pred2"] = int(pred2)
-                                    if pred_cyc is not None: rec["pred_cyc"] = int(pred_cyc)
-                                    if w is not None: rec["w"] = float(w)
-                                    if y is not None: rec["y"] = float(y)
-                                    beta_trace.append(rec)
-
-                                _push_trace(i=n, stage=0, decision="init", force=True)
-
-                                # prefix: base only
-                                for i in range(0, n):
-                                    total_cost += 1.0
-                                    if base_correct_list_[i]:
-                                        corrects += 1
-
-                                # online region
-                                for i in range(n, N_):
-                                    c1 = float(base_nent_conf_[i])
-                                    if c1 >= th1:
-                                        total_cost += 1.0
-                                        cnt_stage1_stop += 1
-                                        if base_correct_list_[i]:
-                                            corrects += 1
-                                        _push_trace(i=i, stage=1, decision="stop_base", c1=c1)
-                                        continue
-
-                                    # stage2 probe
-                                    total_cost += base_plus_probe_cost
-                                    t1, t2 = base_top12_idx[i]
-                                    if int(t1) != 0:
-                                        shift = int(t1)
-                                    else:
-                                        shift = int(t2)
-                                        if shift == 0:
-                                            shift = 1
-
-                                    probs_id = per_sample_probs_[i][identity_idx]
-                                    probs_probe = per_sample_probs_[i][cyclic_indices[shift]]
-
-                                    agg2 = _aggregate_probs_over_permutations(
-                                        [probs_id.tolist(), probs_probe.tolist()],
-                                        [cyc_perms[0], cyc_perms[shift]],
-                                        k
-                                    )
-
-                                    pred2 = int(np.argmax(agg2))
-                                    c2 = float(_nent_conf(agg2))
-                                    go_cyclic = (c2 < th2)
-
-                                    if not go_cyclic:
-                                        cnt_stage2_stop += 1
-                                        ideal_idx = ideal_idx_list[i]
-                                        if ideal_idx >= 0 and pred2 == ideal_idx:
-                                            corrects += 1
-                                        th1 = _clamp01((1.0 - ema) * th1 + ema * th2)
-                                        _push_trace(i=i, stage=2, decision="stop_probe", c1=c1, c2=c2, shift=shift, pred2=pred2)
-                                        continue
-
-                                    # stage3 full cyclic
-                                    total_cost += extra_cyclic_cost
-                                    cnt_stage3_cyc += 1
+                                # base+probe already done conceptually (cost=2),
+                                # but if go cyclic, we define "total cost=k" (remaining rotations)
+                                if bool(arr_flip_trigger_global_[i]):
+                                    total_cost += float(k)
                                     if cyclic_correct_list_[i]:
                                         corrects += 1
-
-                                    stage3_total += 1
-                                    ideal_idx = ideal_idx_list[i]
-                                    if ideal_idx >= 0:
-                                        if pred2 == ideal_idx:
-                                            stage3_pred2_correct += 1
-                                        pred_cyc_idx = int(cyclic_pred_idx[i])
-                                        if pred_cyc_idx == ideal_idx:
-                                            stage3_predcyc_correct += 1
-
-                                    pred_cyc = int(cyclic_pred_idx[i])
-                                    y = 1.0 if pred_cyc != pred2 else 0.0
-                                    w = float(cyc_conf_list[i])
-
-                                    if y > 0.5:
-                                        cnt_teacher_disagree += 1
-                                    else:
-                                        cnt_teacher_agree += 1
-
-                                    th2_prev = th2
-                                    th2 = _clamp01(th2 + ema * w * ((2.0 * y) - 1.0) * (th2 - c2))
-                                    if abs(th2 - th2_prev) > 0.0:
-                                        cnt_th2_updates += 1
-
-                                    th1 = _clamp01((1.0 - ema) * th1 + ema * th2)
-                                    _push_trace(i=i, stage=3, decision="go_cyclic_update",
-                                                c1=c1, c2=c2, shift=shift, pred2=pred2, pred_cyc=pred_cyc, w=w, y=y, force=True)
-
-                                    if debug_teacher and dbg_printed < debug_teacher_n:
-                                        logger.info(_purple(
-                                            f"[{subject}] [{tag}] [TEACH-MIN] beta={beta:.1f} i={i} "
-                                            f"c1={c1:.4f} th1={th1:.4f} "
-                                            f"c2={c2:.4f} th2={th2:.4f} "
-                                            f"shift={shift} w={w:.4f} y={y:.0f} "
-                                            f"pred2={pred2} pred_cyc={pred_cyc} "
-                                            f"{'DIS' if y > 0.5 else 'AGR'}"
-                                        ))
-                                        dbg_printed += 1
-
-                                curve_avggap_dynamic_.append((total_cost / float(N_), corrects / float(N_)))
-
-                                if stage3_total > 0:
-                                    acc_pred2_stage3 = stage3_pred2_correct / float(stage3_total)
-                                    acc_cyc_stage3 = stage3_predcyc_correct / float(stage3_total)
-                                    gain_stage3 = acc_cyc_stage3 - acc_pred2_stage3
                                 else:
-                                    acc_pred2_stage3 = float('nan')
-                                    acc_cyc_stage3 = float('nan')
-                                    gain_stage3 = float('nan')
+                                    total_cost += 2.0
+                                    if bool(arr_probe2_correct_[i]):
+                                        corrects += 1
 
-                                th_trace_by_beta_.append({
-                                    "beta": float(beta),
-                                    "n": int(n),
-                                    "N": int(N_),
-                                    "ema": float(ema),
-                                    "perc": float(perc_),
-                                    "init_th1": float(th1_init_beta),
-                                    "init_th2": float(th2_init_beta),
-                                    "final_th1": float(th1),
-                                    "final_th2": float(th2),
-                                    "stage1_stop": int(cnt_stage1_stop),
-                                    "stage2_stop": int(cnt_stage2_stop),
-                                    "stage3_cyc": int(cnt_stage3_cyc),
-                                    "teacher_disagree": int(cnt_teacher_disagree),
-                                    "teacher_agree": int(cnt_teacher_agree),
-                                    "th2_updates": int(cnt_th2_updates),
-                                    "stage3_total": int(stage3_total),
-                                    "stage3_acc_pred2": float(acc_pred2_stage3),
-                                    "stage3_acc_cyc": float(acc_cyc_stage3),
-                                    "stage3_gain": float(gain_stage3),
-                                    "trace_stride": int(TRACE_STRIDE),
-                                    "trace_max": int(TRACE_MAX_PER_BETA),
-                                    "trace": beta_trace,
-                                })
-                        except Exception as e:
-                            logger.warning(f"[{subject}] ({tag}) Failed to compute NEW dynamic curve: {e}")
-                            curve_avggap_dynamic_ = []
-                            init_th1_fixed_ = float('nan')
-                            init_th2_fixed_ = float('nan')
-                            th_trace_by_beta_ = []
+                            curve_top2flip_cyc_.append((total_cost / float(N_), corrects / float(N_)))
+
+                        # 4) ours_avggap: base -> probe -> avggap(mean) compare with th2
+                        #    - th1 = quantile(default_conf), th2 = quantile(mean_conf), both per beta
+                        #    - if cyclic => total cost = k
+                        curve_avggap_ = []
+                        for beta in betas_:
+                            n = int(N_ * beta + 1e-9)
+                            th1 = float(np.quantile(default_conf_[:n], perc_)) if n > 0 else float(np.quantile(default_conf_, perc_))
+                            th2 = float(np.quantile(mean_conf_[:n], perc_)) if n > 0 else float(np.quantile(mean_conf_, perc_))
+
+                            total_cost = 0.0
+                            corrects = 0
+
+                            for i in range(0, n):
+                                total_cost += 1.0
+                                if base_correct_list_[i]:
+                                    corrects += 1
+
+                            for i in range(n, N_):
+                                if float(default_conf_[i]) >= th1:
+                                    total_cost += 1.0
+                                    if base_correct_list_[i]:
+                                        corrects += 1
+                                    continue
+
+                                # probe done
+                                if float(mean_conf_[i]) < th2:
+                                    total_cost += float(k)
+                                    if cyclic_correct_list_[i]:
+                                        corrects += 1
+                                else:
+                                    total_cost += 2.0
+                                    if bool(arr_probe2_correct_[i]):
+                                        corrects += 1
+
+                            curve_avggap_.append((total_cost / float(N_), corrects / float(N_)))
 
                         curve_obj_ = {
                             'subject': subject,
@@ -1013,25 +717,10 @@ def main():
                                 'costs': [float(c) for c, _ in curve_top2flip_cyc_],
                                 'accuracies': [float(a) for _, a in curve_top2flip_cyc_]
                             },
-                            'ours_avggap_static': {
-                                'costs': [float(c) for c, _ in curve_avggap_static_],
-                                'accuracies': [float(a) for _, a in curve_avggap_static_]
+                            'ours_avggap': {
+                                'costs': [float(c) for c, _ in curve_avggap_],
+                                'accuracies': [float(a) for _, a in curve_avggap_]
                             },
-                            'ours_avggap_dynamic': {
-                                'costs': [float(c) for c, a in curve_avggap_dynamic_],
-                                'accuracies': [float(a) for c, a in curve_avggap_dynamic_]
-                            },
-                            'ours_avggap': {  # backward-compat alias
-                                'costs': [float(c) for c, _ in curve_avggap_static_],
-                                'accuracies': [float(a) for _, a in curve_avggap_static_]
-                            },
-                            'ours_low_conf_percent': float(getattr(args, 'ours_low_conf_percent', 10.0)),
-                            'ours_low_conf_frac': float(perc_),
-                            'dynamic_init_th1': float(init_th1_fixed_),
-                            'dynamic_init_th2': float(init_th2_fixed_),
-                            'dynamic_ema': float(getattr(args, "ours_th1_ema", getattr(args, "ours_mad_alpha", 0.01))),
-                            'dynamic_note': "entropy_conf stage1+stage2, probe uses cyclic shift(top1->A, else top2->A), th2 updated by teacher(cyclic vs pred2) weighted by cyclic entropy-conf",
-                            'dynamic_th_trace': th_trace_by_beta_,
                         }
                         if extra_meta:
                             curve_obj_.update(extra_meta)
@@ -1040,67 +729,59 @@ def main():
                         save_results(f'{curve_save_path_}/{subject}_beta_curve.jsonl', [curve_obj_], metrics=None)
                         return curve_obj_
 
-
                     # =========================================================
-                    # Confidence stats & triggers (precompute)
+                    # Precompute confidence stats & probe triggers (BASELINE)
                     # =========================================================
-                    default_conf = []               # base gap: top1 - top2 (legacy curves)
-                    mean_gap_list = []              # (legacy) gap(mean(base, swap)) used by AvgGap(static)
-                    flip_trigger_mask_global = []   # (legacy) base argmax != swap argmax
-
-                    # ✅ entropy conf for base (used in NEW dynamic)
-                    base_nent_conf = []
+                    default_conf = []                 # base gap: top1-top2 (letter-space)
+                    mean_gap_list = []                # gap(mean(base,probe)) (content-space)
+                    flip_trigger_mask = []            # pred_base != pred_probe (content-space)
+                    probe2_correct_list = []          # correctness of argmax(mean_probs)
 
                     for i, bp in enumerate(base_probs_list):
-                        # gap
+                        bp = np.asarray(bp, dtype=np.float64)
+
+                        # base gap
                         vals = np.sort(bp)[::-1]
-                        if vals.shape[0] < 2:
-                            top1, top2 = (vals[0], 0.0) if vals.shape[0] > 0 else (0.0, 0.0)
-                        else:
-                            top1, top2 = vals[0], vals[1]
-                        default_conf.append(float(top1 - top2))
+                        top1 = float(vals[0]) if vals.shape[0] > 0 else 0.0
+                        top2 = float(vals[1]) if vals.shape[0] > 1 else 0.0
+                        default_conf.append(top1 - top2)
 
-                        # base entropy-conf
-                        base_nent_conf.append(_nent_conf(bp))
+                        # cyclic probe shift: put top2 into top1 slot
+                        shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(bp, k)
+                        probe_perm_idx = cyclic_indices[shift]
 
-                        # swap (top1 <-> top2) permutation index (legacy)
-                        sorted_idx = np.argsort(bp)[::-1]
-                        top1_idx = int(sorted_idx[0])
-                        top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
-                        perm_swap = list(identity_perm)
-                        perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
-                        swap_idx = perm_index_map.get(tuple(perm_swap), identity_idx)
-
+                        # aggregate base into content-space (single perm)
                         probs_base_raw = per_sample_probs[i][identity_idx]
-                        probs_swap_raw = per_sample_probs[i][swap_idx]
-
                         agg_base = _aggregate_probs_over_permutations(
                             [probs_base_raw.tolist()],
-                            [perm_list[identity_idx]],
-                            k
-                        )
-                        agg_swap = _aggregate_probs_over_permutations(
-                            [probs_swap_raw.tolist()],
-                            [perm_list[swap_idx]],
+                            [tuple(range(k))],
                             k
                         )
 
-                        mean_probs = (agg_base + agg_swap) / 2.0
+                        # aggregate probe into content-space (single rotation perm)
+                        probs_probe_raw = per_sample_probs[i][probe_perm_idx]
+                        agg_probe = _aggregate_probs_over_permutations(
+                            [probs_probe_raw.tolist()],
+                            [cyc_perms[shift]],
+                            k
+                        )
+
+                        mean_probs = (agg_base + agg_probe) / 2.0
                         vals_mean = np.sort(mean_probs)[::-1]
                         mean_gap = float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0
                         mean_gap_list.append(mean_gap)
 
-                        pred_base_content = option_ids[int(np.argmax(agg_base))]
-                        pred_swap_content = option_ids[int(np.argmax(agg_swap))]
-                        flip_trigger_mask_global.append(pred_base_content != pred_swap_content)
+                        pred_base = option_ids[int(np.argmax(agg_base))]
+                        pred_probe = option_ids[int(np.argmax(agg_probe))]
+                        flip_trigger_mask.append(pred_base != pred_probe)
+
+                        pred2 = option_ids[int(np.argmax(mean_probs))]
+                        probe2_correct_list.append(pred2 == ideals[i])
 
                     default_conf = np.asarray(default_conf, dtype=np.float64)
                     mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
-                    arr_flip_trigger_global = np.asarray(flip_trigger_mask_global, dtype=bool)
-                    base_nent_conf = np.asarray(base_nent_conf, dtype=np.float64)
-
-                    arr_base_correct = np.asarray(base_correct_list, dtype=bool)
-                    arr_cyclic_correct = np.asarray(cyclic_correct_list, dtype=bool)
+                    arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
+                    arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
 
                     # =========================================================
                     # Save cyclic/base derived results
@@ -1110,56 +791,42 @@ def main():
                         cyclic_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(cyclic_save_path, exist_ok=True)
 
-                    if cyclic_total > 0:
-                        cyclic_acc = cyclic_corrects / cyclic_total
-                        cyclic_metrics = {'type': 'metric', 'data': {'accuracy': cyclic_acc}}
-                        logger.info(_purple(f"[{subject}] Cyclic ensemble accuracy: {cyclic_acc:.4f}"))
-                    else:
-                        cyclic_acc = float('nan')
-                        cyclic_metrics = None
-
+                    cyclic_acc = (cyclic_corrects / cyclic_total) if cyclic_total > 0 else float('nan')
+                    cyclic_metrics = {'type': 'metric', 'data': {'accuracy': cyclic_acc}} if cyclic_total > 0 else None
                     save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results, metrics=cyclic_metrics)
                     logger.info(_orange(f"Derived and saved cyclic results: {subject}"))
+                    logger.info(_purple(f"[{subject}] Cyclic ensemble accuracy: {cyclic_acc:.4f}"))
 
                     base_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}'
                     if getattr(args, 'option_id_set', None):
                         base_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(base_save_path, exist_ok=True)
-                    base_metrics = {'type': 'metric', 'data': {'accuracy': get_accuracy(base_results)}}
+                    base_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64))) if len(base_correct_list) else float('nan')
+                    base_metrics = {'type': 'metric', 'data': {'accuracy': base_acc}}
                     save_results(f'{base_save_path}/{subject}.jsonl', base_results, base_metrics)
                     logger.info(_orange(f"Derived and saved base results: {subject}"))
 
-                    # Full accuracy summary
-                    if full_total > 0:
-                        full_acc = full_corrects / full_total
-                        logger.info(_purple(f"[{subject}] Full permutation ensemble accuracy: {full_acc:.4f}"))
-                    else:
-                        full_acc = float('nan')
-
-                    summary_full = full_acc
-                    summary_cyc = cyclic_acc if cyclic_total > 0 else float('nan')
-                    summary_base = base_metrics['data']['accuracy'] if (base_metrics is not None and 'accuracy' in base_metrics['data']) else float('nan')
-                    logger.info(_purple(f"[{subject}] Accuracies — Full: {summary_full:.4f}, Cyclic: {summary_cyc:.4f}, Default: {summary_base:.4f}"))
+                    full_acc = (full_corrects / full_total) if full_total > 0 else float('nan')
+                    logger.info(_purple(f"[{subject}] Full permutation ensemble accuracy: {full_acc:.4f}"))
+                    logger.info(_purple(f"[{subject}] Accuracies — Full: {full_acc:.4f}, Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
 
                     # =========================================================
-                    # Beta curves
+                    # Beta curves (baseline)
                     # =========================================================
                     curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
                     if getattr(args, 'option_id_set', None):
                         curve_save_path += f'_id-{args.option_id_set}'
+
                     baseline_curve_obj = _compute_and_save_beta_curve(
                         curve_save_path_=curve_save_path,
                         tag="baseline",
-                        per_sample_probs_=per_sample_probs,
-                        base_probs_list_=base_probs_list,
-                        ideals_=ideals,
                         base_correct_list_=base_correct_list,
                         cyclic_correct_list_=cyclic_correct_list,
                         full_correct_list_=full_correct_list,
                         default_conf_=default_conf,
                         mean_conf_=mean_conf,
-                        arr_flip_trigger_global_=arr_flip_trigger_global,
-                        base_nent_conf_=base_nent_conf,
+                        arr_flip_trigger_global_=arr_flip_trigger,
+                        arr_probe2_correct_=arr_probe2_correct,
                         extra_meta=None,
                     )
 
@@ -1175,7 +842,7 @@ def main():
                             prefix_selector=str(getattr(args, "pride_prefix_selector", "random")),
                             base_seed=int(getattr(args, "pride_seed", 0)),
                             subject_key=subject_key,
-                            base_conf=base_nent_conf,
+                            base_conf=default_conf,  # base gap as confidence
                         )
 
                         # apply correction to all permutations
@@ -1185,19 +852,18 @@ def main():
                         ]
 
                         # recompute derived lists for pride
-                        base_probs_list_pride = []
-                        base_correct_list_pride = []
-                        cyclic_correct_list_pride = []
-                        full_correct_list_pride = []
+                        base_correct_pride = []
+                        cyclic_correct_pride = []
+                        full_correct_pride = []
 
                         default_conf_pride = []
-                        mean_gap_list_pride = []
-                        flip_trigger_mask_pride = []
-                        base_nent_conf_pride = []
+                        mean_conf_pride_list = []
+                        flip_trigger_pride = []
+                        probe2_correct_pride_list = []
 
-                        # pride-derived base/cyclic results (optional but useful)
                         base_results_pride = []
                         cyclic_results_pride = []
+                        cyclic_corrects_pride = 0
 
                         for i in range(len(per_sample_probs_pride)):
                             probs_seq_np = per_sample_probs_pride[i]
@@ -1219,14 +885,16 @@ def main():
                             })
                             agg_cyc = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs], cyc_perms, k)
                             pred_cyc = option_ids[int(np.argmax(agg_cyc))]
-                            cyclic_correct_list_pride.append(pred_cyc == ideals[i])
+                            corr_cyc = (pred_cyc == ideals[i])
+                            cyclic_correct_pride.append(corr_cyc)
+                            if corr_cyc:
+                                cyclic_corrects_pride += 1
 
                             # base
                             base_probs = np.asarray(probs_seq_np[identity_idx], dtype=np.float64)
-                            base_probs_list_pride.append(base_probs)
                             pred_base = option_ids[int(np.argmax(base_probs))]
                             corr_base = (pred_base == ideals[i])
-                            base_correct_list_pride.append(corr_base)
+                            base_correct_pride.append(corr_base)
                             base_results_pride.append({
                                 'type': 'result',
                                 'data': {
@@ -1243,64 +911,56 @@ def main():
                             # full
                             agg_full = _aggregate_probs_over_permutations(probs_seq_np, perm_list, k)
                             pred_full = option_ids[int(np.argmax(agg_full))]
-                            full_correct_list_pride.append(pred_full == ideals[i])
+                            full_correct_pride.append(pred_full == ideals[i])
 
-                            # conf stats (pride)
+                            # pride base gap
                             vals = np.sort(base_probs)[::-1]
-                            if vals.shape[0] < 2:
-                                top1, top2 = (vals[0], 0.0) if vals.shape[0] > 0 else (0.0, 0.0)
-                            else:
-                                top1, top2 = vals[0], vals[1]
-                            default_conf_pride.append(float(top1 - top2))
-                            base_nent_conf_pride.append(_nent_conf(base_probs))
+                            top1 = float(vals[0]) if vals.shape[0] > 0 else 0.0
+                            top2 = float(vals[1]) if vals.shape[0] > 1 else 0.0
+                            default_conf_pride.append(top1 - top2)
 
-                            # swap (legacy)
-                            sorted_idx = np.argsort(base_probs)[::-1]
-                            top1_idx = int(sorted_idx[0])
-                            top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else top1_idx
-                            perm_swap = list(identity_perm)
-                            perm_swap[top1_idx], perm_swap[top2_idx] = perm_swap[top2_idx], perm_swap[top1_idx]
-                            swap_idx = perm_index_map.get(tuple(perm_swap), identity_idx)
+                            # probe shift from PRIDE base_probs
+                            shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_probs, k)
+                            probe_perm_idx = cyclic_indices[shift]
 
+                            # base/probe aggregate in content-space
                             probs_base_raw = probs_seq_np[identity_idx]
-                            probs_swap_raw = probs_seq_np[swap_idx]
-                            agg_base = _aggregate_probs_over_permutations(
-                                [probs_base_raw.tolist()],
-                                [perm_list[identity_idx]],
-                                k
-                            )
-                            agg_swap = _aggregate_probs_over_permutations(
-                                [probs_swap_raw.tolist()],
-                                [perm_list[swap_idx]],
-                                k
-                            )
-                            mean_probs = (agg_base + agg_swap) / 2.0
+                            agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [tuple(range(k))], k)
+
+                            probs_probe_raw = probs_seq_np[probe_perm_idx]
+                            agg_probe = _aggregate_probs_over_permutations([probs_probe_raw.tolist()], [cyc_perms[shift]], k)
+
+                            mean_probs = (agg_base + agg_probe) / 2.0
                             vals_mean = np.sort(mean_probs)[::-1]
                             mean_gap = float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0
-                            mean_gap_list_pride.append(mean_gap)
+                            mean_conf_pride_list.append(mean_gap)
 
-                            pred_base_content = option_ids[int(np.argmax(agg_base))]
-                            pred_swap_content = option_ids[int(np.argmax(agg_swap))]
-                            flip_trigger_mask_pride.append(pred_base_content != pred_swap_content)
+                            pred_base2 = option_ids[int(np.argmax(agg_base))]
+                            pred_probe2 = option_ids[int(np.argmax(agg_probe))]
+                            flip_trigger_pride.append(pred_base2 != pred_probe2)
+
+                            pred2 = option_ids[int(np.argmax(mean_probs))]
+                            probe2_correct_pride_list.append(pred2 == ideals[i])
 
                         default_conf_pride = np.asarray(default_conf_pride, dtype=np.float64)
-                        mean_conf_pride = np.asarray(mean_gap_list_pride, dtype=np.float64)
-                        arr_flip_trigger_pride = np.asarray(flip_trigger_mask_pride, dtype=bool)
-                        base_nent_conf_pride = np.asarray(base_nent_conf_pride, dtype=np.float64)
+                        mean_conf_pride = np.asarray(mean_conf_pride_list, dtype=np.float64)
+                        arr_flip_pride = np.asarray(flip_trigger_pride, dtype=bool)
+                        arr_probe2_correct_pride = np.asarray(probe2_correct_pride_list, dtype=bool)
 
                         # save pride base/cyclic derived results
                         cyclic_save_path_pride = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic_pride'
                         if getattr(args, 'option_id_set', None):
                             cyclic_save_path_pride += f'_id-{args.option_id_set}'
                         os.makedirs(cyclic_save_path_pride, exist_ok=True)
-                        save_results(f'{cyclic_save_path_pride}/{subject}.jsonl', cyclic_results_pride, metrics=None)
+                        cyclic_acc_pride = float(cyclic_corrects_pride) / float(len(cyclic_correct_pride)) if len(cyclic_correct_pride) else float('nan')
+                        save_results(f'{cyclic_save_path_pride}/{subject}.jsonl', cyclic_results_pride, metrics={'type':'metric','data':{'accuracy':cyclic_acc_pride}})
 
                         base_save_path_pride = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_pride'
                         if getattr(args, 'option_id_set', None):
                             base_save_path_pride += f'_id-{args.option_id_set}'
                         os.makedirs(base_save_path_pride, exist_ok=True)
-                        base_metrics_pride = {'type': 'metric', 'data': {'accuracy': float(np.mean(np.asarray(base_correct_list_pride, dtype=np.float64)))}}
-                        save_results(f'{base_save_path_pride}/{subject}.jsonl', base_results_pride, base_metrics_pride)
+                        base_acc_pride = float(np.mean(np.asarray(base_correct_pride, dtype=np.float64))) if len(base_correct_pride) else float('nan')
+                        save_results(f'{base_save_path_pride}/{subject}.jsonl', base_results_pride, metrics={'type':'metric','data':{'accuracy':base_acc_pride}})
 
                         curve_save_path_pride = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full_pride'
                         if getattr(args, 'option_id_set', None):
@@ -1309,16 +969,13 @@ def main():
                         pride_curve_obj = _compute_and_save_beta_curve(
                             curve_save_path_=curve_save_path_pride,
                             tag="pride",
-                            per_sample_probs_=per_sample_probs_pride,
-                            base_probs_list_=base_probs_list_pride,
-                            ideals_=ideals,
-                            base_correct_list_=base_correct_list_pride,
-                            cyclic_correct_list_=cyclic_correct_list_pride,
-                            full_correct_list_=full_correct_list_pride,
+                            base_correct_list_=base_correct_pride,
+                            cyclic_correct_list_=cyclic_correct_pride,
+                            full_correct_list_=full_correct_pride,
                             default_conf_=default_conf_pride,
                             mean_conf_=mean_conf_pride,
-                            arr_flip_trigger_global_=arr_flip_trigger_pride,
-                            base_nent_conf_=base_nent_conf_pride,
+                            arr_flip_trigger_global_=arr_flip_pride,
+                            arr_probe2_correct_=arr_probe2_correct_pride,
                             extra_meta={
                                 "pride": {
                                     "prior": [float(x) for x in prior_global.tolist()],
@@ -1328,9 +985,7 @@ def main():
                             },
                         )
 
-                        # ---------------------------------------------------------
-                        # Save + upload compare PNG to W&B (same run) if enabled
-                        # ---------------------------------------------------------
+                        # compare plot upload
                         try:
                             if (wandb_run is not None) and (baseline_curve_obj is not None) and (pride_curve_obj is not None):
                                 compare_png_path = os.path.join(curve_save_path_pride, f"{subject}_beta_curve_compare.png")
@@ -1340,91 +995,29 @@ def main():
                                     out_path=compare_png_path,
                                     title=f"{args.task} {subject} — Baseline vs PRIDE",
                                 )
-                                import wandb  # safe: only when wandb_run exists
-                                wandb_run.log({
-                                    f"beta_curve_compare/{subject}": wandb.Image(compare_png_path),
-                                })
-                                logger.info(_orange(f"W&B uploaded compare PNG: {compare_png_path}"))
+                                import wandb
+                                wandb_run.log({f"beta_curve_compare/{subject}": wandb.Image(compare_png_path)})
                         except Exception as e:
                             logger.warning(f"W&B compare PNG upload failed: {e}")
 
-                        # ---------------------------------------------------------
-                        # [ADD] AvgGap(static) baseline vs PRIDE compare PNG (uses ours_low_conf_percent as-is)
-                        # ---------------------------------------------------------
+                        # optional: ours_avggap compare
                         try:
                             if (wandb_run is not None) and (baseline_curve_obj is not None) and (pride_curve_obj is not None):
-                                avggap_png_path = os.path.join(curve_save_path_pride, f"{subject}_avggap_static_compare.png")
+                                avggap_png_path = os.path.join(curve_save_path_pride, f"{subject}_avggap_compare.png")
                                 _plot_compare_method_curve_png(
                                     baseline_curve_obj=baseline_curve_obj,
                                     pride_curve_obj=pride_curve_obj,
-                                    method_key="ours_avggap_static",
+                                    method_key="ours_avggap",
                                     out_path=avggap_png_path,
-                                    title=f"{args.task} {subject} — AvgGap(static) (p={float(getattr(args,'ours_low_conf_percent',10.0)):.1f}%) Baseline vs PRIDE",
+                                    title=f"{args.task} {subject} — ours_avggap Baseline vs PRIDE",
                                 )
                                 import wandb
-                                wandb_run.log({
-                                    f"avggap_static_compare/{subject}": wandb.Image(avggap_png_path),
-                                })
-                                logger.info(_orange(f"W&B uploaded AvgGap(static) compare PNG: {avggap_png_path}"))
+                                wandb_run.log({f"avggap_compare/{subject}": wandb.Image(avggap_png_path)})
                         except Exception as e:
-                            logger.warning(f"W&B AvgGap(static) compare PNG upload failed: {e}")
-
-                        # ---------------------------------------------------------
-                        # [ADD] th1×th2 grid heatmap (absolute thresholds 0.1..1.0): delta(PRIDE - baseline)
-                        # ---------------------------------------------------------
-                        try:
-                            if (wandb_run is not None):
-                                th_values = np.round(np.linspace(0.1, 1.0, 10), 2)
-                                acc_base_grid, cost_base_grid = _avggap_policy_acc_cost_grid(
-                                    default_conf=default_conf,
-                                    mean_conf=mean_conf,
-                                    base_correct=np.asarray(base_correct_list, dtype=bool),
-                                    cyclic_correct=np.asarray(cyclic_correct_list, dtype=bool),
-                                    k=k,
-                                    th_values=th_values,
-                                )
-                                acc_pride_grid, cost_pride_grid = _avggap_policy_acc_cost_grid(
-                                    default_conf=default_conf_pride,
-                                    mean_conf=mean_conf_pride,
-                                    base_correct=np.asarray(base_correct_list_pride, dtype=bool),
-                                    cyclic_correct=np.asarray(cyclic_correct_list_pride, dtype=bool),
-                                    k=k,
-                                    th_values=th_values,
-                                )
-
-                                delta_acc = (acc_pride_grid - acc_base_grid) * 100.0  # percentage points
-
-                                grid_png_path = os.path.join(curve_save_path_pride, f"{subject}_avggap_grid_delta_acc.png")
-                                plt.figure(figsize=(7.8, 6.2), dpi=160)
-                                vmax = float(np.nanmax(np.abs(delta_acc))) if np.isfinite(delta_acc).any() else 1.0
-                                vmax = max(1e-6, vmax)
-                                im = plt.imshow(
-                                    delta_acc,
-                                    origin="lower",
-                                    cmap="RdBu_r",
-                                    vmin=-vmax,
-                                    vmax=vmax,
-                                    aspect="auto",
-                                    extent=[float(th_values[0]), float(th_values[-1]), float(th_values[0]), float(th_values[-1])],
-                                )
-                                plt.colorbar(im, label="Δ Accuracy (PRIDE − Baseline), pp")
-                                plt.xlabel("th1 (base gap) [absolute]")
-                                plt.ylabel("th2 (avg gap after flip) [absolute]")
-                                plt.title(f"{args.task} {subject} — AvgGap(th1,th2) ΔAcc (PRIDE−Baseline), th∈[0.1,1.0]")
-                                plt.tight_layout()
-                                plt.savefig(grid_png_path)
-                                plt.close()
-
-                                import wandb
-                                wandb_run.log({
-                                    f"avggap_grid_delta_acc/{subject}": wandb.Image(grid_png_path),
-                                })
-                                logger.info(_orange(f"W&B uploaded AvgGap grid delta PNG: {grid_png_path}"))
-                        except Exception as e:
-                            logger.warning(f"W&B AvgGap grid PNG upload failed: {e}")
+                            logger.warning(f"W&B ours_avggap compare PNG upload failed: {e}")
 
                 except Exception as e:
-                    logger.warning(f"Failed to derive cyclic/base from full for subject '{subject}': {e}")
+                    logger.warning(f"Failed to derive beta curves for subject '{subject}': {e}")
                     import traceback
                     traceback.print_exc()
 
