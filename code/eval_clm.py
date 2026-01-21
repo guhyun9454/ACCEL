@@ -300,59 +300,76 @@ def _plot_pride_core_plot(
       - baseline lines: cyclic + switch_cyclic + ours_top2flip
       - PRIDE lines   : switch_cyclic(PRIDE) + ours_top2flip(PRIDE) + ours_avggap(PRIDE)
       - points        : default(ens) + cyclic_ensemble point
-
-    NOTE: "ours_avggap" baseline line is NOT drawn here (per your spec).
     """
-    plt.figure(figsize=(7.8, 5.4), dpi=200)
+    fig, ax = plt.subplots(figsize=(7.8, 5.4), dpi=200)
 
-    # points: default + cyclic ensemble
+    # ----- points: default + cyclic ensemble (no annotate, legend only) -----
     always = baseline_curve_obj.get("always", {})
     if "default" in always:
-        x = float(always["default"]["cost"])
-        y = float(always["default"]["acc"])
-        plt.scatter([x], [y])
-        plt.annotate("default(ens)", (x, y), textcoords="offset points", xytext=(6, 4), fontsize=8)
-
+        ax.scatter(
+            [float(always["default"]["cost"])],
+            [float(always["default"]["acc"])],
+            marker="*",
+            s=140,
+            label="default",
+        )
     if "cyclic" in always:
-        x = float(always["cyclic"]["cost"])
-        y = float(always["cyclic"]["acc"])
-        plt.scatter([x], [y])
-        plt.annotate("cyclic_ens", (x, y), textcoords="offset points", xytext=(6, 4), fontsize=8)
+        ax.scatter(
+            [float(always["cyclic"]["cost"])],
+            [float(always["cyclic"]["acc"])],
+            marker="D",
+            s=70,
+            label="cyclic_ensemble",
+        )
 
-    def _plot_curve_obj(curve_obj: dict, key: str, label: str, lw: float = 1.8):
-        if key not in curve_obj:
+    def _plot_curve_obj(curve_obj: dict, key: str, label: str,
+                        lw: float = 1.8, ls: str = "-", marker: str = "o"):
+        if curve_obj is None or key not in curve_obj:
             return
         xs = [float(v) for v in curve_obj[key]["costs"]]
         ys = [float(v) for v in curve_obj[key]["accuracies"]]
-        pairs = sorted(list(zip(xs, ys)), key=lambda t: t[0])
+        pairs = sorted(zip(xs, ys), key=lambda t: t[0])
         xs = [p[0] for p in pairs]
         ys = [p[1] for p in pairs]
-        plt.plot(xs, ys, marker="o", linewidth=lw, markersize=3)
-        if len(xs) > 0:
-            plt.annotate(label, (xs[-1], ys[-1]), textcoords="offset points", xytext=(6, 0), fontsize=8)
+        ax.plot(xs, ys, linestyle=ls, marker=marker, linewidth=lw, markersize=4, label=label)
 
-    # baseline
-    _plot_curve_obj(baseline_curve_obj, "cyclic", "cyclic")
-    _plot_curve_obj(baseline_curve_obj, "switch_cyclic", "switch_cyclic")
-    _plot_curve_obj(baseline_curve_obj, "ours_top2flip", "ours_top2flip")
+    # ----- baseline (solid) -----
+    _plot_curve_obj(baseline_curve_obj, "cyclic", "cyclic", ls="-", lw=1.8)
+    _plot_curve_obj(baseline_curve_obj, "switch_cyclic", "switch_cyclic", ls="-", lw=1.8)
+    _plot_curve_obj(baseline_curve_obj, "ours_top2flip", "ours_top2flip", ls="-", lw=1.8)
 
-    # PRIDE (policy-specific)
-    # each pride curve obj contains ONLY its own policy key
+    # ----- PRIDE (dashed) -----
     if "switch_cyclic" in pride_curve_by_policy:
-        _plot_curve_obj(pride_curve_by_policy["switch_cyclic"], "switch_cyclic", "switch_cyclic(PRIDE)", lw=2.2)
+        _plot_curve_obj(pride_curve_by_policy["switch_cyclic"], "switch_cyclic", "switch_cyclic(PRIDE)", ls="--", lw=2.2)
     if "ours_top2flip" in pride_curve_by_policy:
-        _plot_curve_obj(pride_curve_by_policy["ours_top2flip"], "ours_top2flip", "top2flip(PRIDE)", lw=2.2)
+        _plot_curve_obj(pride_curve_by_policy["ours_top2flip"], "ours_top2flip", "ours_top2flip(PRIDE)", ls="--", lw=2.2)
     if "ours_avggap" in pride_curve_by_policy:
-        _plot_curve_obj(pride_curve_by_policy["ours_avggap"], "ours_avggap", "avggap(PRIDE)", lw=2.2)
+        _plot_curve_obj(pride_curve_by_policy["ours_avggap"], "ours_avggap", "ours_avggap(PRIDE)", ls="--", lw=2.2)
 
-    plt.xlabel("Computational Cost (× of default)")
-    plt.ylabel("Accuracy")
-    plt.title(title)
-    plt.grid(True, linestyle="--", alpha=0.30)
+    ax.set_xlabel("Computational Cost (× of default)")
+    ax.set_ylabel("Accuracy")
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.30)
+
+    # ✅ legend만 사용 (많으니 위쪽/2줄 형태가 안전)
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=3,
+        frameon=True,
+        fancybox=True,
+        framealpha=1.0,
+        fontsize=9,
+        borderpad=0.4,
+        handletextpad=0.6,
+        columnspacing=1.2,
+    )
+
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
+    fig.tight_layout(rect=[0, 0, 1, 0.88])  # legend 공간 확보
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.12)
+    plt.close(fig)
+
 
 
 def _plot_avggap_baseline_vs_pride_points(
@@ -364,52 +381,59 @@ def _plot_avggap_baseline_vs_pride_points(
     """
     (2) AvgGap baseline vs PRIDE 1장:
       - two lines: ours_avggap(base) vs ours_avggap(PRIDE)
-      - reference: default(ens) point + cyclic line (baseline cyclic)
+      - reference: baseline_default + pride_default (points) + cyclic baseline (optional)
     """
-    plt.figure(figsize=(7.8, 5.4), dpi=200)
+    fig, ax = plt.subplots(figsize=(7.8, 5.4), dpi=200)
 
-    # default point
-    always = baseline_curve_obj.get("always", {})
-    if "default" in always:
-        x = float(always["default"]["cost"])
-        y = float(always["default"]["acc"])
-        plt.scatter([x], [y])
-        plt.annotate("default(ens)", (x, y), textcoords="offset points", xytext=(6, 4), fontsize=8)
+    # baseline default point
+    always_b = baseline_curve_obj.get("always", {})
+    if "default" in always_b:
+        ax.scatter(
+            [float(always_b["default"]["cost"])],
+            [float(always_b["default"]["acc"])],
+            marker="*",
+            s=140,
+            label="baseline_default",
+        )
 
-    # cyclic reference (baseline)
-    if "cyclic" in baseline_curve_obj:
-        xs = [float(v) for v in baseline_curve_obj["cyclic"]["costs"]]
-        ys = [float(v) for v in baseline_curve_obj["cyclic"]["accuracies"]]
-        pairs = sorted(list(zip(xs, ys)), key=lambda t: t[0])
-        xs = [p[0] for p in pairs]
-        ys = [p[1] for p in pairs]
-        plt.plot(xs, ys, marker='o', linewidth=1.2, markersize=3)
-        if len(xs) > 0:
-            plt.annotate("cyclic", (xs[-1], ys[-1]), textcoords="offset points", xytext=(6, 0), fontsize=8)
+    # pride default point (있으면 같이 표시)
+    always_p = pride_curve_obj.get("always", {}) if isinstance(pride_curve_obj, dict) else {}
+    if "default" in always_p:
+        ax.scatter(
+            [float(always_p["default"]["cost"])],
+            [float(always_p["default"]["acc"])],
+            marker="*",
+            s=140,
+            label="pride_default",
+        )
 
-    def _plot_curve(obj: dict, key: str, label: str, lw: float = 2.0):
-        if key not in obj:
+
+    def _plot_curve(obj: dict, key: str, label: str, lw: float, ls: str):
+        if obj is None or key not in obj:
             return
         xs = [float(v) for v in obj[key]["costs"]]
         ys = [float(v) for v in obj[key]["accuracies"]]
-        pairs = sorted(list(zip(xs, ys)), key=lambda t: t[0])
+        pairs = sorted(zip(xs, ys), key=lambda t: t[0])
         xs = [p[0] for p in pairs]
         ys = [p[1] for p in pairs]
-        plt.plot(xs, ys, marker='o', linewidth=lw, markersize=3)
-        if len(xs) > 0:
-            plt.annotate(label, (xs[-1], ys[-1]), textcoords="offset points", xytext=(6, 0), fontsize=8)
+        ax.plot(xs, ys, linestyle=ls, marker="o", linewidth=lw, markersize=6, label=label)
 
-    _plot_curve(baseline_curve_obj, "ours_avggap", "avggap(base)", lw=2.0)
-    _plot_curve(pride_curve_obj, "ours_avggap", "avggap(PRIDE)", lw=2.2)
+    _plot_curve(baseline_curve_obj, "ours_avggap", "baseline_ours_avggap", lw=2.0, ls="-")
+    _plot_curve(pride_curve_obj, "ours_avggap", "pride_ours_avggap", lw=2.0, ls="--")
 
-    plt.xlabel("Computational Cost (× of default)")
-    plt.ylabel("Accuracy")
-    plt.title(title)
-    plt.grid(True, linestyle='--', alpha=0.30)
+    ax.set_xlabel("Computational Cost (× of default)")
+    ax.set_ylabel("Accuracy")
+    ax.set_title(title)
+    ax.grid(True, linestyle="--", alpha=0.30)
+
+    # ✅ 네 예시처럼 좌상단 legend 박스
+    ax.legend(loc="upper left", frameon=True, fancybox=True, framealpha=1.0, fontsize=9)
+
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.12)
+    plt.close(fig)
+
 
 
 def _plot_heatmap_with_text(
