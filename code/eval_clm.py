@@ -152,8 +152,9 @@ def _estimate_pride_global_prior(per_sample_probs: List[np.ndarray],
     """
     Estimate global prior (PriDe) from subset of samples using cyclic permutations only.
     prefix_selector:
-      - "random": deterministic random by subject_key+seed
-      - "low_conf": base_conf 작은 샘플들로 prefix 구성
+      - "random": deterministic random by subject_key+seed (offline shuffle).
+                (online으로 하려면 reservoir sampling 같은 방식으로 동일 분포 구현 가능)
+      - "low_conf": base_conf 작은 샘플들로 prefix 구성 (strict online은 어려움)
     """
     N = len(per_sample_probs)
     ratio = float(max(0.0, min(1.0, ratio_prefix_samples)))
@@ -195,6 +196,37 @@ def _estimate_pride_global_prior(per_sample_probs: List[np.ndarray],
     return prior_global, meta
 
 
+# ============================================================
+# NEW: PRIDE prior estimation overhead cost (amortized)
+# ============================================================
+def _pride_prior_cost_offset_amortized(
+    N: int,
+    k: int,
+    prior_meta: Optional[dict],
+    default_base_cost: float = 1.0,
+) -> float:
+    """
+    PRIDE prior를 추정하려면 (온라인 관점) prefix 샘플들에 대해 cyclic(k회) inference가 추가로 필요.
+    기본(base) 1회는 cyclic 안에 포함되므로 prefix 샘플당 추가비용은 (k - 1).
+
+    평균(샘플당) cost offset:
+      ΔC = num_prefix_samples * (k - 1) / N
+
+    NOTE:
+      - 여기서는 정책 자체의 per-sample cost(1/2/k/...) 위에 "한 번 더" 더해지는 오버헤드로 처리.
+      - 즉 PRIDE 모든 curve point / report / heatmap cost에 +ΔC를 적용.
+    """
+    if N <= 0:
+        return 0.0
+    if prior_meta is None:
+        return 0.0
+    num_prefix = int(prior_meta.get("num_prefix_samples", 0) or 0)
+    if num_prefix <= 0:
+        return 0.0
+    extra_per_prefix = max(0.0, float(k) - float(default_base_cost))  # typically k-1
+    return float(num_prefix) * float(extra_per_prefix) / float(N)
+
+
 # -------------------------
 # Plot helpers (NO FULL-PERM lines)
 # -------------------------
@@ -217,9 +249,10 @@ def _plot_pride_methods_no_full_png(curve_obj: dict,
             if len(c) > 0:
                 plt.plot(c, a, marker='o', label=f'{k}')
 
-    # default point
+    # default point (shifted by cost_offset)
+    cost_offset = float(curve_obj.get("cost_offset", 0.0))
     default_acc = float(curve_obj.get("default_accuracy", float("nan")))
-    plt.scatter([1.0], [default_acc], marker='*', s=170, c='black', label='default')
+    plt.scatter([1.0 + cost_offset], [default_acc], marker='*', s=170, c='black', label='default')
 
     # always-cyclic point (sanity)
     always = curve_obj.get("always", {})
@@ -251,8 +284,10 @@ def _plot_avggap_curve_png(curve_obj: dict,
     a = curve_obj["ours_avggap"]["accuracies"]
     plt.plot(c, a, marker='o', label=label)
 
+    # default point (shifted by cost_offset)
+    cost_offset = float(curve_obj.get("cost_offset", 0.0))
     default_acc = float(curve_obj.get("default_accuracy", float("nan")))
-    plt.scatter([1.0], [default_acc], marker='*', s=170, c='black', label='default')
+    plt.scatter([1.0 + cost_offset], [default_acc], marker='*', s=170, c='black', label='default')
 
     plt.xlabel("Computational Cost (× of default)")
     plt.ylabel("Accuracy")
@@ -284,8 +319,10 @@ def _plot_avggap_compare_png(baseline_curve_obj: dict,
 
     b_def = float(baseline_curve_obj.get("default_accuracy", float("nan")))
     p_def = float(pride_curve_obj.get("default_accuracy", float("nan")))
-    plt.scatter([1.0], [b_def], marker='*', s=170, c='black', label='baseline default')
-    plt.scatter([1.0], [p_def], marker='*', s=170, c='gray', label='pride default')
+    b_off = float(baseline_curve_obj.get("cost_offset", 0.0))
+    p_off = float(pride_curve_obj.get("cost_offset", 0.0))
+    plt.scatter([1.0 + b_off], [b_def], marker='*', s=170, c='black', label='baseline default')
+    plt.scatter([1.0 + p_off], [p_def], marker='*', s=170, c='gray', label='pride default')
 
     plt.xlabel("Computational Cost (× of default)")
     plt.ylabel("Accuracy")
@@ -398,10 +435,14 @@ def _policy_metrics_avggap_beta0(default_conf: np.ndarray,
                                  probe2_correct: np.ndarray,
                                  k: int,
                                  th1_percent: float,
-                                 th2_percent: float) -> Tuple[float, float]:
+                                 th2_percent: float,
+                                 cost_offset: float = 0.0) -> Tuple[float, float]:
     """
     ours_avggap 정책을 beta=0에서 (th1, th2 percentile)로 평가.
     return: (avg_cost, acc)
+
+    cost_offset:
+      - PRIDE prior 추정 오버헤드(평균)를 전체 cost에 더하고 싶을 때 사용.
     """
     N = len(base_correct)
     if N == 0:
@@ -425,7 +466,7 @@ def _policy_metrics_avggap_beta0(default_conf: np.ndarray,
                 total_cost += 2.0
                 corrects += 1 if bool(probe2_correct[i]) else 0
 
-    return total_cost / float(N), corrects / float(N)
+    return (total_cost / float(N)) + float(cost_offset), corrects / float(N)
 
 
 def _compute_curves_for_one_percentile(subject: str,
@@ -440,11 +481,17 @@ def _compute_curves_for_one_percentile(subject: str,
                                       flip_trigger: np.ndarray,
                                       probe2_correct: np.ndarray,
                                       perc_value: float,
-                                      betas: Optional[List[float]] = None) -> dict:
+                                      betas: Optional[List[float]] = None,
+                                      cost_offset: float = 0.0) -> dict:
     """
     curve key:
       cyclic, full, switch_full, switch_cyclic, ours_top2flip, ours_avggap (+ default_accuracy)
     + always(default/cyclic/full ensemble)도 같이 저장해서 리포트 cost 혼동 방지
+
+    cost_offset:
+      - PRIDE prior 추정 비용을 "평균 오버헤드"로 cost에 더할 때 사용.
+      - baseline은 0.0
+      - pride는 ΔC = num_prefix*(k-1)/N 등을 넣어주면 됨
     """
     if betas is None:
         betas = [i / 10.0 for i in range(11)]
@@ -574,6 +621,26 @@ def _compute_curves_for_one_percentile(subject: str,
 
         curve_avggap.append((total_cost / float(N), corrects / float(N)))
 
+    # ------------------------------------------------------------
+    # APPLY COST OFFSET (PRIDE prior estimation overhead)
+    # ------------------------------------------------------------
+    off = float(cost_offset) if cost_offset is not None else 0.0
+    if abs(off) > 0.0:
+        curve_cyc = [(float(c) + off, float(a)) for (c, a) in curve_cyc]
+        curve_full = [(float(c) + off, float(a)) for (c, a) in curve_full]
+        curve_switch_full = [(float(c) + off, float(a)) for (c, a) in curve_switch_full]
+        curve_switch_cyc = [(float(c) + off, float(a)) for (c, a) in curve_switch_cyc]
+        curve_top2flip = [(float(c) + off, float(a)) for (c, a) in curve_top2flip]
+        curve_avggap = [(float(c) + off, float(a)) for (c, a) in curve_avggap]
+
+        always_default_cost = 1.0 + off
+        always_cyc_cost = C_cyc + off
+        always_full_cost = C_full + off
+    else:
+        always_default_cost = 1.0
+        always_cyc_cost = C_cyc
+        always_full_cost = C_full
+
     curve_obj = {
         "subject": subject,
         "tag": str(tag),
@@ -582,11 +649,14 @@ def _compute_curves_for_one_percentile(subject: str,
         "betas": [float(b) for b in betas],
         "default_accuracy": float(default_acc),
 
+        # cost offset included in plots/reports
+        "cost_offset": float(off),
+
         # always ensemble (리포트/검증용)
         "always": {
-            "default": {"cost": 1.0, "acc": float(default_acc)},
-            "cyclic": {"cost": float(C_cyc), "acc": float(cyclic_acc_always)},
-            "full": {"cost": float(C_full), "acc": float(full_acc_always)},
+            "default": {"cost": float(always_default_cost), "acc": float(default_acc)},
+            "cyclic": {"cost": float(always_cyc_cost), "acc": float(cyclic_acc_always)},
+            "full": {"cost": float(always_full_cost), "acc": float(full_acc_always)},
         },
 
         # curves
@@ -606,6 +676,7 @@ def _log_beta0_report(curve_obj: dict, prefix: str):
     NOTE:
       - cyclic/full은 mix-curve의 beta=0이 base로 떨어지는 게 정상이라,
         여기서는 always(ensemble) 기준으로 cost=k / cost=factorial(k)로 출력.
+      - PRIDE는 cost_offset이 always에 이미 반영되어 출력됨.
     """
     logger.info(_purple(f"==== {prefix} Derived policy report (beta=0, p={curve_obj.get('percentile')}) ===="))
 
@@ -956,6 +1027,7 @@ def main():
                             flip_trigger=arr_flip_trigger,
                             probe2_correct=arr_probe2_correct,
                             perc_value=float(perc),
+                            cost_offset=0.0,
                         )
                         if cobj:
                             curve_objs_baseline.append(cobj)
@@ -994,6 +1066,18 @@ def main():
                             subject_key=subject_key,
                             base_conf=default_conf,
                         )
+
+                        # NEW: amortized cost overhead for PRIDE prior estimation
+                        pride_cost_offset = _pride_prior_cost_offset_amortized(
+                            N=len(per_sample_probs),
+                            k=k,
+                            prior_meta=prior_meta,
+                            default_base_cost=1.0,
+                        )
+                        logger.info(_blue(
+                            f"[PRIDE] cost_offset(amortized) = {pride_cost_offset:.4f} "
+                            f"(num_prefix={int(prior_meta.get('num_prefix_samples', 0))}, k={k}, N={len(per_sample_probs)})"
+                        ))
 
                         per_sample_probs_pride = [
                             _apply_pride_global_prior_to_probs_seq(ps, prior_global)
@@ -1129,12 +1213,15 @@ def main():
                                 flip_trigger=arr_flip_pride,
                                 probe2_correct=arr_probe2_correct_pride,
                                 perc_value=float(perc),
+                                cost_offset=float(pride_cost_offset),
                             )
                             if cobjp:
                                 cobjp["pride"] = {
                                     "prior": [float(x) for x in prior_global.tolist()],
                                     "prior_map": {str(k_): float(v) for k_, v in zip(option_ids, prior_global.tolist())},
                                     "meta": prior_meta,
+                                    "cost_overhead_amortized": float(pride_cost_offset),
+                                    "cost_overhead_formula": "ΔC = num_prefix_samples * (k-1) / N",
                                 }
                                 curve_objs_pride.append(cobjp)
                                 pride_by_p[float(perc)] = cobjp
@@ -1206,6 +1293,7 @@ def main():
                                     k=k,
                                     th1_percent=th1p,
                                     th2_percent=th2p,
+                                    cost_offset=0.0,
                                 )
                                 base_acc_grid[iy, ix] = a_b
                                 base_cost_grid[iy, ix] = c_b
@@ -1219,6 +1307,7 @@ def main():
                                     k=k,
                                     th1_percent=th1p,
                                     th2_percent=th2p,
+                                    cost_offset=float(pride_cost_offset),
                                 )
                                 pride_acc_grid[iy, ix] = a_p
                                 pride_cost_grid[iy, ix] = c_p
