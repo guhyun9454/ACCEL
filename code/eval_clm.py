@@ -351,19 +351,8 @@ def _plot_pride_core_plot(
     ax.set_title(title)
     ax.grid(True, linestyle="--", alpha=0.30)
 
-    # ✅ legend만 사용 (많으니 위쪽/2줄 형태가 안전)
-    ax.legend(
-        loc="lower center",
-        bbox_to_anchor=(0.5, 1.02),
-        ncol=3,
-        frameon=True,
-        fancybox=True,
-        framealpha=1.0,
-        fontsize=9,
-        borderpad=0.4,
-        handletextpad=0.6,
-        columnspacing=1.2,
-    )
+    ax.legend(loc="lower right", frameon=True, fancybox=True, framealpha=1.0, fontsize=9)
+
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.tight_layout(rect=[0, 0, 1, 0.88])  # legend 공간 확보
