@@ -162,7 +162,7 @@ def _policy_action_beta0(policy: str,
                          th1: float,
                          th2: float) -> str:
     """
-    Returns action in {"base", "probe2", "cyclic"} for beta=0 (no prefix).
+    Returns action in {"base", "probe2", "cyclic"} for beta=0 (no offline prefix).
 
     - switch_cyclic:
         if dc >= th1 -> base
@@ -198,7 +198,7 @@ def _collect_policy_pool_ids_beta0(policy: str,
                                   perc_value: float) -> Tuple[List[int], Dict[str, float]]:
     """
     Pool IDs = EXACTLY those samples that THIS policy sends to CYCLIC at beta=0.
-    (즉, prior는 '공짜로 이미 cyclic을 태운 샘플'에서만 추정)
+    (prior는 '공짜로 이미 cyclic을 태운 샘플'에서만 추정)
 
     percentile p로 th1/th2를 잡는다 (전체 데이터 기반, beta=0).
     """
@@ -281,40 +281,48 @@ def _estimate_pride_prior_from_pool_ids(per_sample_probs: List[np.ndarray],
 
 
 # -------------------------
-# Plot helpers (요청: 2개만)
+# Plot helpers (요청: 2개만, "beta curve 라인"으로)
 # -------------------------
 def _plot_derived_points_no_full(curve_obj: dict,
                                  out_path: str,
                                  title: str,
                                  include_switch_full: bool = False):
     """
-    요청 1) 'full permu 없는' derived(beta=0) 포인트 그래프.
-    - default, cyclic(ensemble), 그리고 derived policies(beta=0)만 표시
-    - full(ensemble) 및 full을 쓰는 라인(기본적으로 switch_full) 제거
+    (요청 1) 'full permu 없는' 그래프를 beta sampling 곡선으로 그림.
+    - 포함(라인): cyclic, switch_cyclic, ours_top2flip, ours_avggap
+    - 포함(점): default(ensemble)
+    - 제외: full, switch_full (include_switch_full=True면 switch_full만 옵션으로 포함 가능)
     """
-    plt.figure(figsize=(7.4, 5.0), dpi=180)
+    plt.figure(figsize=(7.6, 5.2), dpi=180)
 
-    pts = []
+    # default point
     always = curve_obj.get("always", {})
     if "default" in always:
-        pts.append(("default", float(always["default"]["cost"]), float(always["default"]["acc"])))
-    if "cyclic" in always:
-        pts.append(("cyclic(ens)", float(always["cyclic"]["cost"]), float(always["cyclic"]["acc"])))
+        x = float(always["default"]["cost"])
+        y = float(always["default"]["acc"])
+        plt.scatter([x], [y])
+        plt.annotate("default(ens)", (x, y), textcoords="offset points", xytext=(5, 4), fontsize=8)
 
-    # derived (beta=0)
-    for key in ["switch_cyclic", "ours_top2flip", "ours_avggap"]:
-        if key in curve_obj:
-            pts.append((key, float(curve_obj[key]["costs"][0]), float(curve_obj[key]["accuracies"][0])))
+    def _plot_curve(key: str, label: str):
+        if key not in curve_obj:
+            return
+        xs = [float(v) for v in curve_obj[key]["costs"]]
+        ys = [float(v) for v in curve_obj[key]["accuracies"]]
+        # cost-축이 증가하도록 정렬 (beta 증가하면 cost가 줄어드는 구조라 뒤집히는 걸 방지)
+        pairs = sorted(list(zip(xs, ys)), key=lambda t: t[0])
+        xs = [p[0] for p in pairs]
+        ys = [p[1] for p in pairs]
+        plt.plot(xs, ys, marker='o', linewidth=1.6, markersize=3)
+        if len(xs) > 0:
+            plt.annotate(label, (xs[-1], ys[-1]), textcoords="offset points", xytext=(6, 0), fontsize=8)
 
-    if include_switch_full and "switch_full" in curve_obj:
-        pts.append(("switch_full", float(curve_obj["switch_full"]["costs"][0]), float(curve_obj["switch_full"]["accuracies"][0])))
+    _plot_curve("cyclic", "cyclic")
+    _plot_curve("switch_cyclic", "switch_cyclic")
+    _plot_curve("ours_top2flip", "ours_top2flip")
+    _plot_curve("ours_avggap", "ours_avggap")
 
-    xs = [p[1] for p in pts]
-    ys = [p[2] for p in pts]
-
-    plt.scatter(xs, ys)
-    for name, x, y in pts:
-        plt.annotate(name, (x, y), textcoords="offset points", xytext=(5, 4), fontsize=8)
+    if include_switch_full:
+        _plot_curve("switch_full", "switch_full")
 
     plt.xlabel("Computational Cost (× of default)")
     plt.ylabel("Accuracy")
@@ -331,31 +339,45 @@ def _plot_avggap_baseline_vs_pride_points(baseline_curve_obj: dict,
                                          out_path: str,
                                          title: str):
     """
-    요청 2) ours_avggap baseline vs PRIDE_FREE(ours_avggap) 비교 포인트(둘만) + default/cyclic(ens) 참고점
+    (요청 2) ours_avggap baseline vs PRIDE_FREE 비교를 beta sampling 곡선으로 그림.
+    - 두 줄: avggap(base), avggap(pride)
+    - 참고: default(ens) 점 + cyclic(라인: baseline의 cyclic curve)
     """
-    plt.figure(figsize=(7.4, 5.0), dpi=180)
+    plt.figure(figsize=(7.6, 5.2), dpi=180)
 
-    pts = []
+    # default point
     always = baseline_curve_obj.get("always", {})
     if "default" in always:
-        pts.append(("default", float(always["default"]["cost"]), float(always["default"]["acc"])))
-    if "cyclic" in always:
-        pts.append(("cyclic(ens)", float(always["cyclic"]["cost"]), float(always["cyclic"]["acc"])))
+        x = float(always["default"]["cost"])
+        y = float(always["default"]["acc"])
+        plt.scatter([x], [y])
+        plt.annotate("default(ens)", (x, y), textcoords="offset points", xytext=(5, 4), fontsize=8)
 
-    if "ours_avggap" in baseline_curve_obj:
-        pts.append(("avggap(base)", float(baseline_curve_obj["ours_avggap"]["costs"][0]),
-                    float(baseline_curve_obj["ours_avggap"]["accuracies"][0])))
+    # cyclic reference (baseline curve)
+    if "cyclic" in baseline_curve_obj:
+        xs = [float(v) for v in baseline_curve_obj["cyclic"]["costs"]]
+        ys = [float(v) for v in baseline_curve_obj["cyclic"]["accuracies"]]
+        pairs = sorted(list(zip(xs, ys)), key=lambda t: t[0])
+        xs = [p[0] for p in pairs]
+        ys = [p[1] for p in pairs]
+        plt.plot(xs, ys, marker='o', linewidth=1.2, markersize=3)
+        if len(xs) > 0:
+            plt.annotate("cyclic", (xs[-1], ys[-1]), textcoords="offset points", xytext=(6, 0), fontsize=8)
 
-    if "ours_avggap" in pride_curve_obj:
-        pts.append(("avggap(pride)", float(pride_curve_obj["ours_avggap"]["costs"][0]),
-                    float(pride_curve_obj["ours_avggap"]["accuracies"][0])))
+    def _plot_curve(obj: dict, key: str, label: str):
+        if key not in obj:
+            return
+        xs = [float(v) for v in obj[key]["costs"]]
+        ys = [float(v) for v in obj[key]["accuracies"]]
+        pairs = sorted(list(zip(xs, ys)), key=lambda t: t[0])
+        xs = [p[0] for p in pairs]
+        ys = [p[1] for p in pairs]
+        plt.plot(xs, ys, marker='o', linewidth=1.8, markersize=3)
+        if len(xs) > 0:
+            plt.annotate(label, (xs[-1], ys[-1]), textcoords="offset points", xytext=(6, 0), fontsize=8)
 
-    xs = [p[1] for p in pts]
-    ys = [p[2] for p in pts]
-
-    plt.scatter(xs, ys)
-    for name, x, y in pts:
-        plt.annotate(name, (x, y), textcoords="offset points", xytext=(5, 4), fontsize=8)
+    _plot_curve(baseline_curve_obj, "ours_avggap", "avggap(base)")
+    _plot_curve(pride_curve_obj, "ours_avggap", "avggap(pride)")
 
     plt.xlabel("Computational Cost (× of default)")
     plt.ylabel("Accuracy")
@@ -505,6 +527,11 @@ def _compute_curves_for_one_percentile(subject: str,
     baseline curves:
       cyclic, full, switch_full, switch_cyclic, ours_top2flip, ours_avggap
     + always(default/cyclic/full ensemble) points
+
+    beta 의미: offline prefix 비율 (n = beta*N)
+      - first n samples: base only (cost=1)
+      - remaining N-n: policy applied (potentially expensive)
+    => beta↑ (offline↑)  → cost↓
     """
     if betas is None:
         betas = [i / 10.0 for i in range(11)]
@@ -522,21 +549,20 @@ def _compute_curves_for_one_percentile(subject: str,
     cyclic_acc_always = float(np.mean(np.asarray(cyclic_correct_list, dtype=np.float64)))
     full_acc_always = float(np.mean(np.asarray(full_correct_list, dtype=np.float64)))
 
-    # 1) beta mix (cyclic/full)
+    # 1) cyclic/full beta curves  (FIX: derived policy들과 동일 의미로)
     curve_cyc = []
     curve_full = []
     for beta in betas:
         n = int(N * beta + 1e-9)
-        if n > 0:
-            acc_cyc_mix = (sum(cyclic_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
-            acc_full_mix = (sum(full_correct_list[:n]) + sum(base_correct_list[n:])) / float(N)
-        else:
-            acc_cyc_mix = sum(base_correct_list) / float(N)
-            acc_full_mix = sum(base_correct_list) / float(N)
-        cost_cyc = beta * C_cyc + (1.0 - beta) * 1.0
-        cost_full = beta * C_full + (1.0 - beta) * 1.0
-        curve_cyc.append((cost_cyc, acc_cyc_mix))
-        curve_full.append((cost_full, acc_full_mix))
+
+        acc_cyc = (sum(base_correct_list[:n]) + sum(cyclic_correct_list[n:])) / float(N)
+        acc_full = (sum(base_correct_list[:n]) + sum(full_correct_list[n:])) / float(N)
+
+        cost_cyc = beta * 1.0 + (1.0 - beta) * C_cyc
+        cost_full = beta * 1.0 + (1.0 - beta) * C_full
+
+        curve_cyc.append((cost_cyc, acc_cyc))
+        curve_full.append((cost_full, acc_full))
 
     # 2) switch curves
     curve_switch_full = []
@@ -550,6 +576,7 @@ def _compute_curves_for_one_percentile(subject: str,
         total_cost_sc = 0.0
         corrects_sc = 0
 
+        # offline prefix: base only
         for i in range(0, n):
             total_cost_sf += 1.0
             total_cost_sc += 1.0
@@ -557,6 +584,7 @@ def _compute_curves_for_one_percentile(subject: str,
                 corrects_sf += 1
                 corrects_sc += 1
 
+        # online: apply switch
         for i in range(n, N):
             amb = (float(default_conf[i]) < thresh)
 
@@ -1135,13 +1163,13 @@ def main():
                             baseline_by_p[perc] = cobj
                             _log_baseline_report(cobj)
 
-                            # (요청 1) full permu 없는 derived(beta=0) 그래프 저장
+                            # (요청 1) full permu 없는 그래프: beta curve 라인
                             ptag = f"p{int(round(perc))}"
                             out_png = os.path.join(curve_save_path, f"{subject}_{ptag}_derived_no_full.png")
                             _plot_derived_points_no_full(
                                 curve_obj=cobj,
                                 out_path=out_png,
-                                title=f"{args.task} {subject} — Derived(beta=0) (no full) [{ptag}]",
+                                title=f"{args.task} {subject} — Beta curves (no full) [{ptag}]",
                                 include_switch_full=False,
                             )
                             if wandb_ok and wandb_run is not None:
@@ -1154,7 +1182,7 @@ def main():
                     # PRIDE_FREE:
                     # - pool을 policy별로 따로 만들고,
                     # - 그 policy의 prior로 그 policy만 평가해서 한 줄만 로그
-                    # - (요청 2) ours_avggap baseline vs pride 비교 그래프 1장 생성
+                    # - (요청 2) ours_avggap baseline vs pride 비교 그래프 1장 생성 (beta curve)
                     # - grid는 기존대로 3장 유지 (baseline/pride/delta)
                     # =========================================================
                     if not bool(getattr(args, "disable_pride", False)) and len(per_sample_probs) > 0:
@@ -1185,7 +1213,7 @@ def main():
                                     ema_alpha=pride_ema_alpha,
                                 )
 
-                                # (3) apply correction to ALL samples
+                                # (3) apply correction to ALL samples (cost free)
                                 per_sample_probs_pride = [
                                     _apply_pride_global_prior_to_probs_seq(ps, prior_global)
                                     for ps in per_sample_probs
@@ -1373,7 +1401,7 @@ def main():
                                             f"grids/{subject}/{ptag}/delta_pride_free": wandb.Image(grid_delta_png),
                                         })
 
-                            # (요청 2) avggap baseline vs pride 비교 그래프 1장
+                            # (요청 2) avggap baseline vs pride 비교 그래프 1장 (beta curve)
                             if (perc in baseline_by_p) and ("ours_avggap" in pride_free_curve_by_policy):
                                 out_cmp = os.path.join(curve_save_path, f"{subject}_{ptag}_avggap_baseline_vs_pride_free.png")
                                 _plot_avggap_baseline_vs_pride_points(
