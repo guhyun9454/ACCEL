@@ -150,10 +150,8 @@ def _estimate_pride_global_prior(per_sample_probs: List[np.ndarray],
                                  subject_key: str,
                                  base_conf: Optional[np.ndarray] = None) -> Tuple[np.ndarray, dict]:
     """
-    Estimate global prior (PriDe) from subset of samples using cyclic permutations only.
-    prefix_selector:
-      - "random": deterministic random by subject_key+seed
-      - "low_conf": base_conf 작은 샘플들로 prefix 구성
+    (기존) prefix subset에서 prior 추정.
+    NOTE: 지금은 '공짜 prior'를 위해 아래 free estimator들을 사용.
     """
     N = len(per_sample_probs)
     ratio = float(max(0.0, min(1.0, ratio_prefix_samples)))
@@ -195,6 +193,132 @@ def _estimate_pride_global_prior(per_sample_probs: List[np.ndarray],
     return prior_global, meta
 
 
+# =========================================================
+# PRIDE (FREE) helpers: "policy가 cyclic으로 보낸 샘플"만으로 prior 추정 (추가 cost 0)
+# =========================================================
+def _quantile(arr: np.ndarray, p01: float) -> float:
+    arr = np.asarray(arr, dtype=np.float64)
+    if arr.size == 0:
+        return float("nan")
+    p01 = float(max(0.0, min(1.0, p01)))
+    return float(np.quantile(arr, p01))
+
+
+def _policy_cyclic_pool_ids_beta0(
+    policy_name: str,
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    flip_trigger: np.ndarray,
+    perc_value: float,
+) -> Tuple[List[int], dict]:
+    """
+    beta=0 기준에서 "해당 policy가 cyclic으로 라우팅하는 샘플" 인덱스(pool_ids)를 만든다.
+    (추가 호출 없음 → prior 추정 extra cost=0)
+
+    policy_name:
+      - "switch_cyclic"
+      - "ours_top2flip"
+      - "ours_avggap"
+    """
+    N = len(default_conf)
+    perc01 = float(max(0.0, min(100.0, float(perc_value)))) / 100.0
+
+    th1 = _quantile(default_conf, perc01)
+    th2 = _quantile(mean_conf, perc01)
+
+    pool = []
+    if policy_name == "switch_cyclic":
+        # amb => cyclic
+        for i in range(N):
+            if float(default_conf[i]) < th1:
+                pool.append(i)
+        meta = {"policy": policy_name, "perc_value": float(perc_value), "th1": float(th1)}
+        return pool, meta
+
+    if policy_name == "ours_top2flip":
+        # low conf AND flip_trigger => cyclic
+        for i in range(N):
+            if float(default_conf[i]) < th1 and bool(flip_trigger[i]):
+                pool.append(i)
+        meta = {"policy": policy_name, "perc_value": float(perc_value), "th1": float(th1)}
+        return pool, meta
+
+    if policy_name == "ours_avggap":
+        # low conf AND mean_gap<th2 => cyclic
+        for i in range(N):
+            if float(default_conf[i]) < th1 and float(mean_conf[i]) < th2:
+                pool.append(i)
+        meta = {"policy": policy_name, "perc_value": float(perc_value), "th1": float(th1), "th2": float(th2)}
+        return pool, meta
+
+    # fallback: empty
+    return [], {"policy": policy_name, "perc_value": float(perc_value), "note": "unknown policy"}
+
+
+def _estimate_pride_global_prior_free_from_policy_cyclic(
+    per_sample_probs: List[np.ndarray],
+    cyclic_indices: List[int],
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    flip_trigger: np.ndarray,
+    perc_value: float,
+    k: int,
+    option_ids: List[str],
+    policy_name: str,
+) -> Tuple[np.ndarray, dict, List[int]]:
+    """
+    "공짜 prior" 버전:
+      - prior 추정에 쓸 샘플은 'policy_name 정책이 cyclic으로 실제로 보낸 샘플'만 사용
+      - 추가 cyclic 호출이 없으므로 extra cost=0
+    """
+    N = len(per_sample_probs)
+    if N <= 0:
+        prior = np.ones((k,), dtype=np.float64) / float(k)
+        return prior, {"mode": "free_from_policy_cyclic", "policy": policy_name, "num_pool": 0}, []
+
+    pool_ids, pool_meta = _policy_cyclic_pool_ids_beta0(
+        policy_name=policy_name,
+        default_conf=default_conf,
+        mean_conf=mean_conf,
+        flip_trigger=flip_trigger,
+        perc_value=float(perc_value),
+    )
+
+    if len(pool_ids) == 0:
+        prior = np.ones((k,), dtype=np.float64) / float(k)
+        meta = {
+            "mode": "free_from_policy_cyclic",
+            "policy": policy_name,
+            "perc_value": float(perc_value),
+            "num_pool": 0,
+            "note": "No cyclic-routed samples under this policy; fallback to uniform prior. (extra cost=0)",
+        }
+        meta.update(pool_meta)
+        meta["prior_map"] = {str(k_): float(v) for k_, v in zip(option_ids, prior.tolist())}
+        return prior, meta, pool_ids
+
+    priors = []
+    for i in pool_ids:
+        observed = np.asarray([per_sample_probs[i][j] for j in cyclic_indices], dtype=np.float64)  # (k,k)
+        _, _, prior_i = debias_simple(observed)
+        priors.append(np.asarray(prior_i, dtype=np.float64))
+
+    prior_global = np.mean(np.stack(priors, axis=0), axis=0)
+    prior_global = prior_global / (prior_global.sum() + 1e-12)
+
+    meta = {
+        "mode": "free_from_policy_cyclic",
+        "policy": policy_name,
+        "perc_value": float(perc_value),
+        "num_pool": int(len(pool_ids)),
+        "pool_ratio_of_all": float(len(pool_ids)) / float(N),
+        "note": "Uses only policy-triggered cyclic samples; extra cost=0.",
+        "prior_map": {str(k_): float(v) for k_, v in zip(option_ids, prior_global.tolist())},
+    }
+    meta.update(pool_meta)
+    return prior_global, meta, pool_ids
+
+
 # -------------------------
 # Plot helpers (NO FULL-PERM lines)
 # -------------------------
@@ -209,7 +333,6 @@ def _plot_pride_methods_no_full_png(curve_obj: dict,
 
     plt.figure(figsize=(8.0, 5.6), dpi=180)
 
-    # curves
     for k in keys:
         if k in curve_obj and "costs" in curve_obj[k] and "accuracies" in curve_obj[k]:
             c = curve_obj[k]["costs"]
@@ -217,11 +340,9 @@ def _plot_pride_methods_no_full_png(curve_obj: dict,
             if len(c) > 0:
                 plt.plot(c, a, marker='o', label=f'{k}')
 
-    # default point
     default_acc = float(curve_obj.get("default_accuracy", float("nan")))
     plt.scatter([1.0], [default_acc], marker='*', s=170, c='black', label='default')
 
-    # always-cyclic point (sanity)
     always = curve_obj.get("always", {})
     if "cyclic" in always:
         plt.scatter([float(always["cyclic"]["cost"])],
@@ -383,14 +504,6 @@ def _parse_percent_value_list(v) -> List[float]:
     return [10.0]
 
 
-def _quantile(arr: np.ndarray, p01: float) -> float:
-    arr = np.asarray(arr, dtype=np.float64)
-    if arr.size == 0:
-        return float("nan")
-    p01 = float(max(0.0, min(1.0, p01)))
-    return float(np.quantile(arr, p01))
-
-
 def _policy_metrics_avggap_beta0(default_conf: np.ndarray,
                                  mean_conf: np.ndarray,
                                  base_correct: List[bool],
@@ -458,12 +571,11 @@ def _compute_curves_for_one_percentile(subject: str,
     C_cyc = float(k)
     C_full = float(len(perm_list))
 
-    # always ensemble acc (sanity)
     default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
     cyclic_acc_always = float(np.mean(np.asarray(cyclic_correct_list, dtype=np.float64)))
     full_acc_always = float(np.mean(np.asarray(full_correct_list, dtype=np.float64)))
 
-    # 1) beta mix (cyclic/full)  ※ 첫 점(beta=0)은 base가 맞음 (그래서 리포트에선 always로 찍는다)
+    # 1) beta mix (cyclic/full)
     curve_cyc = []
     curve_full = []
     for beta in betas:
@@ -491,7 +603,6 @@ def _compute_curves_for_one_percentile(subject: str,
         total_cost_sc = 0.0
         corrects_sc = 0
 
-        # online prefix: base만
         for i in range(0, n):
             total_cost_sf += 1.0
             total_cost_sc += 1.0
@@ -582,14 +693,12 @@ def _compute_curves_for_one_percentile(subject: str,
         "betas": [float(b) for b in betas],
         "default_accuracy": float(default_acc),
 
-        # always ensemble (리포트/검증용)
         "always": {
             "default": {"cost": 1.0, "acc": float(default_acc)},
             "cyclic": {"cost": float(C_cyc), "acc": float(cyclic_acc_always)},
             "full": {"cost": float(C_full), "acc": float(full_acc_always)},
         },
 
-        # curves
         "cyclic": {"costs": [float(c) for c, _ in curve_cyc], "accuracies": [float(a) for _, a in curve_cyc]},
         "full": {"costs": [float(c) for c, _ in curve_full], "accuracies": [float(a) for _, a in curve_full]},
         "switch_full": {"costs": [float(c) for c, _ in curve_switch_full], "accuracies": [float(a) for _, a in curve_switch_full]},
@@ -617,7 +726,6 @@ def _log_beta0_report(curve_obj: dict, prefix: str):
     if "full" in always:
         logger.info(f"{prefix} full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}")
 
-    # derived policies at beta=0 (curve 첫 점)
     def _p(key: str):
         c = curve_obj[key]["costs"][0]
         a = curve_obj[key]["accuracies"][0]
@@ -661,6 +769,7 @@ def main():
                 "pride_ratio_prefix_samples": getattr(args, "pride_ratio_prefix_samples", 0.05),
                 "pride_prefix_selector": getattr(args, "pride_prefix_selector", "random"),
                 "pride_seed": getattr(args, "pride_seed", 0),
+                "pride_free_from_policy_cyclic": True,
             }
             wandb_run = wandb.init(project=project, entity=entity, name=run_name, config=cfg)
             logger.info(_blue(f"W&B init ok: project={project}, entity={entity}, name={run_name}"))
@@ -962,7 +1071,6 @@ def main():
                             baseline_by_p[float(perc)] = cobj
                             _log_beta0_report(cobj, prefix="BASELINE")
 
-                            # baseline avggap 단독 plot (full permu 없음)
                             ptag = f"p{int(round(float(perc)))}"
                             base_avggap_png = os.path.join(curve_save_path, f"{subject}_{ptag}_avggap_baseline.png")
                             _plot_avggap_curve_png(
@@ -978,290 +1086,295 @@ def main():
                     save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', curve_objs_baseline, metrics=None)
 
                     # =========================================================
-                    # PRIDE
+                    # PRIDE (FREE): policy별로 "그 policy가 cyclic으로 보낸 샘플"만으로 prior 추정
                     # =========================================================
-                    curve_objs_pride = []
-                    pride_by_p = {}
-
                     if not bool(getattr(args, "disable_pride", False)) and len(per_sample_probs) > 0:
-                        subject_key = f"{args.task}|{args.num_few_shot}|{args.model_name}|{subject}|{getattr(args,'option_id_set','')}"
-                        prior_global, prior_meta = _estimate_pride_global_prior(
-                            per_sample_probs=per_sample_probs,
-                            cyclic_indices=cyclic_indices,
-                            ratio_prefix_samples=float(getattr(args, "pride_ratio_prefix_samples", 0.05)),
-                            prefix_selector=str(getattr(args, "pride_prefix_selector", "random")),
-                            base_seed=int(getattr(args, "pride_seed", 0)),
-                            subject_key=subject_key,
-                            base_conf=default_conf,
-                        )
-
-                        per_sample_probs_pride = [
-                            _apply_pride_global_prior_to_probs_seq(ps, prior_global)
-                            for ps in per_sample_probs
-                        ]
-
-                        base_correct_pride = []
-                        cyclic_correct_pride = []
-                        full_correct_pride = []
-
-                        default_conf_pride = []
-                        mean_conf_pride_list = []
-                        flip_trigger_pride = []
-                        probe2_correct_pride_list = []
-
-                        base_results_pride = []
-                        cyclic_results_pride = []
-                        cyclic_corrects_pride = 0
-
-                        for i in range(len(per_sample_probs_pride)):
-                            probs_seq_np = per_sample_probs_pride[i]
-                            s_idx = sample_idxs[i] if i < len(sample_idxs) else i
-                            s_prompt = sample_prompts[i] if i < len(sample_prompts) else None
-                            s_options = sample_options_list[i] if i < len(sample_options_list) else None
-
-                            # cyclic
-                            cyc_probs = [probs_seq_np[idx] for idx in cyclic_indices]
-                            cyclic_results_pride.append({
-                                'type': 'result',
-                                'data': {
-                                    'idx': s_idx,
-                                    'prompt': s_prompt,
-                                    'options': s_options,
-                                    'probs': [cp.tolist() for cp in cyc_probs],
-                                    'ideal': ideals[i],
-                                },
-                            })
-                            agg_cyc = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs], cyc_perms, k)
-                            pred_cyc = option_ids[int(np.argmax(agg_cyc))]
-                            corr_cyc = (pred_cyc == ideals[i])
-                            cyclic_correct_pride.append(corr_cyc)
-                            cyclic_corrects_pride += 1 if corr_cyc else 0
-
-                            # base
-                            base_probs = np.asarray(probs_seq_np[identity_idx], dtype=np.float64)
-                            pred_base = option_ids[int(np.argmax(base_probs))]
-                            corr_base = (pred_base == ideals[i])
-                            base_correct_pride.append(corr_base)
-                            base_results_pride.append({
-                                'type': 'result',
-                                'data': {
-                                    'idx': s_idx,
-                                    'prompt': s_prompt,
-                                    'options': s_options,
-                                    'probs': base_probs.tolist(),
-                                    'sampled': pred_base,
-                                    'ideal': ideals[i],
-                                    'correct': corr_base,
-                                },
-                            })
-
-                            # full
-                            agg_full = _aggregate_probs_over_permutations(probs_seq_np, perm_list, k)
-                            pred_full = option_ids[int(np.argmax(agg_full))]
-                            full_correct_pride.append(pred_full == ideals[i])
-
-                            # confs
-                            vals = np.sort(base_probs)[::-1]
-                            top1 = float(vals[0]) if vals.shape[0] > 0 else 0.0
-                            top2 = float(vals[1]) if vals.shape[0] > 1 else 0.0
-                            default_conf_pride.append(top1 - top2)
-
-                            shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_probs, k)
-                            probe_perm_idx = cyclic_indices[shift]
-
-                            probs_base_raw = probs_seq_np[identity_idx]
-                            agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [tuple(range(k))], k)
-
-                            probs_probe_raw = probs_seq_np[probe_perm_idx]
-                            agg_probe = _aggregate_probs_over_permutations([probs_probe_raw.tolist()], [cyc_perms[shift]], k)
-
-                            mean_probs = (agg_base + agg_probe) / 2.0
-                            vals_mean = np.sort(mean_probs)[::-1]
-                            mean_gap = float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0
-                            mean_conf_pride_list.append(mean_gap)
-
-                            pred_base2 = option_ids[int(np.argmax(agg_base))]
-                            pred_probe2 = option_ids[int(np.argmax(agg_probe))]
-                            flip_trigger_pride.append(pred_base2 != pred_probe2)
-
-                            pred2 = option_ids[int(np.argmax(mean_probs))]
-                            probe2_correct_pride_list.append(pred2 == ideals[i])
-
-                        default_conf_pride = np.asarray(default_conf_pride, dtype=np.float64)
-                        mean_conf_pride = np.asarray(mean_conf_pride_list, dtype=np.float64)
-                        arr_flip_pride = np.asarray(flip_trigger_pride, dtype=bool)
-                        arr_probe2_correct_pride = np.asarray(probe2_correct_pride_list, dtype=bool)
-
-                        # save pride base/cyclic
-                        cyclic_save_path_pride = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic_pride'
-                        if getattr(args, 'option_id_set', None):
-                            cyclic_save_path_pride += f'_id-{args.option_id_set}'
-                        os.makedirs(cyclic_save_path_pride, exist_ok=True)
-                        cyclic_acc_pride = float(cyclic_corrects_pride) / float(len(cyclic_correct_pride)) if len(cyclic_correct_pride) else float('nan')
-                        save_results(f'{cyclic_save_path_pride}/{subject}.jsonl', cyclic_results_pride,
-                                     metrics={'type': 'metric', 'data': {'accuracy': cyclic_acc_pride}})
-
-                        base_save_path_pride = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_pride'
-                        if getattr(args, 'option_id_set', None):
-                            base_save_path_pride += f'_id-{args.option_id_set}'
-                        os.makedirs(base_save_path_pride, exist_ok=True)
-                        base_acc_pride = float(np.mean(np.asarray(base_correct_pride, dtype=np.float64))) if len(base_correct_pride) else float('nan')
-                        save_results(f'{base_save_path_pride}/{subject}.jsonl', base_results_pride,
-                                     metrics={'type': 'metric', 'data': {'accuracy': base_acc_pride}})
-
-                        # curves pride
-                        curve_save_path_pride = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full_pride'
-                        if getattr(args, 'option_id_set', None):
-                            curve_save_path_pride += f'_id-{args.option_id_set}'
-                        os.makedirs(curve_save_path_pride, exist_ok=True)
+                        # 어떤 policy를 기준으로 prior pool을 만들지 (추가 cost 0)
+                        pride_pool_policies = ["switch_cyclic", "ours_top2flip", "ours_avggap"]
 
                         for perc in perc_list:
-                            cobjp = _compute_curves_for_one_percentile(
-                                subject=subject,
-                                tag="pride",
-                                k=k,
-                                perm_list=perm_list,
-                                base_correct_list=base_correct_pride,
-                                cyclic_correct_list=cyclic_correct_pride,
-                                full_correct_list=full_correct_pride,
-                                default_conf=default_conf_pride,
-                                mean_conf=mean_conf_pride,
-                                flip_trigger=arr_flip_pride,
-                                probe2_correct=arr_probe2_correct_pride,
-                                perc_value=float(perc),
-                            )
-                            if cobjp:
-                                cobjp["pride"] = {
-                                    "prior": [float(x) for x in prior_global.tolist()],
-                                    "prior_map": {str(k_): float(v) for k_, v in zip(option_ids, prior_global.tolist())},
-                                    "meta": prior_meta,
-                                }
-                                curve_objs_pride.append(cobjp)
-                                pride_by_p[float(perc)] = cobjp
-                                _log_beta0_report(cobjp, prefix="PRIDE")
+                            ptag = f"p{int(round(float(perc)))}"
 
-                                # 1) PRIDE 보정된 애들끼리만 plot (full permu 없음)
-                                ptag = f"p{int(round(float(perc)))}"
-                                pride_methods_png = os.path.join(curve_save_path_pride, f"{subject}_{ptag}_methods_pride_no_full.png")
-                                _plot_pride_methods_no_full_png(
-                                    curve_obj=cobjp,
-                                    out_path=pride_methods_png,
-                                    title=f"{args.task} {subject} — PRIDE-only methods (no full, {ptag})",
-                                )
-
-                                # 2) PRIDE avggap 단독
-                                pride_avggap_png = os.path.join(curve_save_path_pride, f"{subject}_{ptag}_avggap_pride.png")
-                                _plot_avggap_curve_png(
-                                    curve_obj=cobjp,
-                                    out_path=pride_avggap_png,
-                                    title=f"{args.task} {subject} — ours_avggap (PRIDE, {ptag})",
-                                    label="pride ours_avggap",
-                                )
-
-                                # 3) baseline vs pride avggap 비교
-                                if float(perc) in baseline_by_p:
-                                    compare_avggap_png = os.path.join(curve_save_path_pride, f"{subject}_{ptag}_avggap_compare.png")
-                                    _plot_avggap_compare_png(
-                                        baseline_curve_obj=baseline_by_p[float(perc)],
-                                        pride_curve_obj=cobjp,
-                                        out_path=compare_avggap_png,
-                                        title=f"{args.task} {subject} — ours_avggap (Baseline vs PRIDE, {ptag})",
-                                    )
-                                else:
-                                    compare_avggap_png = None
-
-                                if wandb_ok and wandb_run is not None:
-                                    import wandb
-                                    payload = {
-                                        f"plots/{subject}/{ptag}/methods_pride_no_full": wandb.Image(pride_methods_png),
-                                        f"plots/{subject}/{ptag}/avggap_pride": wandb.Image(pride_avggap_png),
-                                    }
-                                    if compare_avggap_png is not None:
-                                        payload[f"plots/{subject}/{ptag}/avggap_compare"] = wandb.Image(compare_avggap_png)
-                                    wandb_run.log(payload)
-
-                        save_results(f'{curve_save_path_pride}/{subject}_beta_curve.jsonl', curve_objs_pride, metrics=None)
-
-                        # =========================================================
-                        # Percentile grid (ours_avggap) — baseline/pride/delta
-                        # with TEXT (acc + cost)
-                        # =========================================================
-                        grid_perc = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90]
-                        x_ticks = [float(p) for p in grid_perc]  # th1
-                        y_ticks = [float(p) for p in grid_perc]  # th2
-
-                        base_acc_grid = np.zeros((len(y_ticks), len(x_ticks)), dtype=np.float64)
-                        base_cost_grid = np.zeros((len(y_ticks), len(x_ticks)), dtype=np.float64)
-                        pride_acc_grid = np.zeros((len(y_ticks), len(x_ticks)), dtype=np.float64)
-                        pride_cost_grid = np.zeros((len(y_ticks), len(x_ticks)), dtype=np.float64)
-
-                        for iy, th2p in enumerate(y_ticks):
-                            for ix, th1p in enumerate(x_ticks):
-                                c_b, a_b = _policy_metrics_avggap_beta0(
+                            for pool_policy in pride_pool_policies:
+                                # 1) prior를 "pool_policy 정책의 cyclic 라우팅 샘플"에서만 추정
+                                prior_global, prior_meta, pool_ids = _estimate_pride_global_prior_free_from_policy_cyclic(
+                                    per_sample_probs=per_sample_probs,
+                                    cyclic_indices=cyclic_indices,
                                     default_conf=default_conf,
                                     mean_conf=mean_conf,
-                                    base_correct=base_correct_list,
-                                    cyclic_correct=cyclic_correct_list,
-                                    probe2_correct=arr_probe2_correct,
+                                    flip_trigger=arr_flip_trigger,
+                                    perc_value=float(perc),
                                     k=k,
-                                    th1_percent=th1p,
-                                    th2_percent=th2p,
+                                    option_ids=option_ids,
+                                    policy_name=pool_policy,
                                 )
-                                base_acc_grid[iy, ix] = a_b
-                                base_cost_grid[iy, ix] = c_b
 
-                                c_p, a_p = _policy_metrics_avggap_beta0(
+                                per_sample_probs_pride = [
+                                    _apply_pride_global_prior_to_probs_seq(ps, prior_global)
+                                    for ps in per_sample_probs
+                                ]
+
+                                # 2) PRIDE 적용 후 correctness/conf 재계산
+                                base_correct_pride = []
+                                cyclic_correct_pride = []
+                                full_correct_pride = []
+
+                                default_conf_pride = []
+                                mean_conf_pride_list = []
+                                flip_trigger_pride = []
+                                probe2_correct_pride_list = []
+
+                                base_results_pride = []
+                                cyclic_results_pride = []
+                                cyclic_corrects_pride = 0
+
+                                for i in range(len(per_sample_probs_pride)):
+                                    probs_seq_np = per_sample_probs_pride[i]
+                                    s_idx = sample_idxs[i] if i < len(sample_idxs) else i
+                                    s_prompt = sample_prompts[i] if i < len(sample_prompts) else None
+                                    s_options = sample_options_list[i] if i < len(sample_options_list) else None
+
+                                    # cyclic
+                                    cyc_probs = [probs_seq_np[idx] for idx in cyclic_indices]
+                                    cyclic_results_pride.append({
+                                        'type': 'result',
+                                        'data': {
+                                            'idx': s_idx,
+                                            'prompt': s_prompt,
+                                            'options': s_options,
+                                            'probs': [cp.tolist() for cp in cyc_probs],
+                                            'ideal': ideals[i],
+                                        },
+                                    })
+                                    agg_cyc = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs], cyc_perms, k)
+                                    pred_cyc = option_ids[int(np.argmax(agg_cyc))]
+                                    corr_cyc = (pred_cyc == ideals[i])
+                                    cyclic_correct_pride.append(corr_cyc)
+                                    cyclic_corrects_pride += 1 if corr_cyc else 0
+
+                                    # base
+                                    base_probs = np.asarray(probs_seq_np[identity_idx], dtype=np.float64)
+                                    pred_base = option_ids[int(np.argmax(base_probs))]
+                                    corr_base = (pred_base == ideals[i])
+                                    base_correct_pride.append(corr_base)
+                                    base_results_pride.append({
+                                        'type': 'result',
+                                        'data': {
+                                            'idx': s_idx,
+                                            'prompt': s_prompt,
+                                            'options': s_options,
+                                            'probs': base_probs.tolist(),
+                                            'sampled': pred_base,
+                                            'ideal': ideals[i],
+                                            'correct': corr_base,
+                                        },
+                                    })
+
+                                    # full
+                                    agg_full = _aggregate_probs_over_permutations(probs_seq_np, perm_list, k)
+                                    pred_full = option_ids[int(np.argmax(agg_full))]
+                                    full_correct_pride.append(pred_full == ideals[i])
+
+                                    # confs
+                                    vals = np.sort(base_probs)[::-1]
+                                    top1 = float(vals[0]) if vals.shape[0] > 0 else 0.0
+                                    top2 = float(vals[1]) if vals.shape[0] > 1 else 0.0
+                                    default_conf_pride.append(top1 - top2)
+
+                                    shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_probs, k)
+                                    probe_perm_idx = cyclic_indices[shift]
+
+                                    probs_base_raw = probs_seq_np[identity_idx]
+                                    agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [tuple(range(k))], k)
+
+                                    probs_probe_raw = probs_seq_np[probe_perm_idx]
+                                    agg_probe = _aggregate_probs_over_permutations([probs_probe_raw.tolist()], [cyc_perms[shift]], k)
+
+                                    mean_probs = (agg_base + agg_probe) / 2.0
+                                    vals_mean = np.sort(mean_probs)[::-1]
+                                    mean_gap = float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0
+                                    mean_conf_pride_list.append(mean_gap)
+
+                                    pred_base2 = option_ids[int(np.argmax(agg_base))]
+                                    pred_probe2 = option_ids[int(np.argmax(agg_probe))]
+                                    flip_trigger_pride.append(pred_base2 != pred_probe2)
+
+                                    pred2 = option_ids[int(np.argmax(mean_probs))]
+                                    probe2_correct_pride_list.append(pred2 == ideals[i])
+
+                                default_conf_pride = np.asarray(default_conf_pride, dtype=np.float64)
+                                mean_conf_pride = np.asarray(mean_conf_pride_list, dtype=np.float64)
+                                arr_flip_pride = np.asarray(flip_trigger_pride, dtype=bool)
+                                arr_probe2_correct_pride = np.asarray(probe2_correct_pride_list, dtype=bool)
+
+                                # 3) save pride base/cyclic (policy별로 저장)
+                                suffix = f"{ptag}_pool-{pool_policy}"
+                                cyclic_save_path_pride = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic_pride_free_{suffix}'
+                                if getattr(args, 'option_id_set', None):
+                                    cyclic_save_path_pride += f'_id-{args.option_id_set}'
+                                os.makedirs(cyclic_save_path_pride, exist_ok=True)
+                                cyclic_acc_pride = float(cyclic_corrects_pride) / float(len(cyclic_correct_pride)) if len(cyclic_correct_pride) else float('nan')
+                                save_results(f'{cyclic_save_path_pride}/{subject}.jsonl', cyclic_results_pride,
+                                             metrics={'type': 'metric', 'data': {'accuracy': cyclic_acc_pride}})
+
+                                base_save_path_pride = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_pride_free_{suffix}'
+                                if getattr(args, 'option_id_set', None):
+                                    base_save_path_pride += f'_id-{args.option_id_set}'
+                                os.makedirs(base_save_path_pride, exist_ok=True)
+                                base_acc_pride = float(np.mean(np.asarray(base_correct_pride, dtype=np.float64))) if len(base_correct_pride) else float('nan')
+                                save_results(f'{base_save_path_pride}/{subject}.jsonl', base_results_pride,
+                                             metrics={'type': 'metric', 'data': {'accuracy': base_acc_pride}})
+
+                                # 4) curves pride (policy별/perc별 파일)
+                                curve_save_path_pride = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full_pride_free_{suffix}'
+                                if getattr(args, 'option_id_set', None):
+                                    curve_save_path_pride += f'_id-{args.option_id_set}'
+                                os.makedirs(curve_save_path_pride, exist_ok=True)
+
+                                cobjp = _compute_curves_for_one_percentile(
+                                    subject=subject,
+                                    tag=f"pride_free_pool-{pool_policy}",
+                                    k=k,
+                                    perm_list=perm_list,
+                                    base_correct_list=base_correct_pride,
+                                    cyclic_correct_list=cyclic_correct_pride,
+                                    full_correct_list=full_correct_pride,
                                     default_conf=default_conf_pride,
                                     mean_conf=mean_conf_pride,
-                                    base_correct=base_correct_pride,
-                                    cyclic_correct=cyclic_correct_pride,
+                                    flip_trigger=arr_flip_pride,
                                     probe2_correct=arr_probe2_correct_pride,
-                                    k=k,
-                                    th1_percent=th1p,
-                                    th2_percent=th2p,
+                                    perc_value=float(perc),
                                 )
-                                pride_acc_grid[iy, ix] = a_p
-                                pride_cost_grid[iy, ix] = c_p
 
-                        delta_acc_grid = pride_acc_grid - base_acc_grid
-                        delta_cost_grid = pride_cost_grid - base_cost_grid
+                                if cobjp:
+                                    cobjp["pride"] = {
+                                        "prior": [float(x) for x in prior_global.tolist()],
+                                        "prior_map": {str(k_): float(v) for k_, v in zip(option_ids, prior_global.tolist())},
+                                        "meta": prior_meta,
+                                        "pool_policy": pool_policy,
+                                        "pool_ids_count": int(len(pool_ids)),
+                                        "extra_cost": 0.0,
+                                    }
+                                    _log_beta0_report(cobjp, prefix=f"PRIDE_FREE(pool={pool_policy})")
 
-                        grid_base_png = os.path.join(curve_save_path_pride, f"{subject}_avggap_grid_baseline.png")
-                        grid_pride_png = os.path.join(curve_save_path_pride, f"{subject}_avggap_grid_pride.png")
-                        grid_delta_png = os.path.join(curve_save_path_pride, f"{subject}_avggap_grid_delta.png")
+                                    # plots (no full)
+                                    pride_methods_png = os.path.join(curve_save_path_pride, f"{subject}_{suffix}_methods_pride_no_full.png")
+                                    _plot_pride_methods_no_full_png(
+                                        curve_obj=cobjp,
+                                        out_path=pride_methods_png,
+                                        title=f"{args.task} {subject} — PRIDE_FREE (pool={pool_policy}) no-full ({suffix})",
+                                    )
 
-                        _plot_heatmap_with_text(
-                            acc_grid=base_acc_grid, cost_grid=base_cost_grid,
-                            x_ticks=x_ticks, y_ticks=y_ticks,
-                            out_path=grid_base_png,
-                            title=f"{args.task} {subject} — ours_avggap grid (Baseline)  [cell: acc / cost]",
-                            xlabel="th1 percentile (base gap)", ylabel="th2 percentile (avg gap)",
-                            mode="base",
-                        )
-                        _plot_heatmap_with_text(
-                            acc_grid=pride_acc_grid, cost_grid=pride_cost_grid,
-                            x_ticks=x_ticks, y_ticks=y_ticks,
-                            out_path=grid_pride_png,
-                            title=f"{args.task} {subject} — ours_avggap grid (PRIDE)  [cell: acc / cost]",
-                            xlabel="th1 percentile (base gap)", ylabel="th2 percentile (avg gap)",
-                            mode="pride",
-                        )
-                        _plot_heatmap_with_text(
-                            acc_grid=delta_acc_grid, cost_grid=delta_cost_grid,
-                            x_ticks=x_ticks, y_ticks=y_ticks,
-                            out_path=grid_delta_png,
-                            title=f"{args.task} {subject} — ours_avggap grid (Δ PRIDE - Baseline)  [cell: Δacc / Δcost]",
-                            xlabel="th1 percentile (base gap)", ylabel="th2 percentile (avg gap)",
-                            mode="delta",
-                        )
+                                    pride_avggap_png = os.path.join(curve_save_path_pride, f"{subject}_{suffix}_avggap_pride.png")
+                                    _plot_avggap_curve_png(
+                                        curve_obj=cobjp,
+                                        out_path=pride_avggap_png,
+                                        title=f"{args.task} {subject} — ours_avggap (PRIDE_FREE pool={pool_policy}, {suffix})",
+                                        label=f"pride_free(pool={pool_policy}) ours_avggap",
+                                    )
 
-                        if wandb_ok and wandb_run is not None:
-                            import wandb
-                            wandb_run.log({
-                                f"grids/{subject}/baseline": wandb.Image(grid_base_png),
-                                f"grids/{subject}/pride": wandb.Image(grid_pride_png),
-                                f"grids/{subject}/delta": wandb.Image(grid_delta_png),
-                            })
+                                    compare_avggap_png = None
+                                    if float(perc) in baseline_by_p:
+                                        compare_avggap_png = os.path.join(curve_save_path_pride, f"{subject}_{suffix}_avggap_compare.png")
+                                        _plot_avggap_compare_png(
+                                            baseline_curve_obj=baseline_by_p[float(perc)],
+                                            pride_curve_obj=cobjp,
+                                            out_path=compare_avggap_png,
+                                            title=f"{args.task} {subject} — ours_avggap (Baseline vs PRIDE_FREE pool={pool_policy}, {suffix})",
+                                        )
+
+                                    if wandb_ok and wandb_run is not None:
+                                        import wandb
+                                        payload = {
+                                            f"plots/{subject}/{suffix}/methods_pride_no_full": wandb.Image(pride_methods_png),
+                                            f"plots/{subject}/{suffix}/avggap_pride": wandb.Image(pride_avggap_png),
+                                        }
+                                        if compare_avggap_png is not None:
+                                            payload[f"plots/{subject}/{suffix}/avggap_compare"] = wandb.Image(compare_avggap_png)
+                                        wandb_run.log(payload)
+
+                                    save_results(f'{curve_save_path_pride}/{subject}_beta_curve.jsonl', [cobjp], metrics=None)
+                                else:
+                                    save_results(f'{curve_save_path_pride}/{subject}_beta_curve.jsonl', [], metrics=None)
+
+                                # (옵션) grid는 기본적으로 pool_policy == ours_avggap일 때만 생성 (너무 무거우면 여기서 제한)
+                                if pool_policy == "ours_avggap" and float(perc) == float(perc_list[0]) and cobjp:
+                                    grid_perc = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90]
+                                    x_ticks = [float(p) for p in grid_perc]  # th1
+                                    y_ticks = [float(p) for p in grid_perc]  # th2
+
+                                    base_acc_grid = np.zeros((len(y_ticks), len(x_ticks)), dtype=np.float64)
+                                    base_cost_grid = np.zeros((len(y_ticks), len(x_ticks)), dtype=np.float64)
+                                    pride_acc_grid = np.zeros((len(y_ticks), len(x_ticks)), dtype=np.float64)
+                                    pride_cost_grid = np.zeros((len(y_ticks), len(x_ticks)), dtype=np.float64)
+
+                                    for iy, th2p in enumerate(y_ticks):
+                                        for ix, th1p in enumerate(x_ticks):
+                                            c_b, a_b = _policy_metrics_avggap_beta0(
+                                                default_conf=default_conf,
+                                                mean_conf=mean_conf,
+                                                base_correct=base_correct_list,
+                                                cyclic_correct=cyclic_correct_list,
+                                                probe2_correct=arr_probe2_correct,
+                                                k=k,
+                                                th1_percent=th1p,
+                                                th2_percent=th2p,
+                                            )
+                                            base_acc_grid[iy, ix] = a_b
+                                            base_cost_grid[iy, ix] = c_b
+
+                                            c_p, a_p = _policy_metrics_avggap_beta0(
+                                                default_conf=default_conf_pride,
+                                                mean_conf=mean_conf_pride,
+                                                base_correct=base_correct_pride,
+                                                cyclic_correct=cyclic_correct_pride,
+                                                probe2_correct=arr_probe2_correct_pride,
+                                                k=k,
+                                                th1_percent=th1p,
+                                                th2_percent=th2p,
+                                            )
+                                            pride_acc_grid[iy, ix] = a_p
+                                            pride_cost_grid[iy, ix] = c_p
+
+                                    delta_acc_grid = pride_acc_grid - base_acc_grid
+                                    delta_cost_grid = pride_cost_grid - base_cost_grid
+
+                                    grid_base_png = os.path.join(curve_save_path_pride, f"{subject}_{suffix}_avggap_grid_baseline.png")
+                                    grid_pride_png = os.path.join(curve_save_path_pride, f"{subject}_{suffix}_avggap_grid_pride.png")
+                                    grid_delta_png = os.path.join(curve_save_path_pride, f"{subject}_{suffix}_avggap_grid_delta.png")
+
+                                    _plot_heatmap_with_text(
+                                        acc_grid=base_acc_grid, cost_grid=base_cost_grid,
+                                        x_ticks=x_ticks, y_ticks=y_ticks,
+                                        out_path=grid_base_png,
+                                        title=f"{args.task} {subject} — ours_avggap grid (Baseline) [acc/cost]",
+                                        xlabel="th1 percentile (base gap)", ylabel="th2 percentile (avg gap)",
+                                        mode="base",
+                                    )
+                                    _plot_heatmap_with_text(
+                                        acc_grid=pride_acc_grid, cost_grid=pride_cost_grid,
+                                        x_ticks=x_ticks, y_ticks=y_ticks,
+                                        out_path=grid_pride_png,
+                                        title=f"{args.task} {subject} — ours_avggap grid (PRIDE_FREE pool={pool_policy}) [acc/cost]",
+                                        xlabel="th1 percentile (base gap)", ylabel="th2 percentile (avg gap)",
+                                        mode="pride",
+                                    )
+                                    _plot_heatmap_with_text(
+                                        acc_grid=delta_acc_grid, cost_grid=delta_cost_grid,
+                                        x_ticks=x_ticks, y_ticks=y_ticks,
+                                        out_path=grid_delta_png,
+                                        title=f"{args.task} {subject} — ours_avggap grid (Δ PRIDE_FREE - Baseline) [Δacc/Δcost]",
+                                        xlabel="th1 percentile (base gap)", ylabel="th2 percentile (avg gap)",
+                                        mode="delta",
+                                    )
+
+                                    if wandb_ok and wandb_run is not None:
+                                        import wandb
+                                        wandb_run.log({
+                                            f"grids/{subject}/{suffix}/baseline": wandb.Image(grid_base_png),
+                                            f"grids/{subject}/{suffix}/pride_free": wandb.Image(grid_pride_png),
+                                            f"grids/{subject}/{suffix}/delta": wandb.Image(grid_delta_png),
+                                        })
 
                 except Exception as e:
                     logger.warning(f"Failed to derive beta curves for subject '{subject}': {e}")
