@@ -353,12 +353,10 @@ def _plot_pride_core_plot(
 
     ax.legend(loc="lower right", frameon=True, fancybox=True, framealpha=1.0, fontsize=9)
 
-
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fig.tight_layout(rect=[0, 0, 1, 0.88])  # legend 공간 확보
     fig.savefig(out_path, bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
-
 
 
 def _plot_avggap_baseline_vs_pride_points(
@@ -396,7 +394,6 @@ def _plot_avggap_baseline_vs_pride_points(
             label="pride_default",
         )
 
-
     def _plot_curve(obj: dict, key: str, label: str, lw: float, ls: str):
         if obj is None or key not in obj:
             return
@@ -422,7 +419,6 @@ def _plot_avggap_baseline_vs_pride_points(
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
-
 
 
 def _plot_heatmap_with_text(
@@ -931,11 +927,12 @@ def main():
         cache_dir=getattr(args, "cache_dir", None),
     )
 
+    use_bf16 = bool(torch.cuda.is_available()) and bool(torch.cuda.is_bf16_supported())
     model = AutoModelForCausalLM.from_pretrained(
         args.pretrained_model_path,
         device_map='auto',
         use_safetensors=True,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+        torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
         cache_dir=getattr(args, "cache_dir", None),
     )
 
@@ -960,10 +957,12 @@ def main():
             else:
                 logger.info(_blue(f"Run started: {subject}"))
                 max_samples = 100 if bool(getattr(args, 'test', False)) else None
+                n_threads = torch.cuda.device_count()
+                n_threads = max(1, int(n_threads)) if 'falcon' not in args.pretrained_model_path else 1
                 results = eval_all_samples(
                     eval_fn, eval_samples,
                     name=f'{args.task},{args.num_few_shot},{args.setting},{subject}',
-                    threads=torch.cuda.device_count() if 'falcon' not in args.pretrained_model_path else 1,
+                    threads=n_threads,
                     max_num_samples=max_samples,
                 )
                 gc.collect()
