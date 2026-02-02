@@ -819,14 +819,9 @@ def _run_online_sqrt_policy(
     th1_percent: float
 ) -> Tuple[float, float, float]:
     """
-    [Online Adaptive Policy]
-    th2 = th1 * sqrt(1 - CurrentAvgGap)
-    
-    - CurrentAvgGap: 현재 시점(t)까지 관측된 default_conf들의 평균 (Running Average)
-    - 미래 정보(Oracle)를 사용하지 않음.
-    
-    Returns:
-        avg_cost, accuracy, final_converged_th2_percentile
+    [Online Sqrt Policy]
+    th1 = fixed percentile
+    th2 = th1 * sqrt(1 - CurrentAvgGap) (Online)
     """
     N = len(base_correct)
     if N == 0:
@@ -834,6 +829,10 @@ def _run_online_sqrt_policy(
 
     dc = np.asarray(default_conf, dtype=np.float64)
     mc = np.asarray(mean_conf, dtype=np.float64)
+    # th1 is fixed based on offline/entire distribution percentile for simplicity in this context,
+    # or strictly online quantile if desired. adhering to user's "th1 fixed" context for this rule.
+    # But to be "fully online", th1 should be fixed value provided or estimated.
+    # Here we use the global quantile value passed as conceptual 'th1'.
     th1_val = _quantile(dc, float(th1_percent) / 100.0)
 
     total_cost = 0.0
@@ -847,18 +846,18 @@ def _run_online_sqrt_policy(
     for i in range(N):
         gap_i = float(dc[i])
         
-        # 1. Update Running Average (Decision based on PAST info)
+        # 1. Update Running Average
         if running_cnt > 0:
             current_avg_gap = running_gap_sum / running_cnt
         else:
             current_avg_gap = 0.0
             
-        # 2. Dynamic th2 Calculation
+        # 2. Dynamic th2
         safe_avg = min(1.0, max(0.0, current_avg_gap))
         current_th2_val = th1_val * np.sqrt(1.0 - safe_avg)
         final_th2_val = current_th2_val
 
-        # 3. Policy Execution
+        # 3. Execution
         if gap_i >= th1_val:
             total_cost += 1.0
             corrects += 1 if base_correct[i] else 0
@@ -870,11 +869,77 @@ def _run_online_sqrt_policy(
                 total_cost += 2.0
                 corrects += 1 if bool(probe2_correct[i]) else 0
         
-        # 4. Update Stats
         running_gap_sum += gap_i
         running_cnt += 1
 
-    # Calculate equivalent percentile for the final th2 value for plotting
+    if len(mc) > 0:
+        final_th2_perc = (np.sum(mc < final_th2_val) / len(mc)) * 100.0
+    else:
+        final_th2_perc = 0.0
+
+    return total_cost / float(N), corrects / float(N), final_th2_perc
+
+
+def _run_online_dynamic_policy(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int
+) -> Tuple[float, float, float]:
+    """
+    [Fully Dynamic Online Policy]
+    - th1 = 1.0 - OnlineAvgGap
+    - th2 = OnlineAvgGap - OnlineStdDev (clipped at 0)
+    """
+    N = len(base_correct)
+    if N == 0:
+        return 0.0, 0.0, 0.0
+
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+
+    total_cost = 0.0
+    corrects = 0
+    
+    running_sum = 0.0
+    running_sq_sum = 0.0
+    running_cnt = 0
+    
+    final_th2_val = 0.0
+
+    for i in range(N):
+        gap_i = float(dc[i])
+        
+        if running_cnt > 1:
+            mu = running_sum / running_cnt
+            var = (running_sq_sum / running_cnt) - (mu ** 2)
+            sigma = np.sqrt(max(0.0, var))
+        else:
+            mu = 0.0
+            sigma = 0.0
+            
+        current_th1 = 1.0 - mu
+        current_th2 = mu - sigma
+        if current_th2 < 0.0: current_th2 = 0.0
+        final_th2_val = current_th2
+
+        if gap_i >= current_th1:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+        else:
+            if float(mc[i]) < current_th2:
+                total_cost += float(k)
+                corrects += 1 if cyclic_correct[i] else 0
+            else:
+                total_cost += 2.0
+                corrects += 1 if bool(probe2_correct[i]) else 0
+        
+        running_sum += gap_i
+        running_sq_sum += (gap_i ** 2)
+        running_cnt += 1
+
     if len(mc) > 0:
         final_th2_perc = (np.sum(mc < final_th2_val) / len(mc)) * 100.0
     else:
@@ -901,7 +966,7 @@ def _compute_and_plot_th2_tradeoff(
     """
     th1/th2 trade-off plot: 
     - th1을 고정하고, th2를 0부터 촘촘하게 변화시켜 부드러운 곡선 생성
-    - Online Sqrt(1-Gap) 포인트 표시
+    - Fully Dynamic Online Policy 포인트 표시
     """
     default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
     
@@ -909,6 +974,12 @@ def _compute_and_plot_th2_tradeoff(
     max_th2 = max(th2_list) if len(th2_list) > 0 else 30
     dense_th2_list = np.arange(0, max_th2 + 2, 1.0).tolist()
     
+    # Single Point for Fully Dynamic Policy (th1 is NOT fixed here, but we plot it once)
+    c_dyn, a_dyn, th2_perc_dyn = _run_online_dynamic_policy(
+        default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k
+    )
+    d_dyn = (a_dyn - default_acc) * 100.0
+
     # Plot 1: Cost vs th2
     fig1, ax1 = plt.subplots(figsize=(8.0, 5.5), dpi=160)
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
@@ -983,18 +1054,12 @@ def _compute_and_plot_th2_tradeoff(
         delta_accs = [(a - default_acc) * 100.0 for a in accs]
         ax2.plot(dense_th2_list, delta_accs, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.8)
 
-        # 2) [ONLINE] th1 * sqrt(1 - AvgGap)
-        c_sqrt, a_sqrt, final_th2_perc = _run_online_sqrt_policy(
-            default_conf=default_conf,
-            mean_conf=mean_conf,
-            base_correct=base_correct_list,
-            cyclic_correct=cyclic_correct_list,
-            probe2_correct=arr_probe2_correct,
-            k=k,
-            th1_percent=th1p
+        # 2) [ONLINE DYNAMIC]
+        _, a_dyn, th2_perc_dyn = _run_online_dynamic_policy(
+            default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k
         )
-        d_sqrt = (a_sqrt - default_acc) * 100.0
-        ax2.scatter([final_th2_perc], [d_sqrt], marker='D', s=100, color=color, edgecolors='black', zorder=5)
+        d_dyn = (a_dyn - default_acc) * 100.0
+        ax2.scatter([th2_perc_dyn], [d_dyn], marker='D', s=100, color=color, edgecolors='black', zorder=5)
 
     ax2.axhline(y=0.0, color='gray', linestyle=':', linewidth=1.0, alpha=0.5)
     ax2.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
@@ -1012,6 +1077,13 @@ def _compute_and_plot_th2_tradeoff(
     # Plot 3: Cost vs Δ Accuracy
     fig3, ax3 = plt.subplots(figsize=(8.0, 5.5), dpi=160)
     
+    # Fully Dynamic Policy Point (Calculate once, plot same point for all th1 curves context)
+    # Since dynamic policy doesn't depend on fixed th1, it's a single point on the canvas.
+    c_dyn, a_dyn, _ = _run_online_dynamic_policy(
+        default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k
+    )
+    d_dyn = (a_dyn - default_acc) * 100.0
+
     for idx, th1p in enumerate(th1_list):
         th1p = float(th1p)
         color = colors[idx % len(colors)]
@@ -1034,30 +1106,17 @@ def _compute_and_plot_th2_tradeoff(
         
         ax3.plot(costs_line, delta_accs_line, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.4)
         
-        # --- Single Point Comparison (Online Sqrt(1-Gap)) ---
-        
-        # [ONLINE] th1 * sqrt(1 - AvgGap)
-        c4, a4, _ = _run_online_sqrt_policy(
-            default_conf=default_conf,
-            mean_conf=mean_conf,
-            base_correct=base_correct_list,
-            cyclic_correct=cyclic_correct_list,
-            probe2_correct=arr_probe2_correct,
-            k=k,
-            th1_percent=th1p
-        )
-        d4 = (a4 - default_acc) * 100.0
-        ax3.scatter([c4], [d4], marker='D', s=100, color=color, edgecolors='black', zorder=5, label='Online Sqrt' if idx==0 else "")
-        
-        ax3.annotate(f"{d4:.2f}", (c4, d4), xytext=(0, 6), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
+    # Plot Dynamic Point separately (Black Diamond)
+    ax3.scatter([c_dyn], [d_dyn], marker='D', s=120, color='black', edgecolors='white', zorder=10, label='Online Dynamic')
+    ax3.annotate(f"{d_dyn:.2f}", (c_dyn, d_dyn), xytext=(0, 6), textcoords='offset points', fontsize=9, ha='center', color='black', fontweight='bold')
 
-        # Report Log
-        logger.info(f"[th1={int(th1p):<2}] Online Sqrt : cost={c4:.3f}, acc={a4:.4f} (+{d4:.2f}%)")
+    # Report Log
+    logger.info(f"Online Dynamic Policy : cost={c_dyn:.3f}, acc={a_dyn:.4f} (+{d_dyn:.2f}%)")
 
     ax3.scatter([1.0], [0.0], marker='*', s=200, label='default', color='gray', zorder=5)
     ax3.set_xlabel("Computational Cost (× of default)", fontsize=11)
     ax3.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — Trade-off (Online Sqrt)", fontsize=12)
+    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — Trade-off (Online Dynamic)", fontsize=12)
     ax3.legend(loc='best', fontsize=10)
     ax3.grid(True, linestyle='--', alpha=0.4)
     out_trade = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_vs_DELTA.png")
@@ -1937,22 +1996,17 @@ def main():
                             th1p = float(perc)
                             extra_pts = []
                             
-                            # 3. th1 * sqrt(1 - AvgGap) [ONLINE] ONLY
-                            c4, a4, _ = _run_online_sqrt_policy(
-                                default_conf=default_conf,
-                                mean_conf=mean_conf,
-                                base_correct=base_correct_list,
-                                cyclic_correct=cyclic_correct_list,
-                                probe2_correct=arr_probe2_correct,
-                                k=k,
-                                th1_percent=th1p
+                            # 3. [ONLINE DYNAMIC] ONLY
+                            # (th1, th2 둘 다 동적으로 변함. th1_percent 인자는 무시됨)
+                            c_dyn, a_dyn, _ = _run_online_dynamic_policy(
+                                default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k
                             )
-                            extra_pts.append({'cost': c4, 'acc': a4, 'label': 'Online Sqrt', 'marker': 'D', 'color': 'orange'})
+                            extra_pts.append({'cost': c_dyn, 'acc': a_dyn, 'label': 'Online Dynamic', 'marker': 'D', 'color': 'orange'})
 
                             _plot_baseline_points_scatter(
                                 curve_obj=cobj,
                                 out_path=out_pts,
-                                title=f"{args.task} {subject} — Baseline Policies (beta=0, {ptag}, Online)",
+                                title=f"{args.task} {subject} — Baseline Policies (beta=0, {ptag}, Online Dynamic)",
                                 extra_points=extra_pts
                             )
                             if wandb_ok and wandb_run is not None:
