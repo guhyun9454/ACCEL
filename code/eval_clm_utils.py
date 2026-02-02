@@ -68,8 +68,10 @@ def parse_arguments():
     # Ours method hyperparameters (existing)
     parser.add_argument("--ours_low_conf_percent", type=float, default=10.0,
                         help="Bottom percentile (e.g., 10.0) of confidence (from beta subset) to trigger cascading ensemble")
+    parser.add_argument("--ours_th1_tradeoff", type=str, default="5,10,20,30",
+                        help="th1 percentile values for trade-off plot (e.g., 5,10,20,30). 각 th1에 대해 th2 curve를 그림.")
     parser.add_argument("--ours_th2_tradeoff", type=str, default="5,10,20,30",
-                        help="th2 percentile values for trade-off plot (e.g., 5,10,20,30). th1=ours_low_conf_percent 고정.")
+                        help="th2 percentile values for trade-off plot (e.g., 5,10,20,30). 각 th1에 대해 th2를 변화시킴.")
     parser.add_argument("--ours_top2_gap_frac", type=float, default=0.3,
                         help="If (top1 - top2) / top1 <= this, treat as 'very ambiguous' and send directly to cyclic (use 0.0 to disable).")
 
