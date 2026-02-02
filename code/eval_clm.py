@@ -1080,7 +1080,7 @@ def _compute_and_plot_th2_tradeoff(
 
 def _parse_percent_value_list(v) -> List[float]:
     if v is None:
-        return [10.0]
+        return [30.0]
     if isinstance(v, (int, float)):
         return [float(v)]
     if isinstance(v, (list, tuple)):
@@ -1090,7 +1090,7 @@ def _parse_percent_value_list(v) -> List[float]:
                 out.append(float(x))
             except Exception:
                 pass
-        return out if len(out) > 0 else [10.0]
+        return out if len(out) > 0 else [30.0]
     if isinstance(v, str):
         s = v.strip()
         if "," in s:
@@ -1103,12 +1103,12 @@ def _parse_percent_value_list(v) -> List[float]:
                     out.append(float(t))
                 except Exception:
                     pass
-            return out if len(out) > 0 else [10.0]
+            return out if len(out) > 0 else [30.0]
         try:
             return [float(s)]
         except Exception:
-            return [10.0]
-    return [10.0]
+            return [30.0]
+    return [30.0]
 
 
 def _policy_metrics_avggap_beta0(
