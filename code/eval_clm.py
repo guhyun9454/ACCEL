@@ -774,9 +774,10 @@ def _plot_baseline_points_scatter(
     if "cyclic" in always:
         plt.scatter(always["cyclic"]["cost"], always["cyclic"]["acc"], 
                    marker='d', s=150, color='purple', label='Cyclic', zorder=10)
-    if "full" in always:
-        plt.scatter(always["full"]["cost"], always["full"]["acc"], 
-                   marker='X', s=150, color='black', label='Full', zorder=10)
+    # Full removed as per user request
+    # if "full" in always:
+    #     plt.scatter(always["full"]["cost"], always["full"]["acc"], 
+    #                marker='X', s=150, color='black', label='Full', zorder=10)
 
     # 2. Policy Points (beta=0)
     policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
@@ -935,23 +936,25 @@ def _compute_and_plot_th2_tradeoff(
         )
         ax1.scatter([target_th2_oracle], [c_oracle], marker='v', s=120, color=color, edgecolors='black', zorder=5, label='Adaptive(Oracle)' if idx==0 else "")
 
-        # 4) Highlight "Online Adaptive" point (Real-time Update)
-        # 사용자가 원한 방식: 문제를 풀면서 AvgGap을 업데이트 -> th2도 계속 변함
-        c_online, a_online, final_th2 = _run_online_adaptive_policy(
+        # 4) [NEW] th1 * sqrt(1 - AvgGap)
+        # 사용자가 요청한 새로운 휴리스틱: th2 = th1 * sqrt(1 - AvgBaseGap)
+        avg_base_gap = float(np.mean(default_conf))
+        target_sqrt_gap = th1p * np.sqrt(1.0 - avg_base_gap)
+        c_sqrt, a_sqrt = _policy_metrics_avggap_beta0(
             default_conf=default_conf,
             mean_conf=mean_conf,
             base_correct=base_correct_list,
             cyclic_correct=cyclic_correct_list,
             probe2_correct=arr_probe2_correct,
             k=k,
-            th1_percent=th1p
+            th1_percent=th1p,
+            th2_percent=target_sqrt_gap,
         )
-        # X축에는 '최종적으로 수렴한 th2' 위치에 찍어줌
-        ax1.scatter([final_th2], [c_online], marker='X', s=150, color=color, edgecolors='black', zorder=6, label='Adaptive(Online)' if idx==0 else "")
+        ax1.scatter([target_sqrt_gap], [c_sqrt], marker='D', s=100, color=color, edgecolors='black', zorder=5, label='Sqrt(1-Gap)' if idx==0 else "")
 
     ax1.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
     ax1.set_ylabel("Computational Cost (× of default)", fontsize=11)
-    ax1.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs th2 (★:/2, ▼:Oracle, X:Online)", fontsize=12)
+    ax1.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs th2", fontsize=12)
     ax1.set_xticks(th2_list) # 사용자가 지정한 주요 틱만 표시
     ax1.set_xticklabels([f"{int(t)}" for t in th2_list])
     ax1.legend(loc='best', fontsize=10)
@@ -1018,23 +1021,27 @@ def _compute_and_plot_th2_tradeoff(
         d_oracle = (a_oracle - default_acc) * 100.0
         ax2.scatter([target_th2_oracle], [d_oracle], marker='v', s=120, color=color, edgecolors='black', zorder=5)
 
-        # 4) Highlight "Online Adaptive" point
-        c_online, a_online, final_th2 = _run_online_adaptive_policy(
+        # 4) [NEW] th1 * sqrt(1 - AvgGap)
+        # 사용자가 요청한 새로운 휴리스틱: th2 = th1 * sqrt(1 - AvgBaseGap)
+        avg_base_gap = float(np.mean(default_conf))
+        target_sqrt_gap = th1p * np.sqrt(1.0 - avg_base_gap)
+        c_sqrt, a_sqrt = _policy_metrics_avggap_beta0(
             default_conf=default_conf,
             mean_conf=mean_conf,
             base_correct=base_correct_list,
             cyclic_correct=cyclic_correct_list,
             probe2_correct=arr_probe2_correct,
             k=k,
-            th1_percent=th1p
+            th1_percent=th1p,
+            th2_percent=target_sqrt_gap,
         )
-        d_online = (a_online - default_acc) * 100.0
-        ax2.scatter([final_th2], [d_online], marker='X', s=150, color=color, edgecolors='black', zorder=6)
+        d_sqrt = (a_sqrt - default_acc) * 100.0
+        ax2.scatter([target_sqrt_gap], [d_sqrt], marker='D', s=100, color=color, edgecolors='black', zorder=5)
 
     ax2.axhline(y=0.0, color='gray', linestyle=':', linewidth=1.0, alpha=0.5)
     ax2.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
     ax2.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs th2 (★:/2, ▼:Oracle, X:Online)", fontsize=12)
+    ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs th2", fontsize=12)
     ax2.set_xticks(th2_list)
     ax2.set_xticklabels([f"{int(t)}" for t in th2_list])
     ax2.legend(loc='best', fontsize=10)
@@ -1098,15 +1105,28 @@ def _compute_and_plot_th2_tradeoff(
         y_offset = -14 if abs(c3 - c1) < 0.02 else 6
         ax3.annotate(f"{d3:.2f}", (c3, d3), xytext=(0, y_offset), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
 
+        # 4. th1 * sqrt(1 - AvgGap) [NEW]
+        avg_base_gap = float(np.mean(default_conf))
+        target_sqrt_gap = th1p * np.sqrt(1.0 - avg_base_gap)
+        c4, a4 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, target_sqrt_gap)
+        d4 = (a4 - default_acc) * 100.0
+        ax3.scatter([c4], [d4], marker='D', s=100, color=color, edgecolors='black', zorder=5, label='Sqrt(1-Gap)' if idx==0 else "")
+        # 겹침 방지: 위치가 너무 가까우면 텍스트를 위/아래로 조정
+        y_offset_4 = 6
+        if abs(c4 - c3) < 0.02 and abs(d4 - d3) < 0.2:
+            y_offset_4 = -14
+        ax3.annotate(f"{d4:.2f}", (c4, d4), xytext=(0, y_offset_4), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
+
         # Report Log
-        logger.info(f"[th1={int(th1p):<2}] th1/2   : cost={c1:.3f}, acc={a1:.4f} (+{d1:.2f}%)")
-        logger.info(f"[th1={int(th1p):<2}] th1^2   : cost={c2:.3f}, acc={a2:.4f} (+{d2:.2f}%)")
-        logger.info(f"[th1={int(th1p):<2}] th1^1.5 : cost={c3:.3f}, acc={a3:.4f} (+{d3:.2f}%)")
+        logger.info(f"[th1={int(th1p):<2}] th1/2       : cost={c1:.3f}, acc={a1:.4f} (+{d1:.2f}%)")
+        logger.info(f"[th1={int(th1p):<2}] th1^2       : cost={c2:.3f}, acc={a2:.4f} (+{d2:.2f}%)")
+        logger.info(f"[th1={int(th1p):<2}] th1^1.5     : cost={c3:.3f}, acc={a3:.4f} (+{d3:.2f}%)")
+        logger.info(f"[th1={int(th1p):<2}] Sqrt(1-Gap) : cost={c4:.3f}, acc={a4:.4f} (+{d4:.2f}%)")
 
     ax3.scatter([1.0], [0.0], marker='*', s=200, label='default', color='gray', zorder=5)
     ax3.set_xlabel("Computational Cost (× of default)", fontsize=11)
     ax3.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — 3-Point Trade-off (★:/2, ■:^2, ▲:^1.5)", fontsize=12)
+    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — 4-Point Trade-off", fontsize=12)
     ax3.legend(loc='best', fontsize=10)
     ax3.grid(True, linestyle='--', alpha=0.4)
     out_trade = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_vs_DELTA.png")
@@ -1986,23 +2006,11 @@ def main():
                             th1p = float(perc)
                             extra_pts = []
                             
-                            # 1. th1/2
-                            t_half = th1p / 2.0
-                            c1, a1 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, t_half)
-                            extra_pts.append({'cost': c1, 'acc': a1, 'label': 'th1/2', 'marker': '*', 'color': 'red'})
-                            
-                            # 2. th1^2
-                            th1_val = _quantile(default_conf, th1p / 100.0)
-                            th2_val_sq = th1_val ** 2
-                            t_sq = (np.sum(mean_conf < th2_val_sq) / len(mean_conf)) * 100.0
-                            c2, a2 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, t_sq)
-                            extra_pts.append({'cost': c2, 'acc': a2, 'label': 'th1^2', 'marker': 's', 'color': 'green'})
-                            
-                            # 3. th1^1.5
-                            th2_val_pow = th1_val ** 1.5
-                            t_pow = (np.sum(mean_conf < th2_val_pow) / len(mean_conf)) * 100.0
-                            c3, a3 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, t_pow)
-                            extra_pts.append({'cost': c3, 'acc': a3, 'label': 'th1^1.5', 'marker': '^', 'color': 'purple'})
+                            # 3. th1 * sqrt(1 - AvgGap) [NEW] ONLY
+                            avg_base_gap = float(np.mean(default_conf))
+                            target_sqrt_gap = th1p * np.sqrt(1.0 - avg_base_gap)
+                            c4, a4 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, target_sqrt_gap)
+                            extra_pts.append({'cost': c4, 'acc': a4, 'label': 'Sqrt(1-Gap)', 'marker': 'D', 'color': 'orange'})
 
                             _plot_baseline_points_scatter(
                                 curve_obj=cobj,
