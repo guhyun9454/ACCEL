@@ -787,9 +787,6 @@ def _plot_baseline_points_scatter(
             cost = float(curve_obj[key]["costs"][0])
             acc = float(curve_obj[key]["accuracies"][0])
             plt.scatter(cost, acc, marker=m, s=120, color=c, label=key, alpha=0.9)
-            # Annotate
-            plt.annotate(f"{key}\n({cost:.2f}, {acc:.4f})", (cost, acc), 
-                        xytext=(5, 5), textcoords='offset points', fontsize=8)
 
     plt.xlabel("Computational Cost (× of default)")
     plt.ylabel("Accuracy")
