@@ -757,10 +757,12 @@ def _plot_confidence_distribution(
 def _plot_baseline_points_scatter(
     curve_obj: dict,
     out_path: str,
-    title: str
+    title: str,
+    extra_points: List[dict] = None
 ):
     """
     Baseline report에 나오는 각 정책들의 Cost vs Accuracy를 Point로 찍어서 비교
+    extra_points: [{'cost': float, 'acc': float, 'label': str, 'marker': str, 'color': str}, ...]
     """
     plt.figure(figsize=(8, 6), dpi=160)
     
@@ -787,6 +789,12 @@ def _plot_baseline_points_scatter(
             cost = float(curve_obj[key]["costs"][0])
             acc = float(curve_obj[key]["accuracies"][0])
             plt.scatter(cost, acc, marker=m, s=120, color=c, label=key, alpha=0.9)
+
+    # 3. Extra Points (th1/2, th1^2, th1^1.5)
+    if extra_points:
+        for p in extra_points:
+            plt.scatter(p['cost'], p['acc'], marker=p['marker'], s=150, color=p['color'], 
+                       edgecolors='black', label=p['label'], zorder=15)
 
     plt.xlabel("Computational Cost (× of default)")
     plt.ylabel("Accuracy")
@@ -1059,62 +1067,46 @@ def _compute_and_plot_th2_tradeoff(
             costs_line.append(c)
             delta_accs_line.append((a - default_acc) * 100.0)
         
-        ax3.plot(costs_line, delta_accs_line, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.8)
+        ax3.plot(costs_line, delta_accs_line, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.4)
         
-        # Highlight "th2 = th1 / 2" point
-        target_th2 = th1p / 2.0
-        c_half, a_half = _policy_metrics_avggap_beta0(
-            default_conf=default_conf,
-            mean_conf=mean_conf,
-            base_correct=base_correct_list,
-            cyclic_correct=cyclic_correct_list,
-            probe2_correct=arr_probe2_correct,
-            k=k,
-            th1_percent=th1p,
-            th2_percent=target_th2,
-        )
-        d_half = (a_half - default_acc) * 100.0
-        ax3.scatter([c_half], [d_half], marker='*', s=150, color=color, edgecolors='black', zorder=5, label='th1/2' if idx==0 else "")
+        # --- 3 Points Comparison ---
+        
+        # 1. th1 / 2 (Simple)
+        target_half = th1p / 2.0
+        c1, a1 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, target_half)
+        d1 = (a1 - default_acc) * 100.0
+        ax3.scatter([c1], [d1], marker='*', s=180, color=color, edgecolors='black', zorder=5, label='th1/2' if idx==0 else "")
+        ax3.annotate(f"{d1:.2f}", (c1, d1), xytext=(0, 6), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
 
-        # Highlight "th2 = th1^2" point (Square Law)
-        # th1_percent에 해당하는 실제 Gap 값 구하기
-        th1_val = _quantile(default_conf, float(th1p) / 100.0)
+        # 2. th1^2 (Square Law - Strict)
+        th1_val = _quantile(default_conf, th1p / 100.0)
         th2_val_sq = th1_val ** 2
-        
-        # th2_val_sq가 mean_conf 분포에서 몇 퍼센타일인지 역산
-        # (mean_conf < th2_val_sq 인 비율 * 100)
-        target_th2_sq_perc = (np.sum(mean_conf < th2_val_sq) / len(mean_conf)) * 100.0
-        
-        c_sq, a_sq = _policy_metrics_avggap_beta0(
-            default_conf=default_conf,
-            mean_conf=mean_conf,
-            base_correct=base_correct_list,
-            cyclic_correct=cyclic_correct_list,
-            probe2_correct=arr_probe2_correct,
-            k=k,
-            th1_percent=th1p,
-            th2_percent=target_th2_sq_perc,
-        )
-        d_sq = (a_sq - default_acc) * 100.0
-        ax3.scatter([c_sq], [d_sq], marker='s', s=100, color=color, edgecolors='black', zorder=5, label='th1^2' if idx==0 else "")
+        # th2_val_sq에 해당하는 percentile 역산
+        target_sq = (np.sum(mean_conf < th2_val_sq) / len(mean_conf)) * 100.0
+        c2, a2 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, target_sq)
+        d2 = (a2 - default_acc) * 100.0
+        ax3.scatter([c2], [d2], marker='s', s=120, color=color, edgecolors='black', zorder=5, label='th1^2' if idx==0 else "")
+        ax3.annotate(f"{d2:.2f}", (c2, d2), xytext=(0, 6), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
 
-        # Highlight "Online Adaptive" point
-        c_online, a_online, final_th2 = _run_online_adaptive_policy(
-            default_conf=default_conf,
-            mean_conf=mean_conf,
-            base_correct=base_correct_list,
-            cyclic_correct=cyclic_correct_list,
-            probe2_correct=arr_probe2_correct,
-            k=k,
-            th1_percent=th1p
-        )
-        d_online = (a_online - default_acc) * 100.0
-        ax3.scatter([c_online], [d_online], marker='X', s=150, color=color, edgecolors='black', zorder=6, label='Adaptive(Online)' if idx==0 else "")
+        # 3. th1^1.5 (Power Law 1.5 - Balanced)
+        th2_val_pow = th1_val ** 1.5
+        target_pow = (np.sum(mean_conf < th2_val_pow) / len(mean_conf)) * 100.0
+        c3, a3 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, target_pow)
+        d3 = (a3 - default_acc) * 100.0
+        ax3.scatter([c3], [d3], marker='^', s=120, color=color, edgecolors='black', zorder=5, label='th1^1.5' if idx==0 else "")
+        # 겹침 방지: 위치가 너무 가까우면 텍스트를 아래로
+        y_offset = -14 if abs(c3 - c1) < 0.02 else 6
+        ax3.annotate(f"{d3:.2f}", (c3, d3), xytext=(0, y_offset), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
+
+        # Report Log
+        logger.info(f"[th1={int(th1p):<2}] th1/2   : cost={c1:.3f}, acc={a1:.4f} (+{d1:.2f}%)")
+        logger.info(f"[th1={int(th1p):<2}] th1^2   : cost={c2:.3f}, acc={a2:.4f} (+{d2:.2f}%)")
+        logger.info(f"[th1={int(th1p):<2}] th1^1.5 : cost={c3:.3f}, acc={a3:.4f} (+{d3:.2f}%)")
 
     ax3.scatter([1.0], [0.0], marker='*', s=200, label='default', color='gray', zorder=5)
     ax3.set_xlabel("Computational Cost (× of default)", fontsize=11)
     ax3.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs Δ Accuracy (★:/2, ■:^2, X:Online)", fontsize=12)
+    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — 3-Point Trade-off (★:/2, ■:^2, ▲:^1.5)", fontsize=12)
     ax3.legend(loc='best', fontsize=10)
     ax3.grid(True, linestyle='--', alpha=0.4)
     out_trade = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_vs_DELTA.png")
@@ -1986,13 +1978,37 @@ def main():
                             baseline_by_p[perc] = cobj
                             _log_baseline_report(cobj)
 
-                            # [ADD] Baseline Point Plot (Cost vs Acc scatter)
+                            # [ADD] Baseline Point Plot with 3 Rules
                             ptag = f"p{int(round(perc))}"
                             out_pts = os.path.join(curve_save_path, f"{subject}_{ptag}_baseline_points.png")
+                            
+                            # 3가지 룰 포인트 계산
+                            th1p = float(perc)
+                            extra_pts = []
+                            
+                            # 1. th1/2
+                            t_half = th1p / 2.0
+                            c1, a1 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, t_half)
+                            extra_pts.append({'cost': c1, 'acc': a1, 'label': 'th1/2', 'marker': '*', 'color': 'red'})
+                            
+                            # 2. th1^2
+                            th1_val = _quantile(default_conf, th1p / 100.0)
+                            th2_val_sq = th1_val ** 2
+                            t_sq = (np.sum(mean_conf < th2_val_sq) / len(mean_conf)) * 100.0
+                            c2, a2 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, t_sq)
+                            extra_pts.append({'cost': c2, 'acc': a2, 'label': 'th1^2', 'marker': 's', 'color': 'green'})
+                            
+                            # 3. th1^1.5
+                            th2_val_pow = th1_val ** 1.5
+                            t_pow = (np.sum(mean_conf < th2_val_pow) / len(mean_conf)) * 100.0
+                            c3, a3 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, t_pow)
+                            extra_pts.append({'cost': c3, 'acc': a3, 'label': 'th1^1.5', 'marker': '^', 'color': 'purple'})
+
                             _plot_baseline_points_scatter(
                                 curve_obj=cobj,
                                 out_path=out_pts,
-                                title=f"{args.task} {subject} — Baseline Policies (beta=0, {ptag})"
+                                title=f"{args.task} {subject} — Baseline Policies (beta=0, {ptag})",
+                                extra_points=extra_pts
                             )
                             if wandb_ok and wandb_run is not None:
                                 try:
