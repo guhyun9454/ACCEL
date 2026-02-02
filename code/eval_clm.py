@@ -715,36 +715,107 @@ def _plot_heatmap_with_text(
 def _compute_and_plot_th2_tradeoff(
     subject: str,
     curve_save_path: str,
-    perc_list: List[float],
-    baseline_by_p: Dict[float, dict],
+    th1_list: List[float],
+    th2_list: List[float],
     default_conf: np.ndarray,
     mean_conf: np.ndarray,
     base_correct_list: List[bool],
     cyclic_correct_list: List[bool],
     arr_probe2_correct: np.ndarray,
-    arr_flip_trigger: np.ndarray,
     k: int,
-    th2_tradeoff_list: List[float],
     args: Any,
     wandb_ok: bool = False,
     wandb_run: Any = None,
 ):
     """
-    th2 (5, 10, 20, 30) trade-off: th1 고정(perc), th2만 변화시켜 cost/acc 변화 시각화.
-    X축: th2 percentile, Y축: Cost 및 Δ Accuracy (%)
+    th1/th2 trade-off plot: 
+    - th1을 5, 10, 20, 30으로 변화
+    - 각 th1에 대해 th2를 5, 10, 20, 30으로 변화시키는 curve
+    - X축: th2 percentile, Y축: Cost 및 Δ Accuracy (%)
+    - 각 선 = 하나의 th1 값 (th1=5, 10, 20, 30)
     """
-    for perc in perc_list:
-        perc = float(perc)
-        if perc not in baseline_by_p:
-            continue
-        cobj = baseline_by_p[perc]
-        ptag = f"p{int(round(perc))}"
-        default_acc = float(cobj.get("default_accuracy", float("nan")))
+    default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
+    
+    # Plot 1: Cost vs th2 (각 선 = 하나의 th1)
+    fig1, ax1 = plt.subplots(figsize=(8.0, 5.5), dpi=160)
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']  # blue, orange, green, red
+    
+    for idx, th1p in enumerate(th1_list):
+        th1p = float(th1p)
+        costs = []
+        for th2p in th2_list:
+            c, _ = _policy_metrics_avggap_beta0(
+                default_conf=default_conf,
+                mean_conf=mean_conf,
+                base_correct=base_correct_list,
+                cyclic_correct=cyclic_correct_list,
+                probe2_correct=arr_probe2_correct,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+            )
+            costs.append(c)
+        
+        ax1.plot(th2_list, costs, marker='o', label=f'th1={int(th1p)}', 
+                color=colors[idx % len(colors)], linewidth=2.0, markersize=7)
+    
+    ax1.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
+    ax1.set_ylabel("Computational Cost (× of default)", fontsize=11)
+    ax1.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs th2 [trade-off]", fontsize=12)
+    ax1.set_xticks(th2_list)
+    ax1.set_xticklabels([f"{int(t)}" for t in th2_list])
+    ax1.legend(loc='best', fontsize=10)
+    ax1.grid(True, linestyle='--', alpha=0.4)
+    out_cost = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST.png")
+    os.makedirs(os.path.dirname(out_cost), exist_ok=True)
+    fig1.tight_layout()
+    fig1.savefig(out_cost, bbox_inches="tight")
+    plt.close(fig1)
 
-        # ours_avggap: th2에 따라 cost/acc 변화 (th1=perc 고정)
-        costs_avggap = []
-        accs_avggap = []
-        for th2p in th2_tradeoff_list:
+    # Plot 2: Δ Accuracy (%) vs th2 (각 선 = 하나의 th1)
+    fig2, ax2 = plt.subplots(figsize=(8.0, 5.5), dpi=160)
+    
+    for idx, th1p in enumerate(th1_list):
+        th1p = float(th1p)
+        accs = []
+        for th2p in th2_list:
+            _, a = _policy_metrics_avggap_beta0(
+                default_conf=default_conf,
+                mean_conf=mean_conf,
+                base_correct=base_correct_list,
+                cyclic_correct=cyclic_correct_list,
+                probe2_correct=arr_probe2_correct,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+            )
+            accs.append(a)
+        
+        delta_accs = [(a - default_acc) * 100.0 for a in accs]
+        ax2.plot(th2_list, delta_accs, marker='o', label=f'th1={int(th1p)}',
+                color=colors[idx % len(colors)], linewidth=2.0, markersize=7)
+    
+    ax2.axhline(y=0.0, color='gray', linestyle=':', linewidth=1.0, alpha=0.5)
+    ax2.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
+    ax2.set_ylabel("Δ Accuracy (%)", fontsize=11)
+    ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs th2 [trade-off]", fontsize=12)
+    ax2.set_xticks(th2_list)
+    ax2.set_xticklabels([f"{int(t)}" for t in th2_list])
+    ax2.legend(loc='best', fontsize=10)
+    ax2.grid(True, linestyle='--', alpha=0.4)
+    out_delta = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_DELTA_ACC.png")
+    fig2.tight_layout()
+    fig2.savefig(out_delta, bbox_inches="tight")
+    plt.close(fig2)
+
+    # Plot 3: Cost vs Δ Accuracy (trade-off scatter/line, 각 선 = 하나의 th1)
+    fig3, ax3 = plt.subplots(figsize=(8.0, 5.5), dpi=160)
+    
+    for idx, th1p in enumerate(th1_list):
+        th1p = float(th1p)
+        costs_line = []
+        delta_accs_line = []
+        for th2p in th2_list:
             c, a = _policy_metrics_avggap_beta0(
                 default_conf=default_conf,
                 mean_conf=mean_conf,
@@ -752,91 +823,41 @@ def _compute_and_plot_th2_tradeoff(
                 cyclic_correct=cyclic_correct_list,
                 probe2_correct=arr_probe2_correct,
                 k=k,
-                th1_percent=perc,
+                th1_percent=th1p,
                 th2_percent=float(th2p),
             )
-            costs_avggap.append(c)
-            accs_avggap.append(a)
+            costs_line.append(c)
+            delta_accs_line.append((a - default_acc) * 100.0)
+        
+        ax3.plot(costs_line, delta_accs_line, marker='o', label=f'th1={int(th1p)}',
+                color=colors[idx % len(colors)], linewidth=2.0, markersize=7)
+        # 각 점에 th2 라벨 추가
+        for i, th2v in enumerate(th2_list):
+            ax3.annotate(f"th2={int(th2v)}", (costs_line[i], delta_accs_line[i]), 
+                        fontsize=7, alpha=0.7, ha='center')
+    
+    ax3.scatter([1.0], [0.0], marker='*', s=200, label='default', color='gray', zorder=5)
+    ax3.set_xlabel("Computational Cost (× of default)", fontsize=11)
+    ax3.set_ylabel("Δ Accuracy (%)", fontsize=11)
+    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs Δ Accuracy trade-off", fontsize=12)
+    ax3.legend(loc='best', fontsize=10)
+    ax3.grid(True, linestyle='--', alpha=0.4)
+    out_trade = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_vs_DELTA.png")
+    fig3.tight_layout()
+    fig3.savefig(out_trade, bbox_inches="tight")
+    plt.close(fig3)
 
-        # switch_cyclic, ours_top2flip: th2 무관 (baseline beta=0 값 사용)
-        cost_switch = float(cobj.get("switch_cyclic", {}).get("costs", [float("nan")])[0])
-        acc_switch = float(cobj.get("switch_cyclic", {}).get("accuracies", [float("nan")])[0])
-        cost_top2 = float(cobj.get("ours_top2flip", {}).get("costs", [float("nan")])[0])
-        acc_top2 = float(cobj.get("ours_top2flip", {}).get("accuracies", [float("nan")])[0])
-        cost_cyc = float(cobj.get("always", {}).get("cyclic", {}).get("cost", float("nan")))
-        acc_cyc = float(cobj.get("always", {}).get("cyclic", {}).get("acc", float("nan")))
-
-        # Plot 1: Cost vs th2
-        fig1, ax1 = plt.subplots(figsize=(7.5, 5.0), dpi=160)
-        x_vals = [float(t) for t in th2_tradeoff_list]
-        ax1.plot(x_vals, costs_avggap, marker='o', label='ours_avggap', color=_blue())
-        ax1.axhline(y=cost_switch, color='orange', linestyle='--', label='switch_cyclic')
-        ax1.axhline(y=cost_top2, color='green', linestyle='--', label='ours_top2flip')
-        ax1.axhline(y=1.0, color='gray', linestyle=':', label='default')
-        ax1.axhline(y=cost_cyc, color='purple', linestyle=':', label='cyclic')
-        ax1.set_xlabel("th2 (percentile, avg gap)")
-        ax1.set_ylabel("Computational Cost (× of default)")
-        ax1.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs th2 (th1={ptag} fixed) [trade-off]")
-        ax1.set_xticks(x_vals)
-        ax1.set_xticklabels([f"{int(t)}" for t in x_vals])
-        ax1.legend()
-        ax1.grid(True, linestyle='--', alpha=0.4)
-        out_cost = os.path.join(curve_save_path, f"{subject}_{ptag}_th2_tradeoff_COST.png")
-        os.makedirs(os.path.dirname(out_cost), exist_ok=True)
-        fig1.tight_layout()
-        fig1.savefig(out_cost, bbox_inches="tight")
-        plt.close(fig1)
-
-        # Plot 2: Δ Accuracy (%) vs th2
-        fig2, ax2 = plt.subplots(figsize=(7.5, 5.0), dpi=160)
-        delta_avggap = [(a - default_acc) * 100.0 for a in accs_avggap]
-        ax2.plot(x_vals, delta_avggap, marker='o', label='ours_avggap', color=_blue())
-        ax2.axhline(y=(acc_switch - default_acc) * 100.0, color='orange', linestyle='--', label='switch_cyclic')
-        ax2.axhline(y=(acc_top2 - default_acc) * 100.0, color='green', linestyle='--', label='ours_top2flip')
-        ax2.axhline(y=0.0, color='gray', linestyle=':', label='default')
-        ax2.axhline(y=(acc_cyc - default_acc) * 100.0, color='purple', linestyle=':', label='cyclic')
-        ax2.set_xlabel("th2 (percentile, avg gap)")
-        ax2.set_ylabel("Δ Accuracy (%)")
-        ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs th2 (th1={ptag} fixed) [trade-off]")
-        ax2.set_xticks(x_vals)
-        ax2.set_xticklabels([f"{int(t)}" for t in x_vals])
-        ax2.legend()
-        ax2.grid(True, linestyle='--', alpha=0.4)
-        out_delta = os.path.join(curve_save_path, f"{subject}_{ptag}_th2_tradeoff_DELTA_ACC.png")
-        fig2.tight_layout()
-        fig2.savefig(out_delta, bbox_inches="tight")
-        plt.close(fig2)
-
-        # Plot 3: Cost vs Δ Accuracy (trade-off scatter/line)
-        fig3, ax3 = plt.subplots(figsize=(7.5, 5.0), dpi=160)
-        ax3.plot(costs_avggap, delta_avggap, marker='o', label='ours_avggap', color=_blue())
-        for i, th2v in enumerate(th2_tradeoff_list):
-            ax3.annotate(f"th2={int(th2v)}", (costs_avggap[i], delta_avggap[i]), fontsize=8, alpha=0.8)
-        ax3.scatter([cost_switch], [(acc_switch - default_acc) * 100.0], marker='s', s=80, label='switch_cyclic', color='orange')
-        ax3.scatter([cost_top2], [(acc_top2 - default_acc) * 100.0], marker='^', s=80, label='ours_top2flip', color='green')
-        ax3.scatter([1.0], [0.0], marker='*', s=150, label='default', color='gray')
-        ax3.scatter([cost_cyc], [(acc_cyc - default_acc) * 100.0], marker='d', s=80, label='cyclic', color='purple')
-        ax3.set_xlabel("Computational Cost (× of default)")
-        ax3.set_ylabel("Δ Accuracy (%)")
-        ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs Δ Accuracy trade-off (th1={ptag})")
-        ax3.legend()
-        ax3.grid(True, linestyle='--', alpha=0.4)
-        out_trade = os.path.join(curve_save_path, f"{subject}_{ptag}_th2_tradeoff_COST_vs_DELTA.png")
-        fig3.tight_layout()
-        fig3.savefig(out_trade, bbox_inches="tight")
-        plt.close(fig3)
-
-        logger.info(_purple(f"th2 trade-off plots saved: {subject} [{ptag}] (th2={th2_tradeoff_list})"))
-        if wandb_ok and wandb_run is not None:
-            try:
-                import wandb
-                wandb_run.log({
-                    f"plots/{subject}/{ptag}/th2_tradeoff_COST": wandb.Image(out_cost),
-                    f"plots/{subject}/{ptag}/th2_tradeoff_DELTA_ACC": wandb.Image(out_delta),
-                    f"plots/{subject}/{ptag}/th2_tradeoff_COST_vs_DELTA": wandb.Image(out_trade),
-                })
-            except Exception:
-                pass
+    logger.info(_purple(f"th2 trade-off plots saved: {subject} (th1={th1_list}, th2={th2_list})"))
+    if wandb_ok and wandb_run is not None:
+        try:
+            import wandb
+            wandb_run.log({
+                f"plots/{subject}/th2_tradeoff_COST": wandb.Image(out_cost),
+                f"plots/{subject}/th2_tradeoff_DELTA_ACC": wandb.Image(out_delta),
+                f"plots/{subject}/th2_tradeoff_COST_vs_DELTA": wandb.Image(out_trade),
+            })
+        except Exception:
+            pass
 
 
 def _parse_percent_value_list(v) -> List[float]:
@@ -1693,26 +1714,26 @@ def main():
                     save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', curve_objs_baseline, metrics=None)
 
                     # =========================================================
-                    # th2 trade-off plot: th2 (5, 10, 20, 30)에 따른 cost/acc 변화
-                    # th1은 perc로 고정, th2만 5/10/20/30으로 변화
+                    # th2 trade-off plot: th1 (5, 10, 20, 30)에 대해 각각 th2 (5, 10, 20, 30) curve
                     # =========================================================
+                    th1_tradeoff_list = _parse_percent_value_list(
+                        getattr(args, "ours_th1_tradeoff", "5,10,20,30")
+                    )
                     th2_tradeoff_list = _parse_percent_value_list(
                         getattr(args, "ours_th2_tradeoff", "5,10,20,30")
                     )
-                    if len(th2_tradeoff_list) > 0 and len(per_sample_probs) > 0:
+                    if len(th1_tradeoff_list) > 0 and len(th2_tradeoff_list) > 0 and len(per_sample_probs) > 0:
                         _compute_and_plot_th2_tradeoff(
                             subject=subject,
                             curve_save_path=curve_save_path,
-                            perc_list=perc_list,
-                            baseline_by_p=baseline_by_p,
+                            th1_list=th1_tradeoff_list,
+                            th2_list=th2_tradeoff_list,
                             default_conf=default_conf,
                             mean_conf=mean_conf,
                             base_correct_list=base_correct_list,
                             cyclic_correct_list=cyclic_correct_list,
                             arr_probe2_correct=arr_probe2_correct,
-                            arr_flip_trigger=arr_flip_trigger,
                             k=k,
-                            th2_tradeoff_list=th2_tradeoff_list,
                             args=args,
                             wandb_ok=wandb_ok,
                             wandb_run=wandb_run,
