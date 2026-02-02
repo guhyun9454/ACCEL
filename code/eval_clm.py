@@ -712,6 +712,97 @@ def _plot_heatmap_with_text(
     plt.close()
 
 
+def _plot_confidence_distribution(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    out_path: str,
+    title: str
+):
+    """
+    default_conf (Base Gap)와 mean_conf (Avg Gap)의 분포(Histogram)를 그리고
+    주요 Percentile 지점(10, 20, 30)을 표시
+    """
+    plt.figure(figsize=(10, 6), dpi=160)
+    
+    # Histogram
+    plt.hist(default_conf, bins=50, range=(0, 1), alpha=0.5, label='Base Gap (default_conf)', color='gray', density=True)
+    plt.hist(mean_conf, bins=50, range=(0, 1), alpha=0.5, label='Avg Gap (mean_conf)', color='blue', density=True)
+    
+    # Percentiles
+    percs = [10, 20, 30]
+    colors = ['red', 'green', 'purple']
+    
+    # Base Gap Percentiles
+    for p, c in zip(percs, colors):
+        val = np.percentile(default_conf, p)
+        plt.axvline(val, color=c, linestyle='--', alpha=0.7, label=f'Base p{p}: {val:.3f}')
+        
+    # Avg Gap Percentiles
+    for p, c in zip(percs, colors):
+        val = np.percentile(mean_conf, p)
+        plt.axvline(val, color=c, linestyle=':', alpha=0.9, linewidth=2, label=f'Avg p{p}: {val:.3f}')
+
+    plt.xlabel("Confidence Gap")
+    plt.ylabel("Density")
+    plt.title(title)
+    plt.legend(loc='upper right')
+    plt.grid(True, alpha=0.3)
+    
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
+def _plot_baseline_points_scatter(
+    curve_obj: dict,
+    out_path: str,
+    title: str
+):
+    """
+    Baseline report에 나오는 각 정책들의 Cost vs Accuracy를 Point로 찍어서 비교
+    """
+    plt.figure(figsize=(8, 6), dpi=160)
+    
+    # 1. Always Points (Reference)
+    always = curve_obj.get("always", {})
+    if "default" in always:
+        plt.scatter(always["default"]["cost"], always["default"]["acc"], 
+                   marker='*', s=300, color='gray', label='Default', zorder=10)
+    if "cyclic" in always:
+        plt.scatter(always["cyclic"]["cost"], always["cyclic"]["acc"], 
+                   marker='d', s=150, color='purple', label='Cyclic', zorder=10)
+    if "full" in always:
+        plt.scatter(always["full"]["cost"], always["full"]["acc"], 
+                   marker='X', s=150, color='black', label='Full', zorder=10)
+
+    # 2. Policy Points (beta=0)
+    policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
+    markers = ['s', '^', 'v', 'o']
+    colors = ['orange', 'brown', 'green', 'blue']
+    
+    for key, m, c in zip(policies, markers, colors):
+        if key in curve_obj:
+            # beta=0 is the first element
+            cost = float(curve_obj[key]["costs"][0])
+            acc = float(curve_obj[key]["accuracies"][0])
+            plt.scatter(cost, acc, marker=m, s=120, color=c, label=key, alpha=0.9)
+            # Annotate
+            plt.annotate(f"{key}\n({cost:.2f}, {acc:.4f})", (cost, acc), 
+                        xytext=(5, 5), textcoords='offset points', fontsize=8)
+
+    plt.xlabel("Computational Cost (× of default)")
+    plt.ylabel("Accuracy")
+    plt.title(title)
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.legend(loc='lower right')
+    
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
 def _compute_and_plot_th2_tradeoff(
     subject: str,
     curve_save_path: str,
@@ -1710,6 +1801,36 @@ def main():
                             curve_objs_baseline.append(cobj)
                             baseline_by_p[perc] = cobj
                             _log_baseline_report(cobj)
+
+                            # [ADD] Baseline Point Plot (Cost vs Acc scatter)
+                            ptag = f"p{int(round(perc))}"
+                            out_pts = os.path.join(curve_save_path, f"{subject}_{ptag}_baseline_points.png")
+                            _plot_baseline_points_scatter(
+                                curve_obj=cobj,
+                                out_path=out_pts,
+                                title=f"{args.task} {subject} — Baseline Policies (beta=0, {ptag})"
+                            )
+                            if wandb_ok and wandb_run is not None:
+                                try:
+                                    import wandb
+                                    wandb_run.log({f"plots/{subject}/{ptag}/baseline_points": wandb.Image(out_pts)})
+                                except Exception:
+                                    pass
+
+                    # [ADD] Confidence Distribution Plot (th1/th2 thresholds for p=10,20,30)
+                    out_dist = os.path.join(curve_save_path, f"{subject}_confidence_distribution.png")
+                    _plot_confidence_distribution(
+                        default_conf=default_conf,
+                        mean_conf=mean_conf,
+                        out_path=out_dist,
+                        title=f"{args.task} {subject} — Confidence Gap Distribution"
+                    )
+                    if wandb_ok and wandb_run is not None:
+                        try:
+                            import wandb
+                            wandb_run.log({f"plots/{subject}/confidence_distribution": wandb.Image(out_dist)})
+                        except Exception:
+                            pass
 
                     save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', curve_objs_baseline, metrics=None)
 
