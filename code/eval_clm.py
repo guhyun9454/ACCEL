@@ -809,7 +809,7 @@ def _plot_baseline_points_scatter(
     plt.close()
 
 
-def _run_online_adaptive_policy(
+def _run_online_sqrt_policy(
     default_conf: np.ndarray,
     mean_conf: np.ndarray,
     base_correct: List[bool],
@@ -819,62 +819,75 @@ def _run_online_adaptive_policy(
     th1_percent: float
 ) -> Tuple[float, float, float]:
     """
-    Online Adaptive Policy:
-    - 문제를 풀면서 실시간으로 'AvgBaseGap'을 업데이트 (누적 평균).
-    - th2 = th1 * (1 - CurrentAvgGap) 으로 동적으로 기준 변경.
-    - return: (avg_cost, accuracy, final_converged_th2)
+    [Online Adaptive Policy]
+    th2 = th1 * sqrt(1 - CurrentAvgGap)
+    
+    - CurrentAvgGap: 현재 시점(t)까지 관측된 default_conf들의 평균 (Running Average)
+    - 미래 정보(Oracle)를 사용하지 않음.
+    
+    Returns:
+        avg_cost, accuracy, final_converged_th2_percentile
     """
     N = len(base_correct)
     if N == 0:
-        return 1.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0
 
     dc = np.asarray(default_conf, dtype=np.float64)
     mc = np.asarray(mean_conf, dtype=np.float64)
-    
-    # th1은 고정 (사용자가 정한 percentile)
-    th1 = _quantile(dc, float(th1_percent) / 100.0)
-    
+    th1_val = _quantile(dc, float(th1_percent) / 100.0)
+
     total_cost = 0.0
     corrects = 0
     
-    # Online Running Stats
     running_gap_sum = 0.0
     running_cnt = 0
     
-    current_th2 = th1 * 0.5  # 초기값은 절반으로 시작 (정보 없음)
+    final_th2_val = 0.0
 
     for i in range(N):
-        # 1. 현재 샘플의 Base Gap 정보 획득 -> AvgGap 업데이트
         gap_i = float(dc[i])
-        running_gap_sum += gap_i
-        running_cnt += 1
         
-        current_avg_gap = running_gap_sum / running_cnt
-        
-        # Adaptive Rule
-        current_th2 = th1 * (1.0 - current_avg_gap)
-        if current_th2 < 0: current_th2 = 0.0
+        # 1. Update Running Average (Decision based on PAST info)
+        if running_cnt > 0:
+            current_avg_gap = running_gap_sum / running_cnt
+        else:
+            current_avg_gap = 0.0
+            
+        # 2. Dynamic th2 Calculation
+        safe_avg = min(1.0, max(0.0, current_avg_gap))
+        current_th2_val = th1_val * np.sqrt(1.0 - safe_avg)
+        final_th2_val = current_th2_val
 
-        # 2. Policy Action
-        if gap_i >= th1:
+        # 3. Policy Execution
+        if gap_i >= th1_val:
             total_cost += 1.0
             corrects += 1 if base_correct[i] else 0
         else:
-            if float(mc[i]) < current_th2:
+            if float(mc[i]) < current_th2_val:
                 total_cost += float(k)
                 corrects += 1 if cyclic_correct[i] else 0
             else:
                 total_cost += 2.0
                 corrects += 1 if bool(probe2_correct[i]) else 0
+        
+        # 4. Update Stats
+        running_gap_sum += gap_i
+        running_cnt += 1
 
-    return total_cost / float(N), corrects / float(N), current_th2
+    # Calculate equivalent percentile for the final th2 value for plotting
+    if len(mc) > 0:
+        final_th2_perc = (np.sum(mc < final_th2_val) / len(mc)) * 100.0
+    else:
+        final_th2_perc = 0.0
+
+    return total_cost / float(N), corrects / float(N), final_th2_perc
 
 
 def _compute_and_plot_th2_tradeoff(
     subject: str,
     curve_save_path: str,
     th1_list: List[float],
-    th2_list: List[float],  # 사용자가 입력한 주요 틱 (5,10,20,30)
+    th2_list: List[float],
     default_conf: np.ndarray,
     mean_conf: np.ndarray,
     base_correct_list: List[bool],
@@ -888,7 +901,7 @@ def _compute_and_plot_th2_tradeoff(
     """
     th1/th2 trade-off plot: 
     - th1을 고정하고, th2를 0부터 촘촘하게 변화시켜 부드러운 곡선 생성
-    - th2 = th1 / 2 지점을 별표(★)로 표시
+    - Online Sqrt(1-Gap) 포인트 표시
     """
     default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
     
@@ -920,41 +933,21 @@ def _compute_and_plot_th2_tradeoff(
             costs.append(c)
         ax1.plot(dense_th2_list, costs, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.8)
 
-        # 3) Highlight "Adaptive Uncertainty" point (Smart Rule - Oracle)
-        # 전체 데이터 평균(Oracle)을 알 때의 성능 (이상적인 목표치)
-        avg_base_gap_oracle = float(np.mean(default_conf))
-        target_th2_oracle = th1p * (1.0 - avg_base_gap_oracle)
-        c_oracle, a_oracle = _policy_metrics_avggap_beta0(
+        # 2) [ONLINE] th1 * sqrt(1 - AvgGap)
+        c_sqrt, a_sqrt, final_th2_perc = _run_online_sqrt_policy(
             default_conf=default_conf,
             mean_conf=mean_conf,
             base_correct=base_correct_list,
             cyclic_correct=cyclic_correct_list,
             probe2_correct=arr_probe2_correct,
             k=k,
-            th1_percent=th1p,
-            th2_percent=target_th2_oracle,
+            th1_percent=th1p
         )
-        ax1.scatter([target_th2_oracle], [c_oracle], marker='v', s=120, color=color, edgecolors='black', zorder=5, label='Adaptive(Oracle)' if idx==0 else "")
-
-        # 4) [NEW] th1 * sqrt(1 - AvgGap)
-        # 사용자가 요청한 새로운 휴리스틱: th2 = th1 * sqrt(1 - AvgBaseGap)
-        avg_base_gap = float(np.mean(default_conf))
-        target_sqrt_gap = th1p * np.sqrt(1.0 - avg_base_gap)
-        c_sqrt, a_sqrt = _policy_metrics_avggap_beta0(
-            default_conf=default_conf,
-            mean_conf=mean_conf,
-            base_correct=base_correct_list,
-            cyclic_correct=cyclic_correct_list,
-            probe2_correct=arr_probe2_correct,
-            k=k,
-            th1_percent=th1p,
-            th2_percent=target_sqrt_gap,
-        )
-        ax1.scatter([target_sqrt_gap], [c_sqrt], marker='D', s=100, color=color, edgecolors='black', zorder=5, label='Sqrt(1-Gap)' if idx==0 else "")
+        ax1.scatter([final_th2_perc], [c_sqrt], marker='D', s=100, color=color, edgecolors='black', zorder=5, label='Online Sqrt' if idx==0 else "")
 
     ax1.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
     ax1.set_ylabel("Computational Cost (× of default)", fontsize=11)
-    ax1.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs th2", fontsize=12)
+    ax1.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs th2 (Online)", fontsize=12)
     ax1.set_xticks(th2_list) # 사용자가 지정한 주요 틱만 표시
     ax1.set_xticklabels([f"{int(t)}" for t in th2_list])
     ax1.legend(loc='best', fontsize=10)
@@ -990,58 +983,23 @@ def _compute_and_plot_th2_tradeoff(
         delta_accs = [(a - default_acc) * 100.0 for a in accs]
         ax2.plot(dense_th2_list, delta_accs, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.8)
 
-        # 2) Highlight "th2 = th1 / 2" point
-        target_th2 = th1p / 2.0
-        _, a_half = _policy_metrics_avggap_beta0(
+        # 2) [ONLINE] th1 * sqrt(1 - AvgGap)
+        c_sqrt, a_sqrt, final_th2_perc = _run_online_sqrt_policy(
             default_conf=default_conf,
             mean_conf=mean_conf,
             base_correct=base_correct_list,
             cyclic_correct=cyclic_correct_list,
             probe2_correct=arr_probe2_correct,
             k=k,
-            th1_percent=th1p,
-            th2_percent=target_th2,
-        )
-        d_half = (a_half - default_acc) * 100.0
-        ax2.scatter([target_th2], [d_half], marker='*', s=150, color=color, edgecolors='black', zorder=5)
-
-        # 3) Highlight "Adaptive Oracle" point
-        avg_base_gap_oracle = float(np.mean(default_conf))
-        target_th2_oracle = th1p * (1.0 - avg_base_gap_oracle)
-        _, a_oracle = _policy_metrics_avggap_beta0(
-            default_conf=default_conf,
-            mean_conf=mean_conf,
-            base_correct=base_correct_list,
-            cyclic_correct=cyclic_correct_list,
-            probe2_correct=arr_probe2_correct,
-            k=k,
-            th1_percent=th1p,
-            th2_percent=target_th2_oracle,
-        )
-        d_oracle = (a_oracle - default_acc) * 100.0
-        ax2.scatter([target_th2_oracle], [d_oracle], marker='v', s=120, color=color, edgecolors='black', zorder=5)
-
-        # 4) [NEW] th1 * sqrt(1 - AvgGap)
-        # 사용자가 요청한 새로운 휴리스틱: th2 = th1 * sqrt(1 - AvgBaseGap)
-        avg_base_gap = float(np.mean(default_conf))
-        target_sqrt_gap = th1p * np.sqrt(1.0 - avg_base_gap)
-        c_sqrt, a_sqrt = _policy_metrics_avggap_beta0(
-            default_conf=default_conf,
-            mean_conf=mean_conf,
-            base_correct=base_correct_list,
-            cyclic_correct=cyclic_correct_list,
-            probe2_correct=arr_probe2_correct,
-            k=k,
-            th1_percent=th1p,
-            th2_percent=target_sqrt_gap,
+            th1_percent=th1p
         )
         d_sqrt = (a_sqrt - default_acc) * 100.0
-        ax2.scatter([target_sqrt_gap], [d_sqrt], marker='D', s=100, color=color, edgecolors='black', zorder=5)
+        ax2.scatter([final_th2_perc], [d_sqrt], marker='D', s=100, color=color, edgecolors='black', zorder=5)
 
     ax2.axhline(y=0.0, color='gray', linestyle=':', linewidth=1.0, alpha=0.5)
     ax2.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
     ax2.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs th2", fontsize=12)
+    ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs th2 (Online)", fontsize=12)
     ax2.set_xticks(th2_list)
     ax2.set_xticklabels([f"{int(t)}" for t in th2_list])
     ax2.legend(loc='best', fontsize=10)
@@ -1076,57 +1034,30 @@ def _compute_and_plot_th2_tradeoff(
         
         ax3.plot(costs_line, delta_accs_line, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.4)
         
-        # --- 3 Points Comparison ---
+        # --- Single Point Comparison (Online Sqrt(1-Gap)) ---
         
-        # 1. th1 / 2 (Simple)
-        target_half = th1p / 2.0
-        c1, a1 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, target_half)
-        d1 = (a1 - default_acc) * 100.0
-        ax3.scatter([c1], [d1], marker='*', s=180, color=color, edgecolors='black', zorder=5, label='th1/2' if idx==0 else "")
-        ax3.annotate(f"{d1:.2f}", (c1, d1), xytext=(0, 6), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
-
-        # 2. th1^2 (Square Law - Strict)
-        th1_val = _quantile(default_conf, th1p / 100.0)
-        th2_val_sq = th1_val ** 2
-        # th2_val_sq에 해당하는 percentile 역산
-        target_sq = (np.sum(mean_conf < th2_val_sq) / len(mean_conf)) * 100.0
-        c2, a2 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, target_sq)
-        d2 = (a2 - default_acc) * 100.0
-        ax3.scatter([c2], [d2], marker='s', s=120, color=color, edgecolors='black', zorder=5, label='th1^2' if idx==0 else "")
-        ax3.annotate(f"{d2:.2f}", (c2, d2), xytext=(0, 6), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
-
-        # 3. th1^1.5 (Power Law 1.5 - Balanced)
-        th2_val_pow = th1_val ** 1.5
-        target_pow = (np.sum(mean_conf < th2_val_pow) / len(mean_conf)) * 100.0
-        c3, a3 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, target_pow)
-        d3 = (a3 - default_acc) * 100.0
-        ax3.scatter([c3], [d3], marker='^', s=120, color=color, edgecolors='black', zorder=5, label='th1^1.5' if idx==0 else "")
-        # 겹침 방지: 위치가 너무 가까우면 텍스트를 아래로
-        y_offset = -14 if abs(c3 - c1) < 0.02 else 6
-        ax3.annotate(f"{d3:.2f}", (c3, d3), xytext=(0, y_offset), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
-
-        # 4. th1 * sqrt(1 - AvgGap) [NEW]
-        avg_base_gap = float(np.mean(default_conf))
-        target_sqrt_gap = th1p * np.sqrt(1.0 - avg_base_gap)
-        c4, a4 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, target_sqrt_gap)
+        # [ONLINE] th1 * sqrt(1 - AvgGap)
+        c4, a4, _ = _run_online_sqrt_policy(
+            default_conf=default_conf,
+            mean_conf=mean_conf,
+            base_correct=base_correct_list,
+            cyclic_correct=cyclic_correct_list,
+            probe2_correct=arr_probe2_correct,
+            k=k,
+            th1_percent=th1p
+        )
         d4 = (a4 - default_acc) * 100.0
-        ax3.scatter([c4], [d4], marker='D', s=100, color=color, edgecolors='black', zorder=5, label='Sqrt(1-Gap)' if idx==0 else "")
-        # 겹침 방지: 위치가 너무 가까우면 텍스트를 위/아래로 조정
-        y_offset_4 = 6
-        if abs(c4 - c3) < 0.02 and abs(d4 - d3) < 0.2:
-            y_offset_4 = -14
-        ax3.annotate(f"{d4:.2f}", (c4, d4), xytext=(0, y_offset_4), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
+        ax3.scatter([c4], [d4], marker='D', s=100, color=color, edgecolors='black', zorder=5, label='Online Sqrt' if idx==0 else "")
+        
+        ax3.annotate(f"{d4:.2f}", (c4, d4), xytext=(0, 6), textcoords='offset points', fontsize=8, ha='center', color=color, fontweight='bold')
 
         # Report Log
-        logger.info(f"[th1={int(th1p):<2}] th1/2       : cost={c1:.3f}, acc={a1:.4f} (+{d1:.2f}%)")
-        logger.info(f"[th1={int(th1p):<2}] th1^2       : cost={c2:.3f}, acc={a2:.4f} (+{d2:.2f}%)")
-        logger.info(f"[th1={int(th1p):<2}] th1^1.5     : cost={c3:.3f}, acc={a3:.4f} (+{d3:.2f}%)")
-        logger.info(f"[th1={int(th1p):<2}] Sqrt(1-Gap) : cost={c4:.3f}, acc={a4:.4f} (+{d4:.2f}%)")
+        logger.info(f"[th1={int(th1p):<2}] Online Sqrt : cost={c4:.3f}, acc={a4:.4f} (+{d4:.2f}%)")
 
     ax3.scatter([1.0], [0.0], marker='*', s=200, label='default', color='gray', zorder=5)
     ax3.set_xlabel("Computational Cost (× of default)", fontsize=11)
     ax3.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — 4-Point Trade-off", fontsize=12)
+    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — Trade-off (Online Sqrt)", fontsize=12)
     ax3.legend(loc='best', fontsize=10)
     ax3.grid(True, linestyle='--', alpha=0.4)
     out_trade = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_vs_DELTA.png")
@@ -2006,16 +1937,22 @@ def main():
                             th1p = float(perc)
                             extra_pts = []
                             
-                            # 3. th1 * sqrt(1 - AvgGap) [NEW] ONLY
-                            avg_base_gap = float(np.mean(default_conf))
-                            target_sqrt_gap = th1p * np.sqrt(1.0 - avg_base_gap)
-                            c4, a4 = _policy_metrics_avggap_beta0(default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, target_sqrt_gap)
-                            extra_pts.append({'cost': c4, 'acc': a4, 'label': 'Sqrt(1-Gap)', 'marker': 'D', 'color': 'orange'})
+                            # 3. th1 * sqrt(1 - AvgGap) [ONLINE] ONLY
+                            c4, a4, _ = _run_online_sqrt_policy(
+                                default_conf=default_conf,
+                                mean_conf=mean_conf,
+                                base_correct=base_correct_list,
+                                cyclic_correct=cyclic_correct_list,
+                                probe2_correct=arr_probe2_correct,
+                                k=k,
+                                th1_percent=th1p
+                            )
+                            extra_pts.append({'cost': c4, 'acc': a4, 'label': 'Online Sqrt', 'marker': 'D', 'color': 'orange'})
 
                             _plot_baseline_points_scatter(
                                 curve_obj=cobj,
                                 out_path=out_pts,
-                                title=f"{args.task} {subject} — Baseline Policies (beta=0, {ptag})",
+                                title=f"{args.task} {subject} — Baseline Policies (beta=0, {ptag}, Online)",
                                 extra_points=extra_pts
                             )
                             if wandb_ok and wandb_run is not None:
