@@ -239,14 +239,18 @@ def prepare_eval(args, eval_name):
         if setting is not None and setting.startswith('move'):
             df = df.apply(lambda x: move_answer(x, moved_answer), axis=1)
 
-        if setting in ['perm', 'full']:
+        # NOTE: full permutation은 k!로 급증하므로, k>=5에서는 full이라도 cyclic만 생성(자동 다운그레이드)
+        k_opts = len(option_ids_header)
+        full_permutation_disabled = (setting == 'full' and k_opts >= 5)
+
+        if setting in ['perm'] or (setting == 'full' and not full_permutation_disabled):
             inputs = df.apply(lambda x: [
                 [
                     sys_msg.format(subject.replace('_', ' ')),
                     create_user_prompt(x["Question"], permuted_options),
                 ] for permuted_options in permute_options([x[e] for e in option_ids_header])
             ], axis=1).to_list()
-        elif setting in ['cyclic']:
+        elif setting in ['cyclic'] or (setting == 'full' and full_permutation_disabled):
             inputs = df.apply(lambda x: [
                 [
                     sys_msg.format(subject.replace('_', ' ')),

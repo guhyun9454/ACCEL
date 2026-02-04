@@ -1672,6 +1672,7 @@ def _compute_curves_for_one_percentile(
     flip_trigger: np.ndarray,
     probe2_correct: np.ndarray,
     perc_value: float,
+    full_enabled: bool = True,
     betas: Optional[List[float]] = None
 ) -> dict:
     """
@@ -1694,11 +1695,11 @@ def _compute_curves_for_one_percentile(
     perc01 = float(max(0.0, min(100.0, perc_value))) / 100.0
 
     C_cyc = float(k)
-    C_full = float(len(perm_list))
+    C_full = float(len(perm_list)) if full_enabled else float("nan")
 
     default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
     cyclic_acc_always = float(np.mean(np.asarray(cyclic_correct_list, dtype=np.float64)))
-    full_acc_always = float(np.mean(np.asarray(full_correct_list, dtype=np.float64)))
+    full_acc_always = float(np.mean(np.asarray(full_correct_list, dtype=np.float64))) if full_enabled and len(full_correct_list) == N else float("nan")
 
     # 1) cyclic/full beta curves
     curve_cyc = []
@@ -1707,13 +1708,14 @@ def _compute_curves_for_one_percentile(
         n = int(N * beta + 1e-9)
 
         acc_cyc = (sum(base_correct_list[:n]) + sum(cyclic_correct_list[n:])) / float(N)
-        acc_full = (sum(base_correct_list[:n]) + sum(full_correct_list[n:])) / float(N)
+        acc_full = (sum(base_correct_list[:n]) + sum(full_correct_list[n:])) / float(N) if full_enabled and len(full_correct_list) == N else float("nan")
 
         cost_cyc = beta * 1.0 + (1.0 - beta) * C_cyc
-        cost_full = beta * 1.0 + (1.0 - beta) * C_full
+        cost_full = beta * 1.0 + (1.0 - beta) * C_full if full_enabled else float("nan")
 
         curve_cyc.append((cost_cyc, acc_cyc))
-        curve_full.append((cost_full, acc_full))
+        if full_enabled:
+            curve_full.append((cost_full, acc_full))
 
     # 2) switch curves
     curve_switch_full = []
@@ -1748,12 +1750,13 @@ def _compute_curves_for_one_percentile(
 
             amb = (float(default_conf[i]) < thresh)
 
-            if amb:
-                total_cost_sf += C_full
-                corrects_sf += 1 if full_correct_list[i] else 0
-            else:
-                total_cost_sf += 1.0
-                corrects_sf += 1 if base_correct_list[i] else 0
+            if full_enabled and len(full_correct_list) == N:
+                if amb:
+                    total_cost_sf += C_full
+                    corrects_sf += 1 if full_correct_list[i] else 0
+                else:
+                    total_cost_sf += 1.0
+                    corrects_sf += 1 if base_correct_list[i] else 0
 
             if amb:
                 total_cost_sc += C_cyc
@@ -1765,7 +1768,8 @@ def _compute_curves_for_one_percentile(
             # Update past gaps AFTER decision
             past_gaps.append(float(default_conf[i]))
 
-        curve_switch_full.append((total_cost_sf / float(N), corrects_sf / float(N)))
+        if full_enabled and len(full_correct_list) == N:
+            curve_switch_full.append((total_cost_sf / float(N), corrects_sf / float(N)))
         curve_switch_cyc.append((total_cost_sc / float(N), corrects_sc / float(N)))
 
     # 3) ours_top2flip
@@ -1812,16 +1816,18 @@ def _compute_curves_for_one_percentile(
         "always": {
             "default": {"cost": 1.0, "acc": float(default_acc)},
             "cyclic": {"cost": float(C_cyc), "acc": float(cyclic_acc_always)},
-            "full": {"cost": float(C_full), "acc": float(full_acc_always)},
         },
 
         "cyclic": {"costs": [float(c) for c, _ in curve_cyc], "accuracies": [float(a) for _, a in curve_cyc]},
-        "full": {"costs": [float(c) for c, _ in curve_full], "accuracies": [float(a) for _, a in curve_full]},
-        "switch_full": {"costs": [float(c) for c, _ in curve_switch_full], "accuracies": [float(a) for _, a in curve_switch_full]},
         "switch_cyclic": {"costs": [float(c) for c, _ in curve_switch_cyc], "accuracies": [float(a) for _, a in curve_switch_cyc]},
         "ours_top2flip": {"costs": [float(c) for c, _ in curve_top2flip], "accuracies": [float(a) for _, a in curve_top2flip]},
         "ours_avggap": {"costs": [float(c) for c, _ in curve_avggap], "accuracies": [float(a) for _, a in curve_avggap]},
     }
+    if full_enabled:
+        curve_obj["always"]["full"] = {"cost": float(C_full), "acc": float(full_acc_always)}
+        curve_obj["full"] = {"costs": [float(c) for c, _ in curve_full], "accuracies": [float(a) for _, a in curve_full]}
+        if len(curve_switch_full) > 0:
+            curve_obj["switch_full"] = {"costs": [float(c) for c, _ in curve_switch_full], "accuracies": [float(a) for _, a in curve_switch_full]}
     return curve_obj
 
 
@@ -1971,7 +1977,10 @@ def _log_baseline_report(curve_obj: dict):
     always = curve_obj.get("always", {})
     logger.info(f"BASELINE default(ensemble) : cost={always['default']['cost']:.3f}, acc={always['default']['acc']:.4f}")
     logger.info(f"BASELINE cyclic(ensemble)  : cost={always['cyclic']['cost']:.3f}, acc={always['cyclic']['acc']:.4f}")
-    logger.info(f"BASELINE full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}")
+    if "full" in always:
+        logger.info(f"BASELINE full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}")
+    else:
+        logger.info("BASELINE full(ensemble)    : (disabled)")
 
     for key in ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]:
         if key in curve_obj:
@@ -2080,9 +2089,21 @@ def main():
                         option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
                     k = len(option_ids)
 
+                    # If results contain only k rotations (e.g., k>=5 full-permutation disabled),
+                    # aggregate with rotations instead of factorial permutations.
+                    probs_len0 = None
+                    try:
+                        probs_len0 = len(results[0]['data'].get('probs', []))
+                    except Exception:
+                        probs_len0 = None
+
                     if args.setting in ['perm', 'full']:
-                        from itertools import permutations
-                        perm_list = list(sorted(permutations(range(k))))
+                        if probs_len0 == k:
+                            logger.info(_orange(f"[Auto] Full permutation disabled or not provided (k={k}). Using cyclic rotations for aggregation."))
+                            perm_list = _rotations(k)
+                        else:
+                            from itertools import permutations
+                            perm_list = list(sorted(permutations(range(k))))
                     else:
                         perm_list = _rotations(k)
 
@@ -2116,7 +2137,7 @@ def main():
                 logger.info(f"Results saved: {subject}")
 
             # =========================================================
-            # Derived policies & PRIDE_FREE (ONLY when args.setting == 'full')
+            # Derived policies & PRIDE_FREE (historically ONLY when args.setting == 'full')
             # =========================================================
             if args.setting == 'full' and len(results) > 0:
                 try:
@@ -2127,8 +2148,21 @@ def main():
                         option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
                     k = len(option_ids)
 
-                    from itertools import permutations
-                    perm_list = list(sorted(permutations(range(k))))
+                    # Determine whether full permutations exist in cached results.
+                    probs_len0 = None
+                    try:
+                        probs_len0 = len(results[0]['data'].get('probs', []))
+                    except Exception:
+                        probs_len0 = None
+
+                    full_enabled = (probs_len0 is not None and probs_len0 == math.factorial(k))
+                    if full_enabled:
+                        from itertools import permutations
+                        perm_list = list(sorted(permutations(range(k))))
+                    else:
+                        # fallback to cyclic rotations only
+                        logger.info(_orange(f"[Auto] k={k} full permutations not available. Running derived policies with cyclic rotations only."))
+                        perm_list = _rotations(k)
                     identity_idx = perm_list.index(tuple(range(k)))
 
                     cyclic_indices = [
@@ -2207,13 +2241,14 @@ def main():
                             },
                         })
 
-                        # full (all perms)
-                        agg_full = _aggregate_probs_over_permutations(probs_seq_np, perm_list, k)
-                        pred_full = option_ids[int(np.argmax(agg_full))]
-                        corr_full = (pred_full == data['ideal'])
-                        full_correct_list.append(corr_full)
-                        full_corrects += 1 if corr_full else 0
-                        full_total += 1
+                        # full (all perms) - only if available
+                        if full_enabled:
+                            agg_full = _aggregate_probs_over_permutations(probs_seq_np, perm_list, k)
+                            pred_full = option_ids[int(np.argmax(agg_full))]
+                            corr_full = (pred_full == data['ideal'])
+                            full_correct_list.append(corr_full)
+                            full_corrects += 1 if corr_full else 0
+                            full_total += 1
 
                     # ---------- confidence stats & probe triggers (baseline) ----------
                     default_conf = []          # base gap (letter-space)
@@ -2277,7 +2312,10 @@ def main():
 
                     logger.info(_orange(f"Derived and saved cyclic results: {subject}"))
                     logger.info(_orange(f"Derived and saved base results: {subject}"))
-                    logger.info(_purple(f"[{subject}] Accuracies — Full: {full_acc:.4f}, Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
+                    if full_enabled:
+                        logger.info(_purple(f"[{subject}] Accuracies — Full: {full_acc:.4f}, Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
+                    else:
+                        logger.info(_purple(f"[{subject}] Accuracies — Full: (disabled), Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
 
                     # ---------- compute & save beta curves (baseline) ----------
                     curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
@@ -2298,12 +2336,13 @@ def main():
                             perm_list=perm_list,
                             base_correct_list=base_correct_list,
                             cyclic_correct_list=cyclic_correct_list,
-                            full_correct_list=full_correct_list,
+                            full_correct_list=full_correct_list if full_enabled else [],
                             default_conf=default_conf,
                             mean_conf=mean_conf,
                             flip_trigger=arr_flip_trigger,
                             probe2_correct=arr_probe2_correct,
                             perc_value=perc,
+                            full_enabled=bool(full_enabled),
                         )
                         if cobj:
                             curve_objs_baseline.append(cobj)
