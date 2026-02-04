@@ -820,7 +820,7 @@ def _run_online_sqrt_policy(
 ) -> Tuple[float, float, float]:
     """
     [Online Sqrt Policy]
-    th1 = fixed percentile
+    th1 = online percentile (running quantile over observed default_conf gaps)
     th2 = th1 * sqrt(1 - CurrentAvgGap) (Online)
     """
     N = len(base_correct)
@@ -829,22 +829,25 @@ def _run_online_sqrt_policy(
 
     dc = np.asarray(default_conf, dtype=np.float64)
     mc = np.asarray(mean_conf, dtype=np.float64)
-    # th1 is fixed based on offline/entire distribution percentile for simplicity in this context,
-    # or strictly online quantile if desired. adhering to user's "th1 fixed" context for this rule.
-    # But to be "fully online", th1 should be fixed value provided or estimated.
-    # Here we use the global quantile value passed as conceptual 'th1'.
-    th1_val = _quantile(dc, float(th1_percent) / 100.0)
 
     total_cost = 0.0
     corrects = 0
     
     running_gap_sum = 0.0
     running_cnt = 0
+    past_gaps: List[float] = []
     
     final_th2_val = 0.0
 
     for i in range(N):
         gap_i = float(dc[i])
+
+        # 0) Online th1 (decision uses past observed gaps only)
+        if len(past_gaps) > 0:
+            th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), float(th1_percent) / 100.0))
+        else:
+            # 초기에는 보수적/공격적 선택이 필요함. 여기서는 "일단 통과" 쪽(0.0)으로 둠.
+            th1_val = 0.0
         
         # 1. Update Running Average
         if running_cnt > 0:
@@ -871,6 +874,153 @@ def _run_online_sqrt_policy(
         
         running_gap_sum += gap_i
         running_cnt += 1
+        past_gaps.append(gap_i)
+
+    if len(mc) > 0:
+        final_th2_perc = (np.sum(mc < final_th2_val) / len(mc)) * 100.0
+    else:
+        final_th2_perc = 0.0
+
+    return total_cost / float(N), corrects / float(N), final_th2_perc
+
+
+def _run_online_sqrt_policy_lowconf_update(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float
+) -> Tuple[float, float, float]:
+    """
+    [Online Sqrt Policy — LowConf-only update]
+    th1 = online percentile (running quantile over observed default_conf gaps)
+    th2 = th1 * sqrt(1 - CurrentAvgGapLowConf) (Online)
+
+    - CurrentAvgGapLowConf: 과거(t-1)까지의 "th1 gate를 통과한(low-conf: dc < th1)" 샘플들의 default_conf 평균
+      (즉, 2-stage로 들어온 샘플들만으로 AvgGap을 업데이트)
+    """
+    N = len(base_correct)
+    if N == 0:
+        return 0.0, 0.0, 0.0
+
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+
+    total_cost = 0.0
+    corrects = 0
+
+    low_sum = 0.0
+    low_cnt = 0
+    final_th2_val = 0.0
+    past_gaps: List[float] = []
+
+    for i in range(N):
+        gap_i = float(dc[i])
+
+        # 0) Online th1 (past gaps only)
+        if len(past_gaps) > 0:
+            th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), float(th1_percent) / 100.0))
+        else:
+            th1_val = 0.0
+
+        # 1) Running average based on PAST low-conf samples only
+        if low_cnt > 0:
+            current_avg_gap = low_sum / low_cnt
+        else:
+            # low-conf 샘플을 아직 못 봤으면 보수적으로(Avg=0) 시작 -> th2 ≈ th1
+            current_avg_gap = 0.0
+
+        # 2) Dynamic th2 (based on low-conf-only avg)
+        safe_avg = min(1.0, max(0.0, current_avg_gap))
+        current_th2_val = th1_val * np.sqrt(1.0 - safe_avg)
+        final_th2_val = current_th2_val
+
+        # 3) Execute policy
+        if gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+        else:
+            if float(mc[i]) < current_th2_val:
+                total_cost += float(k)
+                corrects += 1 if cyclic_correct[i] else 0
+            else:
+                total_cost += 2.0
+                corrects += 1 if bool(probe2_correct[i]) else 0
+
+        # 4) Update low-conf-only stats AFTER decision
+        if gap_i < th1_val:
+            low_sum += gap_i
+            low_cnt += 1
+        past_gaps.append(gap_i)
+
+    if len(mc) > 0:
+        final_th2_perc = (np.sum(mc < final_th2_val) / len(mc)) * 100.0
+    else:
+        final_th2_perc = 0.0
+
+    return total_cost / float(N), corrects / float(N), final_th2_perc
+
+
+def _run_online_th1_quantile_th2_from_th1_rule(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    th2_rule_from_th1_value,
+) -> Tuple[float, float, float]:
+    """
+    [Real-world Online Policy Template]
+    - th1: online running-quantile over PAST default_conf gaps (percentile = th1_percent)
+    - th2: derived from current th1 value by a deterministic rule: th2 = f(th1)
+
+    NOTE: returned th2_percentile is only for plotting (maps final th2 value onto *full* mean_conf distribution).
+    Decision itself never uses future information.
+    """
+    N = len(base_correct)
+    if N == 0:
+        return 0.0, 0.0, 0.0
+
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+
+    total_cost = 0.0
+    corrects = 0
+    past_gaps: List[float] = []
+    final_th2_val = 0.0
+
+    q = float(th1_percent) / 100.0
+
+    for i in range(N):
+        gap_i = float(dc[i])
+
+        # Online th1 (past only)
+        if len(past_gaps) > 0:
+            th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), q))
+        else:
+            th1_val = 0.0
+
+        # th2 derived from th1 value
+        th2_val = float(th2_rule_from_th1_value(th1_val))
+        final_th2_val = th2_val
+
+        # Execute
+        if gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+        else:
+            if float(mc[i]) < th2_val:
+                total_cost += float(k)
+                corrects += 1 if cyclic_correct[i] else 0
+            else:
+                total_cost += 2.0
+                corrects += 1 if bool(probe2_correct[i]) else 0
+
+        past_gaps.append(gap_i)
 
     if len(mc) > 0:
         final_th2_perc = (np.sum(mc < final_th2_val) / len(mc)) * 100.0
@@ -968,31 +1118,26 @@ def _compute_and_plot_th2_tradeoff(
     1. th1/2 (*)
     2. th1^2 (s)
     3. th1^1.5 (^)
-    4. Online Sqrt (D)
+    4. Online Sqrt (All) (D)
+    5. Online Sqrt (LowConf-only update) (X)
     """
     default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
     
-    # Dense curve range
-    max_th2 = max(th2_list) if len(th2_list) > 0 else 30
-    dense_th2_list = np.arange(0, max_th2 + 2, 1.0).tolist()
+    # Dense curve range (requested: 1..30)
+    dense_th2_list = list(range(1, 31))
     
-    # Helper to calculate metrics for static value-based rules
-    def _calc_static_rule(th1_p, rule_func):
-        # 1. th1 value
-        t1_val = _quantile(default_conf, float(th1_p) / 100.0)
-        # 2. th2 value by rule
-        t2_val = rule_func(t1_val)
-        # 3. find equivalent percentile for th2 (for plotting & execution)
-        if len(mean_conf) > 0:
-            t2_perc = (np.sum(mean_conf < t2_val) / len(mean_conf)) * 100.0
-        else:
-            t2_perc = 0.0
-        # 4. execute metrics
-        c, a = _policy_metrics_avggap_beta0(
-            default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k,
-            th1_p, t2_perc
+    # Real-world online points: th1 is online-quantile (past-only), th2 derived from th1 value
+    def _online_point(th1_p: float, rule_func):
+        return _run_online_th1_quantile_th2_from_th1_rule(
+            default_conf=default_conf,
+            mean_conf=mean_conf,
+            base_correct=base_correct_list,
+            cyclic_correct=cyclic_correct_list,
+            probe2_correct=arr_probe2_correct,
+            k=k,
+            th1_percent=float(th1_p),
+            th2_rule_from_th1_value=rule_func,
         )
-        return c, a, t2_perc
 
     # Plot 1: Cost vs th2
     fig1, ax1 = plt.subplots(figsize=(9.0, 6.0), dpi=160)
@@ -1014,28 +1159,36 @@ def _compute_and_plot_th2_tradeoff(
 
         # 2) Heuristics Points
         # (A) th1 / 2
-        c_half, _, p_half = _calc_static_rule(th1p, lambda x: x / 2.0)
+        c_half, _, p_half = _online_point(th1p, lambda x: x / 2.0)
         ax1.scatter([p_half], [c_half], marker='*', s=120, color=color, edgecolors='black', zorder=6, label='th1/2' if idx==0 else "")
         
         # (B) th1 ^ 2
-        c_sq, _, p_sq = _calc_static_rule(th1p, lambda x: x ** 2)
+        c_sq, _, p_sq = _online_point(th1p, lambda x: x ** 2)
         ax1.scatter([p_sq], [c_sq], marker='s', s=80, color=color, edgecolors='black', zorder=6, label='th1^2' if idx==0 else "")
 
         # (C) th1 ^ 1.5
-        c_pow, _, p_pow = _calc_static_rule(th1p, lambda x: x ** 1.5)
+        c_pow, _, p_pow = _online_point(th1p, lambda x: x ** 1.5)
         ax1.scatter([p_pow], [c_pow], marker='^', s=90, color=color, edgecolors='black', zorder=6, label='th1^1.5' if idx==0 else "")
 
         # (D) Online Sqrt
         c_sqrt, _, p_sqrt = _run_online_sqrt_policy(
             default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
         )
-        ax1.scatter([p_sqrt], [c_sqrt], marker='D', s=80, color=color, edgecolors='black', zorder=6, label='Online Sqrt' if idx==0 else "")
+        ax1.scatter([p_sqrt], [c_sqrt], marker='D', s=80, color=color, edgecolors='black', zorder=6,
+                    label='Online Sqrt (All)' if idx==0 else "")
+
+        # (E) Online Sqrt (LowConf-only update)
+        c_sqrt_lc, _, p_sqrt_lc = _run_online_sqrt_policy_lowconf_update(
+            default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
+        )
+        ax1.scatter([p_sqrt_lc], [c_sqrt_lc], marker='X', s=70, color=color, edgecolors='black', zorder=6,
+                    label='Online Sqrt (LowConf-only)' if idx==0 else "")
 
     ax1.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
     ax1.set_ylabel("Computational Cost (× of default)", fontsize=11)
     ax1.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs th2 (Heuristics Comparison)", fontsize=12)
-    ax1.set_xticks(th2_list)
-    ax1.set_xticklabels([f"{int(t)}" for t in th2_list])
+    ax1.set_xticks([1, 5, 10, 15, 20, 25, 30])
+    ax1.set_xticklabels([str(t) for t in [1, 5, 10, 15, 20, 25, 30]])
     ax1.legend(loc='best', fontsize=9, ncol=2)
     ax1.grid(True, linestyle='--', alpha=0.4)
     out_cost = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST.png")
@@ -1064,15 +1217,15 @@ def _compute_and_plot_th2_tradeoff(
 
         # 2) Heuristics
         # (A) th1 / 2
-        _, a_half, p_half = _calc_static_rule(th1p, lambda x: x / 2.0)
+        _, a_half, p_half = _online_point(th1p, lambda x: x / 2.0)
         ax2.scatter([p_half], [(a_half-default_acc)*100], marker='*', s=120, color=color, edgecolors='black', zorder=6)
         
         # (B) th1 ^ 2
-        _, a_sq, p_sq = _calc_static_rule(th1p, lambda x: x ** 2)
+        _, a_sq, p_sq = _online_point(th1p, lambda x: x ** 2)
         ax2.scatter([p_sq], [(a_sq-default_acc)*100], marker='s', s=80, color=color, edgecolors='black', zorder=6)
 
         # (C) th1 ^ 1.5
-        _, a_pow, p_pow = _calc_static_rule(th1p, lambda x: x ** 1.5)
+        _, a_pow, p_pow = _online_point(th1p, lambda x: x ** 1.5)
         ax2.scatter([p_pow], [(a_pow-default_acc)*100], marker='^', s=90, color=color, edgecolors='black', zorder=6)
 
         # (D) Online Sqrt
@@ -1081,12 +1234,18 @@ def _compute_and_plot_th2_tradeoff(
         )
         ax2.scatter([p_sqrt], [(a_sqrt-default_acc)*100], marker='D', s=80, color=color, edgecolors='black', zorder=6)
 
+        # (E) Online Sqrt (LowConf-only update)
+        _, a_sqrt_lc, p_sqrt_lc = _run_online_sqrt_policy_lowconf_update(
+            default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
+        )
+        ax2.scatter([p_sqrt_lc], [(a_sqrt_lc-default_acc)*100], marker='X', s=70, color=color, edgecolors='black', zorder=6)
+
     ax2.axhline(y=0.0, color='gray', linestyle=':', linewidth=1.0, alpha=0.5)
     ax2.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
     ax2.set_ylabel("Δ Accuracy (%)", fontsize=11)
     ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs th2", fontsize=12)
-    ax2.set_xticks(th2_list)
-    ax2.set_xticklabels([f"{int(t)}" for t in th2_list])
+    ax2.set_xticks([1, 5, 10, 15, 20, 25, 30])
+    ax2.set_xticklabels([str(t) for t in [1, 5, 10, 15, 20, 25, 30]])
     ax2.legend(loc='best', fontsize=9, ncol=2)
     ax2.grid(True, linestyle='--', alpha=0.4)
     out_delta = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_DELTA_ACC.png")
@@ -1115,17 +1274,17 @@ def _compute_and_plot_th2_tradeoff(
         
         # Points
         # (A) th1 / 2
-        c_h, a_h, _ = _calc_static_rule(th1p, lambda x: x / 2.0)
+        c_h, a_h, _ = _online_point(th1p, lambda x: x / 2.0)
         d_h = (a_h - default_acc) * 100.0
         ax3.scatter([c_h], [d_h], marker='*', s=120, color=color, edgecolors='black', zorder=6, label='th1/2' if idx==0 else "")
 
         # (B) th1 ^ 2
-        c_s, a_s, _ = _calc_static_rule(th1p, lambda x: x ** 2)
+        c_s, a_s, _ = _online_point(th1p, lambda x: x ** 2)
         d_s = (a_s - default_acc) * 100.0
         ax3.scatter([c_s], [d_s], marker='s', s=80, color=color, edgecolors='black', zorder=6, label='th1^2' if idx==0 else "")
 
         # (C) th1 ^ 1.5
-        c_p, a_p, _ = _calc_static_rule(th1p, lambda x: x ** 1.5)
+        c_p, a_p, _ = _online_point(th1p, lambda x: x ** 1.5)
         d_p = (a_p - default_acc) * 100.0
         ax3.scatter([c_p], [d_p], marker='^', s=90, color=color, edgecolors='black', zorder=6, label='th1^1.5' if idx==0 else "")
 
@@ -1134,10 +1293,23 @@ def _compute_and_plot_th2_tradeoff(
             default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
         )
         d_sqt = (a_sqt - default_acc) * 100.0
-        ax3.scatter([c_sqt], [d_sqt], marker='D', s=80, color=color, edgecolors='black', zorder=6, label='Online Sqrt' if idx==0 else "")
+        ax3.scatter([c_sqt], [d_sqt], marker='D', s=80, color=color, edgecolors='black', zorder=6,
+                    label='Online Sqrt (All)' if idx==0 else "")
+
+        # (E) Online Sqrt (LowConf-only update)
+        c_sqt_lc, a_sqt_lc, _ = _run_online_sqrt_policy_lowconf_update(
+            default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
+        )
+        d_sqt_lc = (a_sqt_lc - default_acc) * 100.0
+        ax3.scatter([c_sqt_lc], [d_sqt_lc], marker='X', s=70, color=color, edgecolors='black', zorder=6,
+                    label='Online Sqrt (LowConf-only)' if idx==0 else "")
 
         # Log
-        logger.info(f"[th1={int(th1p):<2}] th1/2: {d_h:5.2f}% | th1^2: {d_s:5.2f}% | th1^1.5: {d_p:5.2f}% | Sqrt: {d_sqt:5.2f}%")
+        logger.info(
+            f"[th1={int(th1p):<2}] "
+            f"th1/2: {d_h:5.2f}% | th1^2: {d_s:5.2f}% | th1^1.5: {d_p:5.2f}% | "
+            f"Sqrt(All): {d_sqt:5.2f}% | Sqrt(LowConf): {d_sqt_lc:5.2f}%"
+        )
 
     ax3.scatter([1.0], [0.0], marker='*', s=200, label='default', color='gray', zorder=5)
     ax3.set_xlabel("Computational Cost (× of default)", fontsize=11)
@@ -1150,7 +1322,7 @@ def _compute_and_plot_th2_tradeoff(
     fig3.savefig(out_trade, bbox_inches="tight")
     plt.close(fig3)
 
-    logger.info(_purple(f"th2 trade-off plots saved (dense curve + half-th1 star): {subject}"))
+    logger.info(_purple(f"th2 trade-off plots saved (dense th2=1..30 + online points): {subject}"))
     if wandb_ok and wandb_run is not None:
         try:
             import wandb
@@ -2024,15 +2196,15 @@ def main():
                             
                             # Helper to calc static rule points for baseline plot
                             def _get_static_pt(th1_p, rule_func, label, marker, color):
-                                t1_val = _quantile(default_conf, float(th1_p) / 100.0)
-                                t2_val = rule_func(t1_val)
-                                if len(mean_conf) > 0:
-                                    t2_perc = (np.sum(mean_conf < t2_val) / len(mean_conf)) * 100.0
-                                else:
-                                    t2_perc = 0.0
-                                c, a = _policy_metrics_avggap_beta0(
-                                    default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k,
-                                    th1_p, t2_perc
+                                c, a, _ = _run_online_th1_quantile_th2_from_th1_rule(
+                                    default_conf=default_conf,
+                                    mean_conf=mean_conf,
+                                    base_correct=base_correct_list,
+                                    cyclic_correct=cyclic_correct_list,
+                                    probe2_correct=arr_probe2_correct,
+                                    k=k,
+                                    th1_percent=float(th1_p),
+                                    th2_rule_from_th1_value=rule_func,
                                 )
                                 return {'cost': c, 'acc': a, 'label': label, 'marker': marker, 'color': color}
 
@@ -2090,7 +2262,7 @@ def main():
                         getattr(args, "ours_th1_tradeoff", "5,10,20,30")
                     )
                     th2_tradeoff_list = _parse_percent_value_list(
-                        getattr(args, "ours_th2_tradeoff", "5,10,20,30")
+                        getattr(args, "ours_th2_tradeoff", ",".join([str(i) for i in range(1, 31)]))
                     )
                     if len(th1_tradeoff_list) > 0 and len(th2_tradeoff_list) > 0 and len(per_sample_probs) > 0:
                         _compute_and_plot_th2_tradeoff(
