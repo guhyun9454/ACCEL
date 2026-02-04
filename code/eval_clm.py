@@ -1030,6 +1030,138 @@ def _run_online_th1_quantile_th2_from_th1_rule(
     return total_cost / float(N), corrects / float(N), final_th2_perc
 
 
+def _run_online_top2flip_policy(
+    default_conf: np.ndarray,
+    flip_trigger: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+) -> Tuple[float, float]:
+    """
+    [Real-world Online top2flip]
+    - th1: online running-quantile over PAST default_conf gaps (percentile = th1_percent)
+    - low-conf (dc < th1): if flip_trigger -> cyclic else probe2
+    - offline_prefix_n: first n samples are base-only, but still update running stats.
+    """
+    N = len(base_correct)
+    if N == 0:
+        return float("nan"), float("nan")
+
+    dc = np.asarray(default_conf, dtype=np.float64)
+    flip = np.asarray(flip_trigger, dtype=bool)
+
+    total_cost = 0.0
+    corrects = 0
+    past_gaps: List[float] = []
+    q = float(th1_percent) / 100.0
+
+    for i in range(N):
+        gap_i = float(dc[i])
+
+        # prefix: base only
+        if i < int(offline_prefix_n):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            past_gaps.append(gap_i)
+            continue
+
+        # online th1 from past only
+        if len(past_gaps) > 0:
+            th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), q))
+        else:
+            th1_val = 0.0
+
+        if gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+        else:
+            if bool(flip[i]):
+                total_cost += float(k)
+                corrects += 1 if cyclic_correct[i] else 0
+            else:
+                total_cost += 2.0
+                corrects += 1 if bool(probe2_correct[i]) else 0
+
+        past_gaps.append(gap_i)
+
+    return total_cost / float(N), corrects / float(N)
+
+
+def _run_online_avggap_policy(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    th2_percent: float,
+    offline_prefix_n: int = 0,
+) -> Tuple[float, float]:
+    """
+    [Real-world Online avggap]
+    - th1: online running-quantile over PAST default_conf gaps (percentile = th1_percent)
+    - th2: online running-quantile over PAST mean_conf gaps (percentile = th2_percent)
+    - low-conf (dc < th1): if mc < th2 -> cyclic else probe2
+    - offline_prefix_n: first n samples are base-only, but still update running stats.
+
+    Note: mean_conf values are precomputed for analysis; decision uses only past thresholds (no future).
+    """
+    N = len(base_correct)
+    if N == 0:
+        return float("nan"), float("nan")
+
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+
+    total_cost = 0.0
+    corrects = 0
+    past_dc: List[float] = []
+    past_mc: List[float] = []
+    q1 = float(th1_percent) / 100.0
+    q2 = float(th2_percent) / 100.0
+
+    for i in range(N):
+        gap_i = float(dc[i])
+        mgap_i = float(mc[i])
+
+        if i < int(offline_prefix_n):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            past_dc.append(gap_i)
+            past_mc.append(mgap_i)
+            continue
+
+        if len(past_dc) > 0:
+            th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q1))
+        else:
+            th1_val = 0.0
+
+        if len(past_mc) > 0:
+            th2_val = float(np.quantile(np.asarray(past_mc, dtype=np.float64), q2))
+        else:
+            th2_val = 0.0
+
+        if gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+        else:
+            if mgap_i < th2_val:
+                total_cost += float(k)
+                corrects += 1 if cyclic_correct[i] else 0
+            else:
+                total_cost += 2.0
+                corrects += 1 if bool(probe2_correct[i]) else 0
+
+        past_dc.append(gap_i)
+        past_mc.append(mgap_i)
+
+    return total_cost / float(N), corrects / float(N)
+
+
 def _run_online_dynamic_policy(
     default_conf: np.ndarray,
     mean_conf: np.ndarray,
@@ -1306,11 +1438,12 @@ def _compute_and_plot_th2_tradeoff(
 
         # Log
         logger.info(_purple(f"==== TH2 online-point report (th1={int(th1p)}) ===="))
-        logger.info(f"th1/2                : cost={c_h:.3f}, acc={a_h:.4f} (+{d_h:.2f}%), th2≈p{p_h:.1f}")
-        logger.info(f"th1^2                : cost={c_s:.3f}, acc={a_s:.4f} (+{d_s:.2f}%), th2≈p{p_s:.1f}")
-        logger.info(f"th1^1.5              : cost={c_p:.3f}, acc={a_p:.4f} (+{d_p:.2f}%), th2≈p{p_p:.1f}")
-        logger.info(f"Online Sqrt (All)    : cost={c_sqt:.3f}, acc={a_sqt:.4f} (+{d_sqt:.2f}%), th2≈p{p_sqt:.1f}")
-        logger.info(f"Online Sqrt (LowConf): cost={c_sqt_lc:.3f}, acc={a_sqt_lc:.4f} (+{d_sqt_lc:.2f}%), th2≈p{p_sqt_lc:.1f}")
+        logger.info(f"default              : cost=1.000, acc={default_acc:.4f}")
+        logger.info(f"th1/2                : cost={c_h:.3f}, acc={a_h:.4f}, th2≈p{p_h:.1f}")
+        logger.info(f"th1^2                : cost={c_s:.3f}, acc={a_s:.4f}, th2≈p{p_s:.1f}")
+        logger.info(f"th1^1.5              : cost={c_p:.3f}, acc={a_p:.4f}, th2≈p{p_p:.1f}")
+        logger.info(f"Online Sqrt (All)    : cost={c_sqt:.3f}, acc={a_sqt:.4f}, th2≈p{p_sqt:.1f}")
+        logger.info(f"Online Sqrt (LowConf): cost={c_sqt_lc:.3f}, acc={a_sqt_lc:.4f}, th2≈p{p_sqt_lc:.1f}")
 
     ax3.scatter([1.0], [0.0], marker='*', s=200, label='default', color='gray', zorder=5)
     ax3.set_xlabel("Computational Cost (× of default)", fontsize=11)
@@ -1587,12 +1720,12 @@ def _compute_curves_for_one_percentile(
     curve_switch_cyc = []
     for beta in betas:
         n = int(N * beta + 1e-9)
-        thresh = _quantile(default_conf[:n], perc01) if n > 0 else _quantile(default_conf, perc01)
 
         total_cost_sf = 0.0
         corrects_sf = 0
         total_cost_sc = 0.0
         corrects_sc = 0
+        past_gaps: List[float] = []
 
         # offline prefix: base only
         for i in range(0, n):
@@ -1601,9 +1734,18 @@ def _compute_curves_for_one_percentile(
             if base_correct_list[i]:
                 corrects_sf += 1
                 corrects_sc += 1
+            # online thresholding uses observed gaps only (past)
+            past_gaps.append(float(default_conf[i]))
 
         # online: apply switch
         for i in range(n, N):
+            # Online th1 threshold = running-quantile over PAST gaps only
+            if len(past_gaps) > 0:
+                thresh = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), perc01))
+            else:
+                # no past info yet -> don't treat as ambiguous (avoid oracle / avoid over-trigger)
+                thresh = float("-inf")
+
             amb = (float(default_conf[i]) < thresh)
 
             if amb:
@@ -1620,6 +1762,9 @@ def _compute_curves_for_one_percentile(
                 total_cost_sc += 1.0
                 corrects_sc += 1 if base_correct_list[i] else 0
 
+            # Update past gaps AFTER decision
+            past_gaps.append(float(default_conf[i]))
+
         curve_switch_full.append((total_cost_sf / float(N), corrects_sf / float(N)))
         curve_switch_cyc.append((total_cost_sc / float(N), corrects_sc / float(N)))
 
@@ -1627,56 +1772,34 @@ def _compute_curves_for_one_percentile(
     curve_top2flip = []
     for beta in betas:
         n = int(N * beta + 1e-9)
-        th1 = _quantile(default_conf[:n], perc01) if n > 0 else _quantile(default_conf, perc01)
-
-        total_cost = 0.0
-        corrects = 0
-
-        for i in range(0, n):
-            total_cost += 1.0
-            corrects += 1 if base_correct_list[i] else 0
-
-        for i in range(n, N):
-            if float(default_conf[i]) >= th1:
-                total_cost += 1.0
-                corrects += 1 if base_correct_list[i] else 0
-            else:
-                if bool(flip_trigger[i]):
-                    total_cost += C_cyc
-                    corrects += 1 if cyclic_correct_list[i] else 0
-                else:
-                    total_cost += 2.0
-                    corrects += 1 if bool(probe2_correct[i]) else 0
-
-        curve_top2flip.append((total_cost / float(N), corrects / float(N)))
+        c, a = _run_online_top2flip_policy(
+            default_conf=default_conf,
+            flip_trigger=flip_trigger,
+            base_correct=base_correct_list,
+            cyclic_correct=cyclic_correct_list,
+            probe2_correct=probe2_correct,
+            k=k,
+            th1_percent=perc_value,
+            offline_prefix_n=n,
+        )
+        curve_top2flip.append((float(c), float(a)))
 
     # 4) ours_avggap
     curve_avggap = []
     for beta in betas:
         n = int(N * beta + 1e-9)
-        th1 = _quantile(default_conf[:n], perc01) if n > 0 else _quantile(default_conf, perc01)
-        th2 = _quantile(mean_conf[:n], perc01) if n > 0 else _quantile(mean_conf, perc01)
-
-        total_cost = 0.0
-        corrects = 0
-
-        for i in range(0, n):
-            total_cost += 1.0
-            corrects += 1 if base_correct_list[i] else 0
-
-        for i in range(n, N):
-            if float(default_conf[i]) >= th1:
-                total_cost += 1.0
-                corrects += 1 if base_correct_list[i] else 0
-            else:
-                if float(mean_conf[i]) < th2:
-                    total_cost += C_cyc
-                    corrects += 1 if cyclic_correct_list[i] else 0
-                else:
-                    total_cost += 2.0
-                    corrects += 1 if bool(probe2_correct[i]) else 0
-
-        curve_avggap.append((total_cost / float(N), corrects / float(N)))
+        c, a = _run_online_avggap_policy(
+            default_conf=default_conf,
+            mean_conf=mean_conf,
+            base_correct=base_correct_list,
+            cyclic_correct=cyclic_correct_list,
+            probe2_correct=probe2_correct,
+            k=k,
+            th1_percent=perc_value,
+            th2_percent=perc_value,
+            offline_prefix_n=n,
+        )
+        curve_avggap.append((float(c), float(a)))
 
     curve_obj = {
         "subject": subject,
@@ -1843,7 +1966,7 @@ def _log_baseline_report(curve_obj: dict):
     PRIDE_FREE는 (아래 main에서) 한 줄만 찍는다.
     """
     p = curve_obj.get("percentile")
-    logger.info(_purple(f"==== BASELINE Derived policy report (beta=0, p={p}) ===="))
+    logger.info(_purple(f"==== BASELINE Derived policy report (REAL-WORLD online, beta=0, p={p}) ===="))
 
     always = curve_obj.get("always", {})
     logger.info(f"BASELINE default(ensemble) : cost={always['default']['cost']:.3f}, acc={always['default']['acc']:.4f}")
@@ -2224,11 +2347,11 @@ def main():
                             try:
                                 base_acc0 = float(np.mean(np.asarray(base_correct_list, dtype=np.float64))) if len(base_correct_list) else float("nan")
                                 logger.info(_purple(f"==== HEURISTIC Point report (beta=0, p={int(round(perc))}) ===="))
+                                logger.info(f"{'default':<18}: cost=1.000, acc={base_acc0:.4f}")
                                 for hp in extra_pts:
                                     acc = float(hp.get("acc", float("nan")))
                                     cost = float(hp.get("cost", float("nan")))
-                                    dacc = (acc - base_acc0) * 100.0 if np.isfinite(base_acc0) and np.isfinite(acc) else float("nan")
-                                    logger.info(f"{hp.get('label','?'):<18}: cost={cost:.3f}, acc={acc:.4f} (+{dacc:.2f}%)")
+                                    logger.info(f"{hp.get('label','?'):<18}: cost={cost:.3f}, acc={acc:.4f}")
                             except Exception:
                                 pass
 
@@ -2241,7 +2364,7 @@ def main():
                             _plot_baseline_points_scatter(
                                 curve_obj=cobj,
                                 out_path=out_pts,
-                                title=f"{args.task} {subject} — Baseline Policies (beta=0, {ptag}, Heuristics 4)",
+                                title=f"{args.task} {subject} — Baseline Policies (REAL-WORLD online, beta=0, {ptag}, Heuristics 4)",
                                 extra_points=extra_pts
                             )
                             if wandb_ok and wandb_run is not None:
