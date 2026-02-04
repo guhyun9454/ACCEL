@@ -791,7 +791,7 @@ def _plot_baseline_points_scatter(
             acc = float(curve_obj[key]["accuracies"][0])
             plt.scatter(cost, acc, marker=m, s=120, color=c, label=key, alpha=0.9)
 
-    # 3. Extra Points (th1/2, th1^2, th1^1.5)
+    # 3. Extra Points (th1/sqrt(k), th1^2, th1^1.5, ...)
     if extra_points:
         for p in extra_points:
             plt.scatter(p['cost'], p['acc'], marker=p['marker'], s=150, color=p['color'], 
@@ -1246,8 +1246,9 @@ def _compute_and_plot_th2_tradeoff(
     wandb_run: Any = None,
 ):
     """
-    th1/th2 trade-off plot with 4 heuristic points:
-    1. th1/2 (*)
+    th1/th2 trade-off plot with heuristic points:
+    1. th1/2 (*)  (fixed divide-by-2 baseline)
+    2. th1/sqrt(k) (P)  (k-aware scaling: k=4 -> th1/2, k=5 -> th1/sqrt(5), ...)
     2. th1^2 (s)
     3. th1^1.5 (^)
     4. Online Sqrt (All) (D)
@@ -1290,9 +1291,13 @@ def _compute_and_plot_th2_tradeoff(
         ax1.plot(dense_th2_list, costs, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.6)
 
         # 2) Heuristics Points
-        # (A) th1 / 2
+        # (A) th1 / 2  (fixed baseline)
         c_half, _, p_half = _online_point(th1p, lambda x: x / 2.0)
         ax1.scatter([p_half], [c_half], marker='*', s=120, color=color, edgecolors='black', zorder=6, label='th1/2' if idx==0 else "")
+
+        # (A2) th1 / sqrt(k)  (k-aware)
+        c_sqrtk, _, p_sqrtk = _online_point(th1p, lambda x, kk=k: x / math.sqrt(float(kk)))
+        ax1.scatter([p_sqrtk], [c_sqrtk], marker='P', s=110, color=color, edgecolors='black', zorder=6, label='th1/sqrt(k)' if idx==0 else "")
         
         # (B) th1 ^ 2
         c_sq, _, p_sq = _online_point(th1p, lambda x: x ** 2)
@@ -1351,6 +1356,10 @@ def _compute_and_plot_th2_tradeoff(
         # (A) th1 / 2
         _, a_half, p_half = _online_point(th1p, lambda x: x / 2.0)
         ax2.scatter([p_half], [(a_half-default_acc)*100], marker='*', s=120, color=color, edgecolors='black', zorder=6)
+
+        # (A2) th1 / sqrt(k)
+        _, a_sqrtk, p_sqrtk = _online_point(th1p, lambda x, kk=k: x / math.sqrt(float(kk)))
+        ax2.scatter([p_sqrtk], [(a_sqrtk-default_acc)*100], marker='P', s=110, color=color, edgecolors='black', zorder=6)
         
         # (B) th1 ^ 2
         _, a_sq, p_sq = _online_point(th1p, lambda x: x ** 2)
@@ -1410,6 +1419,11 @@ def _compute_and_plot_th2_tradeoff(
         d_h = (a_h - default_acc) * 100.0
         ax3.scatter([c_h], [d_h], marker='*', s=120, color=color, edgecolors='black', zorder=6, label='th1/2' if idx==0 else "")
 
+        # (A2) th1 / sqrt(k)
+        c_hk, a_hk, p_hk = _online_point(th1p, lambda x, kk=k: x / math.sqrt(float(kk)))
+        d_hk = (a_hk - default_acc) * 100.0
+        ax3.scatter([c_hk], [d_hk], marker='P', s=110, color=color, edgecolors='black', zorder=6, label='th1/sqrt(k)' if idx==0 else "")
+
         # (B) th1 ^ 2
         c_s, a_s, p_s = _online_point(th1p, lambda x: x ** 2)
         d_s = (a_s - default_acc) * 100.0
@@ -1440,6 +1454,7 @@ def _compute_and_plot_th2_tradeoff(
         logger.info(_purple(f"==== TH2 online-point report (th1={int(th1p)}) ===="))
         logger.info(f"default              : cost=1.000, acc={default_acc:.4f}")
         logger.info(f"th1/2                : cost={c_h:.3f}, acc={a_h:.4f}, th2≈p{p_h:.1f}")
+        logger.info(f"th1/sqrt(k)          : cost={c_hk:.3f}, acc={a_hk:.4f}, th2≈p{p_hk:.1f}")
         logger.info(f"th1^2                : cost={c_s:.3f}, acc={a_s:.4f}, th2≈p{p_s:.1f}")
         logger.info(f"th1^1.5              : cost={c_p:.3f}, acc={a_p:.4f}, th2≈p{p_p:.1f}")
         logger.info(f"Online Sqrt (All)    : cost={c_sqt:.3f}, acc={a_sqt:.4f}, th2≈p{p_sqt:.1f}")
@@ -2371,8 +2386,10 @@ def main():
                                 )
                                 return {'cost': c, 'acc': a, 'label': label, 'marker': marker, 'color': color}
 
-                            # 1. Static Heuristics
+                            # 1. Static Heuristics (division heuristic scaled by #choices)
+                            # th2 = th1 / sqrt(k)  (k=4 -> th1/2, k=5 -> th1/sqrt(5), ...)
                             extra_pts.append(_get_static_pt(th1p, lambda x: x / 2.0, 'th1/2', '*', 'gray'))
+                            extra_pts.append(_get_static_pt(th1p, lambda x, kk=k: x / math.sqrt(float(kk)), 'th1/sqrt(k)', 'P', 'gray'))
                             extra_pts.append(_get_static_pt(th1p, lambda x: x ** 2, 'th1^2', 's', 'gray'))
                             extra_pts.append(_get_static_pt(th1p, lambda x: x ** 1.5, 'th1^1.5', '^', 'gray'))
 
@@ -2403,7 +2420,7 @@ def main():
                             _plot_baseline_points_scatter(
                                 curve_obj=cobj,
                                 out_path=out_pts,
-                                title=f"{args.task} {subject} — Baseline Policies (REAL-WORLD online, beta=0, {ptag}, Heuristics 4)",
+                                title=f"{args.task} {subject} — Baseline Policies (REAL-WORLD online, beta=0, {ptag}, Heuristics 5)",
                                 extra_points=extra_pts
                             )
                             if wandb_ok and wandb_run is not None:
