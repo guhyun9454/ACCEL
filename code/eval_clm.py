@@ -1274,22 +1274,22 @@ def _compute_and_plot_th2_tradeoff(
         
         # Points
         # (A) th1 / 2
-        c_h, a_h, _ = _online_point(th1p, lambda x: x / 2.0)
+        c_h, a_h, p_h = _online_point(th1p, lambda x: x / 2.0)
         d_h = (a_h - default_acc) * 100.0
         ax3.scatter([c_h], [d_h], marker='*', s=120, color=color, edgecolors='black', zorder=6, label='th1/2' if idx==0 else "")
 
         # (B) th1 ^ 2
-        c_s, a_s, _ = _online_point(th1p, lambda x: x ** 2)
+        c_s, a_s, p_s = _online_point(th1p, lambda x: x ** 2)
         d_s = (a_s - default_acc) * 100.0
         ax3.scatter([c_s], [d_s], marker='s', s=80, color=color, edgecolors='black', zorder=6, label='th1^2' if idx==0 else "")
 
         # (C) th1 ^ 1.5
-        c_p, a_p, _ = _online_point(th1p, lambda x: x ** 1.5)
+        c_p, a_p, p_p = _online_point(th1p, lambda x: x ** 1.5)
         d_p = (a_p - default_acc) * 100.0
         ax3.scatter([c_p], [d_p], marker='^', s=90, color=color, edgecolors='black', zorder=6, label='th1^1.5' if idx==0 else "")
 
         # (D) Online Sqrt
-        c_sqt, a_sqt, _ = _run_online_sqrt_policy(
+        c_sqt, a_sqt, p_sqt = _run_online_sqrt_policy(
             default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
         )
         d_sqt = (a_sqt - default_acc) * 100.0
@@ -1297,7 +1297,7 @@ def _compute_and_plot_th2_tradeoff(
                     label='Online Sqrt (All)' if idx==0 else "")
 
         # (E) Online Sqrt (LowConf-only update)
-        c_sqt_lc, a_sqt_lc, _ = _run_online_sqrt_policy_lowconf_update(
+        c_sqt_lc, a_sqt_lc, p_sqt_lc = _run_online_sqrt_policy_lowconf_update(
             default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
         )
         d_sqt_lc = (a_sqt_lc - default_acc) * 100.0
@@ -1305,11 +1305,12 @@ def _compute_and_plot_th2_tradeoff(
                     label='Online Sqrt (LowConf-only)' if idx==0 else "")
 
         # Log
-        logger.info(
-            f"[th1={int(th1p):<2}] "
-            f"th1/2: {d_h:5.2f}% | th1^2: {d_s:5.2f}% | th1^1.5: {d_p:5.2f}% | "
-            f"Sqrt(All): {d_sqt:5.2f}% | Sqrt(LowConf): {d_sqt_lc:5.2f}%"
-        )
+        logger.info(_purple(f"==== TH2 online-point report (th1={int(th1p)}) ===="))
+        logger.info(f"th1/2                : cost={c_h:.3f}, acc={a_h:.4f} (+{d_h:.2f}%), th2≈p{p_h:.1f}")
+        logger.info(f"th1^2                : cost={c_s:.3f}, acc={a_s:.4f} (+{d_s:.2f}%), th2≈p{p_s:.1f}")
+        logger.info(f"th1^1.5              : cost={c_p:.3f}, acc={a_p:.4f} (+{d_p:.2f}%), th2≈p{p_p:.1f}")
+        logger.info(f"Online Sqrt (All)    : cost={c_sqt:.3f}, acc={a_sqt:.4f} (+{d_sqt:.2f}%), th2≈p{p_sqt:.1f}")
+        logger.info(f"Online Sqrt (LowConf): cost={c_sqt_lc:.3f}, acc={a_sqt_lc:.4f} (+{d_sqt_lc:.2f}%), th2≈p{p_sqt_lc:.1f}")
 
     ax3.scatter([1.0], [0.0], marker='*', s=200, label='default', color='gray', zorder=5)
     ax3.set_xlabel("Computational Cost (× of default)", fontsize=11)
@@ -2218,6 +2219,18 @@ def main():
                                 default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1_percent=perc
                             )
                             extra_pts.append({'cost': c_sqrt, 'acc': a_sqrt, 'label': 'Online Sqrt', 'marker': 'D', 'color': 'orange'})
+
+                            # [ADD] log heuristic point performances (no plot annotation)
+                            try:
+                                base_acc0 = float(np.mean(np.asarray(base_correct_list, dtype=np.float64))) if len(base_correct_list) else float("nan")
+                                logger.info(_purple(f"==== HEURISTIC Point report (beta=0, p={int(round(perc))}) ===="))
+                                for hp in extra_pts:
+                                    acc = float(hp.get("acc", float("nan")))
+                                    cost = float(hp.get("cost", float("nan")))
+                                    dacc = (acc - base_acc0) * 100.0 if np.isfinite(base_acc0) and np.isfinite(acc) else float("nan")
+                                    logger.info(f"{hp.get('label','?'):<18}: cost={cost:.3f}, acc={acc:.4f} (+{dacc:.2f}%)")
+                            except Exception:
+                                pass
 
                             # 3. [ONLINE DYNAMIC] REMOVED
                             # c_dyn, a_dyn, _ = _run_online_dynamic_policy(
