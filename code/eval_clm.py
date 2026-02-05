@@ -9,7 +9,6 @@ import copy
 import logging
 import random
 import math
-import zlib
 from typing import List, Optional, Tuple, Dict, Any
 
 import numpy as np
@@ -26,8 +25,6 @@ from eval_clm_utils import (
     parse_arguments,
     prepare_eval,
 )
-
-from debias_utils import simple as debias_simple
 
 from utils import (
     _orange, _blue, _purple,
@@ -122,594 +119,12 @@ def _read_results_file(file_path):
         return None
 
 
-def _stable_u32_seed(s: str, base_seed: int = 0) -> int:
-    """Deterministic per-string seed (independent of Python hash randomization)."""
-    return (int(zlib.crc32(s.encode("utf-8"))) + int(base_seed)) & 0xFFFFFFFF
-
-
-def _apply_pride_global_prior_to_probs_seq(
-    probs_seq: np.ndarray,
-    prior: np.ndarray,
-    eps: float = 1e-12
-) -> np.ndarray:
-    """
-    probs_seq: (num_perms, k) letter-space probs
-    prior: (k,) global prior over option IDs (letter tokens)
-    returns: corrected probs_seq with row-wise renormalization
-
-    PriDe correction: divide by prior then renormalize.
-    """
-    p = np.asarray(probs_seq, dtype=np.float64)
-    pr = np.asarray(prior, dtype=np.float64).reshape(1, -1)
-    adj = p / (pr + eps)
-    adj = adj / (adj.sum(axis=1, keepdims=True) + eps)
-    return adj
-
-
-# =========================================================
-# PRIDE_FREE (policy-pool based, "free" prior)
-# =========================================================
 def _quantile(arr: np.ndarray, p01: float) -> float:
     arr = np.asarray(arr, dtype=np.float64)
     if arr.size == 0:
         return float("nan")
     p01 = float(max(0.0, min(1.0, p01)))
     return float(np.quantile(arr, p01))
-
-
-def _policy_action_beta0(
-    policy: str,
-    dc_i: float,
-    mc_i: float,
-    flip_i: bool,
-    th1: float,
-    th2: float
-) -> str:
-    """
-    Returns action in {"base", "probe2", "cyclic"} for beta=0 (no offline prefix).
-
-    - switch_cyclic:
-        if dc >= th1 -> base
-        else -> cyclic
-
-    - ours_top2flip:
-        if dc >= th1 -> base
-        else:
-            if flip -> cyclic else probe2
-
-    - ours_avggap:
-        if dc >= th1 -> base
-        else:
-            if mc < th2 -> cyclic else probe2
-    """
-    if policy == "switch_cyclic":
-        return "base" if dc_i >= th1 else "cyclic"
-    if policy == "ours_top2flip":
-        if dc_i >= th1:
-            return "base"
-        return "cyclic" if bool(flip_i) else "probe2"
-    if policy == "ours_avggap":
-        if dc_i >= th1:
-            return "base"
-        return "cyclic" if (mc_i < th2) else "probe2"
-    raise ValueError(f"Unknown policy: {policy}")
-
-def _policy_action(
-    policy: str,
-    dc_i: float,
-    mc_i: float,
-    flip_i: bool,
-    th1: float,
-    th2: float
-) -> str:
-    """
-    Returns action in {"base", "probe2", "cyclic"} given fixed thresholds th1/th2.
-    (beta에 따라 th1/th2가 달라지므로, beta0 전용이 아니라 일반 버전으로 분리)
-    """
-    if policy == "switch_cyclic":
-        return "base" if dc_i >= th1 else "cyclic"
-    if policy == "ours_top2flip":
-        if dc_i >= th1:
-            return "base"
-        return "cyclic" if bool(flip_i) else "probe2"
-    if policy == "ours_avggap":
-        if dc_i >= th1:
-            return "base"
-        return "cyclic" if (mc_i < th2) else "probe2"
-    raise ValueError(f"Unknown policy: {policy}")
-
-
-def _estimate_prior_from_precomputed_priors(
-    per_sample_priors: List[np.ndarray],
-    pool_ids: List[int],
-    k: int,
-    eps: float = 1e-12
-) -> np.ndarray:
-    """
-    pool_ids에 해당하는 per-sample prior들을 평균내서 global prior로 사용.
-    pool이 비면 uniform.
-    """
-    if pool_ids is None or len(pool_ids) == 0:
-        prior = np.ones((k,), dtype=np.float64)
-        return prior / (prior.sum() + eps)
-
-    arr = np.asarray([per_sample_priors[i] for i in pool_ids], dtype=np.float64)  # (m,k)
-    prior = np.mean(arr, axis=0)
-    prior = np.asarray(prior, dtype=np.float64)
-    return prior / (prior.sum() + eps)
-
-
-def _pride_correct_row(row: np.ndarray, prior: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    """
-    PriDe: divide by prior then renormalize (row-wise).
-    row: (k,)
-    prior: (k,)
-    """
-    r = np.asarray(row, dtype=np.float64)
-    pr = np.asarray(prior, dtype=np.float64)
-    adj = r / (pr + eps)
-    adj = adj / (adj.sum() + eps)
-    return adj
-
-
-def _predict_cyclic_with_pride(
-    ps: np.ndarray,
-    prior: np.ndarray,
-    k: int,
-    option_ids: List[str],
-    ideal: str,
-    cyclic_indices: List[int],
-    cyc_perms: List[Tuple[int, ...]],
-) -> bool:
-    # cyclic rows만 pride correction 적용
-    corrected = []
-    for idx in cyclic_indices:
-        corrected.append(_pride_correct_row(ps[idx], prior).tolist())
-    agg = _aggregate_probs_over_permutations(corrected, cyc_perms, k)
-    pred = option_ids[int(np.argmax(agg))]
-    return (pred == ideal)
-
-
-def _predict_probe2_with_pride(
-    ps: np.ndarray,
-    prior: np.ndarray,
-    k: int,
-    option_ids: List[str],
-    ideal: str,
-    identity_idx: int,
-    cyclic_indices: List[int],
-    cyc_perms: List[Tuple[int, ...]],
-) -> bool:
-    # probe shift는 "원래 알고리즘"대로 base raw에서 결정(정책과 분리)
-    base_raw = np.asarray(ps[identity_idx], dtype=np.float64)
-    shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_raw, k)
-    probe_perm_idx = cyclic_indices[shift]
-
-    base_corr = _pride_correct_row(ps[identity_idx], prior)
-    probe_corr = _pride_correct_row(ps[probe_perm_idx], prior)
-
-    agg_base = _aggregate_probs_over_permutations([base_corr.tolist()], [tuple(range(k))], k)
-    agg_probe = _aggregate_probs_over_permutations([probe_corr.tolist()], [cyc_perms[shift]], k)
-
-    mean_probs = (agg_base + agg_probe) / 2.0
-    pred = option_ids[int(np.argmax(mean_probs))]
-    return (pred == ideal)
-
-
-def _compute_pride_curve_dynamic_prior(
-    subject: str,
-    tag: str,
-    policy_key: str,
-    k: int,
-    option_ids: List[str],
-    perm_list: List[Tuple[int, ...]],
-    identity_idx: int,
-    cyclic_indices: List[int],
-    cyc_perms: List[Tuple[int, ...]],
-    per_sample_probs: List[np.ndarray],         # raw (num_perms,k)
-    per_sample_priors: List[np.ndarray],        # precomputed prior per sample (k,)
-    ideals: List[str],
-    base_correct_list: List[bool],              # raw base correctness
-    default_conf: np.ndarray,                   # raw dc
-    mean_conf: np.ndarray,                      # raw mc
-    flip_trigger: np.ndarray,                   # raw flip
-    perc_value: float,
-    betas: Optional[List[float]] = None,
-) -> dict:
-    """
-    ✅ 너가 원하는 PRIDE:
-      - 각 beta마다 online 구간(n..N-1)에서 "정책이 cyclic로 보낸 샘플"로 pool 구성 → prior 추정
-      - 같은 beta에서 online 구간의 low-conf(dc<th1) 샘플에만 divide-by-prior 보정 적용 후 평가
-      - offline prefix(0..n-1)는 base only + 보정 없음
-    """
-    if betas is None:
-        betas = [i / 10.0 for i in range(11)]
-
-    N = len(base_correct_list)
-    if N == 0:
-        return {}
-
-    perc01 = float(max(0.0, min(100.0, perc_value))) / 100.0
-    C_cyc = float(k)
-
-    costs = []
-    accs = []
-    meta_per_beta = []
-
-    for beta in betas:
-        n = int(N * float(beta) + 1e-9)
-
-        # thresholds는 "offline prefix"에서 추정(기존 코드와 동일한 규칙)
-        th1 = _quantile(default_conf[:n], perc01) if n > 0 else _quantile(default_conf, perc01)
-        # ours_avggap만 th2 필요
-        th2 = _quantile(mean_conf[:n], perc01) if n > 0 else _quantile(mean_conf, perc01)
-
-        # online에서 low-conf + action 분류
-        pool_ids = []  # online에서 policy가 cyclic로 보낸 샘플들
-        action_map = {}  # i -> action (online, low-conf만 기록)
-
-        for i in range(n, N):
-            if float(default_conf[i]) >= float(th1):
-                continue  # high-conf, 보정/풀 대상 아님
-            act = _policy_action(
-                policy=policy_key,
-                dc_i=float(default_conf[i]),
-                mc_i=float(mean_conf[i]),
-                flip_i=bool(flip_trigger[i]),
-                th1=float(th1),
-                th2=float(th2),
-            )
-            action_map[i] = act
-            if act == "cyclic":
-                pool_ids.append(i)
-
-        # prior(beta) = mean of per-sample priors over pool
-        prior_beta = _estimate_prior_from_precomputed_priors(per_sample_priors, pool_ids, k)
-
-        # ---- 평가: offline prefix는 base only ----
-        total_cost = float(n) * 1.0
-        corrects = int(np.sum(np.asarray(base_correct_list[:n], dtype=np.int64)))
-
-        # ---- online 평가 ----
-        for i in range(n, N):
-            if float(default_conf[i]) >= float(th1):
-                # base, 보정 없음
-                total_cost += 1.0
-                corrects += 1 if base_correct_list[i] else 0
-                continue
-
-            # low-conf: prior로 나눠서 보정 적용
-            ps = np.asarray(per_sample_probs[i], dtype=np.float64)
-            act = action_map.get(i, "base")  # low-conf면 항상 들어있어야 함
-
-            if act == "cyclic":
-                total_cost += C_cyc
-                if _predict_cyclic_with_pride(ps, prior_beta, k, option_ids, ideals[i], cyclic_indices, cyc_perms):
-                    corrects += 1
-            elif act == "probe2":
-                total_cost += 2.0
-                if _predict_probe2_with_pride(ps, prior_beta, k, option_ids, ideals[i], identity_idx, cyclic_indices, cyc_perms):
-                    corrects += 1
-            else:
-                # 이 케이스는 low-conf인데 base로 떨어지는 경우라 거의 없어야 함(정책 정의상)
-                total_cost += 1.0
-                corrects += 1 if base_correct_list[i] else 0
-
-        costs.append(total_cost / float(N))
-        accs.append(float(corrects) / float(N))
-
-        meta_per_beta.append({
-            "beta": float(beta),
-            "n_offline": int(n),
-            "th1": float(th1),
-            "th2": float(th2),
-            "pool_size": int(len(pool_ids)),
-            "prior": [float(x) for x in prior_beta.tolist()],
-            "prior_map": {str(opt): float(v) for opt, v in zip(option_ids, prior_beta.tolist())},
-        })
-
-    curve_obj = {
-        "subject": subject,
-        "tag": str(tag),
-        "k": int(k),
-        "percentile": float(perc_value),
-        "betas": [float(b) for b in betas],
-        "default_accuracy": float(np.mean(np.asarray(base_correct_list, dtype=np.float64))),
-
-        "always": {
-            "default": {"cost": 1.0, "acc": float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))},
-            "cyclic": {"cost": float(k), "acc": float("nan")},  # 필요하면 넣고, 아니면 plot에서 안 써도 됨
-            "full": {"cost": float(len(perm_list)), "acc": float("nan")},
-        },
-
-        policy_key: {"costs": [float(c) for c in costs], "accuracies": [float(a) for a in accs]},
-
-        "pride_free_dynamic": {
-            "pool_policy": policy_key,
-            "pool_from": "online_only_and_action==cyclic",
-            "apply_to": "online_only_and_dc<th1 (low-conf)",
-            "per_beta_meta": meta_per_beta,
-        }
-    }
-    return curve_obj
-
-
-def _collect_policy_pool_ids_beta0(
-    
-    policy: str,
-    default_conf: np.ndarray,
-    mean_conf: np.ndarray,
-    flip_trigger: np.ndarray,
-    perc_value: float
-) -> Tuple[List[int], Dict[str, float]]:
-    """
-    Pool IDs = EXACTLY those samples that THIS policy sends to CYCLIC at beta=0.
-    percentile p로 th1/th2를 잡는다 (전체 데이터 기반, beta=0).
-    """
-    dc = np.asarray(default_conf, dtype=np.float64)
-    mc = np.asarray(mean_conf, dtype=np.float64)
-    fl = np.asarray(flip_trigger, dtype=bool)
-
-    perc01 = float(max(0.0, min(100.0, float(perc_value)))) / 100.0
-    th1 = _quantile(dc, perc01)
-    th2 = _quantile(mc, perc01)
-
-    pool = []
-    for i in range(len(dc)):
-        act = _policy_action_beta0(policy, float(dc[i]), float(mc[i]), bool(fl[i]), th1, th2)
-        if act == "cyclic":
-            pool.append(i)
-
-    meta = {"th1": float(th1), "th2": float(th2), "perc": float(perc_value)}
-    return pool, meta
-
-
-def _estimate_pride_prior_from_pool_ids(
-    per_sample_probs: List[np.ndarray],
-    cyclic_indices: List[int],
-    pool_ids: List[int],
-    ema_alpha: float = 0.0,   # NOTE: we will force no-EMA in main (no alpha).
-    eps: float = 1e-12
-) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """
-    per_sample_probs[i] : (num_perms, k)
-    pool_ids만 대상으로, 그 중에서도 cyclic_indices(=k rotations) rows만 사용해서 prior를 추정.
-
-    - ema_alpha>0: pool 순서대로 EMA 업데이트
-    - ema_alpha==0: pool priors 평균
-
-    Returns:
-      prior_global (k,)
-      meta dict
-    """
-    if len(per_sample_probs) == 0:
-        return np.array([], dtype=np.float64), {"pool_size": 0, "method": "empty"}
-
-    k = int(np.asarray(per_sample_probs[0], dtype=np.float64).shape[-1])
-
-    if pool_ids is None or len(pool_ids) == 0:
-        prior = np.ones((k,), dtype=np.float64)
-        prior = prior / (prior.sum() + eps)
-        return prior, {"pool_size": 0, "method": "uniform"}
-
-    ema_alpha = float(max(0.0, min(1.0, float(ema_alpha))))
-
-    if ema_alpha > 0.0:
-        prior = np.ones((k,), dtype=np.float64)
-        prior = prior / (prior.sum() + eps)
-        used = 0
-        for i in pool_ids:
-            ps = np.asarray(per_sample_probs[i], dtype=np.float64)
-            observed = np.asarray([ps[j] for j in cyclic_indices], dtype=np.float64)  # (k,k)
-            _, _, prior_i = debias_simple(observed)
-            prior_i = np.asarray(prior_i, dtype=np.float64)
-            prior_i = prior_i / (prior_i.sum() + eps)
-            prior = (1.0 - ema_alpha) * prior + ema_alpha * prior_i
-            prior = prior / (prior.sum() + eps)
-            used += 1
-        meta = {"pool_size": int(len(pool_ids)), "used": int(used), "method": f"ema(alpha={ema_alpha:.3f})"}
-        return prior, meta
-
-    priors = []
-    for i in pool_ids:
-        ps = np.asarray(per_sample_probs[i], dtype=np.float64)
-        observed = np.asarray([ps[j] for j in cyclic_indices], dtype=np.float64)  # (k,k)
-        _, _, prior_i = debias_simple(observed)
-        prior_i = np.asarray(prior_i, dtype=np.float64)
-        prior_i = prior_i / (prior_i.sum() + eps)
-        priors.append(prior_i)
-
-    prior_global = np.mean(np.asarray(priors, dtype=np.float64), axis=0)
-    prior_global = prior_global / (prior_global.sum() + eps)
-
-    meta = {"pool_size": int(len(pool_ids)), "used": int(len(priors)), "method": "mean"}
-    return prior_global, meta
-
-
-# =========================================================
-# Plot helpers (5 figures only)
-# =========================================================
-def _plot_pride_core_plot(
-    baseline_curve_obj: dict,
-    pride_curve_by_policy: Dict[str, dict],
-    out_path: str,
-    title: str,
-):
-    """
-    (1) PRIDE core plot 1장 (single figure):
-      - baseline lines: cyclic + switch_cyclic + ours_top2flip
-      - PRIDE lines   : switch_cyclic(PRIDE) + ours_top2flip(PRIDE) + ours_avggap(PRIDE)
-      - points        : default(ens) + cyclic_ensemble point
-    """
-    fig, ax = plt.subplots(figsize=(7.8, 5.4), dpi=200)
-
-    # ----- points: default + cyclic ensemble (no annotate, legend only) -----
-    always = baseline_curve_obj.get("always", {})
-    if "default" in always:
-        ax.scatter(
-            [float(always["default"]["cost"])],
-            [float(always["default"]["acc"])],
-            marker="*",
-            s=140,
-            label="default",
-        )
-    if "cyclic" in always:
-        ax.scatter(
-            [float(always["cyclic"]["cost"])],
-            [float(always["cyclic"]["acc"])],
-            marker="D",
-            s=70,
-            label="cyclic_ensemble",
-        )
-
-    def _plot_curve_obj(curve_obj: dict, key: str, label: str,
-                        lw: float = 1.8, ls: str = "-", marker: str = "o"):
-        if curve_obj is None or key not in curve_obj:
-            return
-        xs = [float(v) for v in curve_obj[key]["costs"]]
-        ys = [float(v) for v in curve_obj[key]["accuracies"]]
-        pairs = sorted(zip(xs, ys), key=lambda t: t[0])
-        xs = [p[0] for p in pairs]
-        ys = [p[1] for p in pairs]
-        ax.plot(xs, ys, linestyle=ls, marker=marker, linewidth=lw, markersize=4, label=label)
-
-    # ----- baseline (solid) -----
-    _plot_curve_obj(baseline_curve_obj, "cyclic", "cyclic", ls="-", lw=1.8)
-    _plot_curve_obj(baseline_curve_obj, "switch_cyclic", "switch_cyclic", ls="-", lw=1.8)
-    _plot_curve_obj(baseline_curve_obj, "ours_top2flip", "ours_top2flip", ls="-", lw=1.8)
-
-    # ----- PRIDE (dashed) -----
-    if "switch_cyclic" in pride_curve_by_policy:
-        _plot_curve_obj(pride_curve_by_policy["switch_cyclic"], "switch_cyclic", "switch_cyclic(PRIDE)", ls="--", lw=2.2)
-    if "ours_top2flip" in pride_curve_by_policy:
-        _plot_curve_obj(pride_curve_by_policy["ours_top2flip"], "ours_top2flip", "ours_top2flip(PRIDE)", ls="--", lw=2.2)
-    if "ours_avggap" in pride_curve_by_policy:
-        _plot_curve_obj(pride_curve_by_policy["ours_avggap"], "ours_avggap", "ours_avggap(PRIDE)", ls="--", lw=2.2)
-
-    ax.set_xlabel("Computational Cost (× of default)")
-    ax.set_ylabel("Accuracy")
-    ax.set_title(title)
-    ax.grid(True, linestyle="--", alpha=0.30)
-
-    ax.legend(loc="lower right", frameon=True, fancybox=True, framealpha=1.0, fontsize=9)
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    fig.tight_layout(rect=[0, 0, 1, 0.88])  # legend 공간 확보
-    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.12)
-    plt.close(fig)
-
-
-def _plot_avggap_baseline_vs_pride_points(
-    baseline_curve_obj: dict,
-    pride_curve_obj: dict,
-    out_path: str,
-    title: str
-):
-    """
-    (2) AvgGap baseline vs PRIDE 1장:
-      - two lines: ours_avggap(base) vs ours_avggap(PRIDE)
-      - reference: baseline_default + pride_default (points) + cyclic baseline (optional)
-    """
-    fig, ax = plt.subplots(figsize=(7.8, 5.4), dpi=200)
-
-    # baseline default point
-    always_b = baseline_curve_obj.get("always", {})
-    if "default" in always_b:
-        ax.scatter(
-            [float(always_b["default"]["cost"])],
-            [float(always_b["default"]["acc"])],
-            marker="*",
-            s=140,
-            label="baseline_default",
-        )
-
-    # pride default point (있으면 같이 표시)
-    always_p = pride_curve_obj.get("always", {}) if isinstance(pride_curve_obj, dict) else {}
-    if "default" in always_p:
-        ax.scatter(
-            [float(always_p["default"]["cost"])],
-            [float(always_p["default"]["acc"])],
-            marker="*",
-            s=140,
-            label="pride_default",
-        )
-
-    def _plot_curve(obj: dict, key: str, label: str, lw: float, ls: str):
-        if obj is None or key not in obj:
-            return
-        xs = [float(v) for v in obj[key]["costs"]]
-        ys = [float(v) for v in obj[key]["accuracies"]]
-        pairs = sorted(zip(xs, ys), key=lambda t: t[0])
-        xs = [p[0] for p in pairs]
-        ys = [p[1] for p in pairs]
-        ax.plot(xs, ys, linestyle=ls, marker="o", linewidth=lw, markersize=6, label=label)
-
-    _plot_curve(baseline_curve_obj, "ours_avggap", "baseline_ours_avggap", lw=2.0, ls="-")
-    _plot_curve(pride_curve_obj, "ours_avggap", "pride_ours_avggap", lw=2.0, ls="--")
-
-    ax.set_xlabel("Computational Cost (× of default)")
-    ax.set_ylabel("Accuracy")
-    ax.set_title(title)
-    ax.grid(True, linestyle="--", alpha=0.30)
-
-    # ✅ 네 예시처럼 좌상단 legend 박스
-    ax.legend(loc="upper left", frameon=True, fancybox=True, framealpha=1.0, fontsize=9)
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.12)
-    plt.close(fig)
-
-
-def _plot_heatmap_with_text(
-    acc_grid: np.ndarray,
-    cost_grid: np.ndarray,
-    x_ticks: List[float],
-    y_ticks: List[float],
-    out_path: str,
-    title: str,
-    xlabel: str,
-    ylabel: str,
-    mode: str = "base"
-):
-    """
-    (3)(4)(5) heatmap 3장:
-      - baseline: cell "acc\\nc=cost"
-      - pride   : cell "acc\\nc=cost"
-      - delta   : cell "Δacc\\nΔc"
-
-    NOTE: y_ticks includes 0 -> th2=0 row exists.
-    """
-    plt.figure(figsize=(8.8, 7.2), dpi=220)
-    im = plt.imshow(acc_grid, aspect='auto', origin='lower')
-    plt.colorbar(im, fraction=0.046, pad=0.04)
-    plt.title(title)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-
-    xt = list(range(len(x_ticks)))
-    yt = list(range(len(y_ticks)))
-    plt.xticks(xt, [f"{x:.0f}" for x in x_ticks], rotation=45, ha='right')
-    plt.yticks(yt, [f"{y:.0f}" for y in y_ticks])
-
-    ny, nx = acc_grid.shape
-    for iy in range(ny):
-        for ix in range(nx):
-            a = acc_grid[iy, ix]
-            c = cost_grid[iy, ix]
-            if np.isnan(a) or np.isnan(c):
-                txt = "nan"
-            else:
-                if mode == "delta":
-                    txt = f"{a:+.3f}\n{c:+.2f}"
-                else:
-                    txt = f"{a:.3f}\nc={c:.2f}"
-            plt.text(ix, iy, txt, ha='center', va='center', fontsize=6)
-
-    plt.tight_layout()
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    plt.savefig(out_path)
-    plt.close()
 
 
 def _plot_confidence_distribution(
@@ -1283,9 +698,17 @@ def _compute_and_plot_th2_tradeoff(
         # 1) Dense Curve
         costs = []
         for th2p in dense_th2_list:
-            c, _ = _policy_metrics_avggap_beta0(
-                default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k,
-                th1p, float(th2p)
+            # REAL-WORLD online curve: sweep th2_percent while th1_percent fixed
+            c, _ = _run_online_avggap_policy(
+                default_conf=default_conf,
+                mean_conf=mean_conf,
+                base_correct=base_correct_list,
+                cyclic_correct=cyclic_correct_list,
+                probe2_correct=arr_probe2_correct,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
             )
             costs.append(c)
         ax1.plot(dense_th2_list, costs, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.6)
@@ -1344,9 +767,16 @@ def _compute_and_plot_th2_tradeoff(
         # 1) Dense Curve
         accs = []
         for th2p in dense_th2_list:
-            _, a = _policy_metrics_avggap_beta0(
-                default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k,
-                th1p, float(th2p)
+            _, a = _run_online_avggap_policy(
+                default_conf=default_conf,
+                mean_conf=mean_conf,
+                base_correct=base_correct_list,
+                cyclic_correct=cyclic_correct_list,
+                probe2_correct=arr_probe2_correct,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
             )
             accs.append(a)
         delta_accs = [(a - default_acc) * 100.0 for a in accs]
@@ -1405,9 +835,16 @@ def _compute_and_plot_th2_tradeoff(
         costs_line = []
         delta_accs_line = []
         for th2p in dense_th2_list:
-            c, a = _policy_metrics_avggap_beta0(
-                default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k,
-                th1p, float(th2p)
+            c, a = _run_online_avggap_policy(
+                default_conf=default_conf,
+                mean_conf=mean_conf,
+                base_correct=base_correct_list,
+                cyclic_correct=cyclic_correct_list,
+                probe2_correct=arr_probe2_correct,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
             )
             costs_line.append(c)
             delta_accs_line.append((a - default_acc) * 100.0)
@@ -1517,162 +954,8 @@ def _parse_percent_value_list(v) -> List[float]:
     return [30.0]
 
 
-def _policy_metrics_avggap_beta0(
-    default_conf: np.ndarray,
-    mean_conf: np.ndarray,
-    base_correct: List[bool],
-    cyclic_correct: List[bool],
-    probe2_correct: np.ndarray,
-    k: int,
-    th1_percent: float,
-    th2_percent: float
-) -> Tuple[float, float]:
-    """
-    ours_avggap 정책을 beta=0에서 (th1, th2 percentile)로 평가.
-    return: (avg_cost, acc)
-    """
-    N = len(base_correct)
-    if N == 0:
-        return float("nan"), float("nan")
-    dc = np.asarray(default_conf, dtype=np.float64)
-    mc = np.asarray(mean_conf, dtype=np.float64)
-    th1 = _quantile(dc, float(th1_percent) / 100.0)
-    th2 = _quantile(mc, float(th2_percent) / 100.0)
-
-    total_cost = 0.0
-    corrects = 0
-    for i in range(N):
-        if float(dc[i]) >= th1:
-            total_cost += 1.0
-            corrects += 1 if base_correct[i] else 0
-        else:
-            if float(mc[i]) < th2:
-                total_cost += float(k)
-                corrects += 1 if cyclic_correct[i] else 0
-            else:
-                total_cost += 2.0
-                corrects += 1 if bool(probe2_correct[i]) else 0
-
-    return total_cost / float(N), corrects / float(N)
-
-def _policy_metrics_avggap_pride_dynamic(
-    # raw gating stats
-    default_conf: np.ndarray,
-    mean_conf: np.ndarray,
-
-    # raw base correctness (offline/highconf는 보정 안 하니까 그대로 씀)
-    base_correct: List[bool],
-
-    # raw per-sample info
-    per_sample_priors: List[np.ndarray],   # (N,k) list of priors (cyclic rows 기반)
-    per_sample_probs: List[np.ndarray],    # (N,num_perms,k) raw probs
-    ideals: List[str],
-
-    # permutation helpers
-    k: int,
-    option_ids: List[str],
-    identity_idx: int,
-    cyclic_indices: List[int],
-    cyc_perms: List[Tuple[int, ...]],
-
-    # threshold percentiles (heatmap axes)
-    th1_percent: float,
-    th2_percent: float,
-
-    # beta control (heatmap을 beta=0 말고도 만들 수 있게)
-    beta: float = 0.0,
-    eps: float = 1e-12
-) -> Tuple[float, float, int]:
-    """
-    PRIDE_FREE_DYNAMIC 정의에 맞춘 avggap 정책 평가:
-
-    - offline prefix (0..n-1): base only, 보정 없음
-    - online (n..N-1):
-        - dc>=th1 : base, 보정 없음
-        - dc<th1  : (low-conf)
-            - pool = (action==cyclic)인 low-conf 샘플들로 prior(beta,th1,th2) 추정
-            - action==cyclic : cyclic prediction에만 보정 적용
-            - action==probe2 : base/probe2 mean prediction에만 보정 적용
-    return: (avg_cost, acc, pool_size)
-    """
-    N = len(base_correct)
-    if N == 0:
-        return float("nan"), float("nan"), 0
-
-    n = int(N * float(beta) + 1e-9)
-
-    # thresholds are estimated from offline prefix (기존 규칙과 동일)
-    th1 = _quantile(default_conf[:n], float(th1_percent) / 100.0) if n > 0 else _quantile(default_conf, float(th1_percent) / 100.0)
-    th2 = _quantile(mean_conf[:n], float(th2_percent) / 100.0) if n > 0 else _quantile(mean_conf, float(th2_percent) / 100.0)
-
-    # --------------------------
-    # 1) build pool from online low-conf samples that go to cyclic
-    # --------------------------
-    pool_ids = []
-    for i in range(n, N):
-        if float(default_conf[i]) >= float(th1):
-            continue
-        # ours_avggap: low-conf -> cyclic if mc < th2 else probe2
-        if float(mean_conf[i]) < float(th2):
-            pool_ids.append(i)
-
-    # prior(beta,cell) = mean of per-sample priors in pool (empty -> uniform)
-    prior = _estimate_prior_from_precomputed_priors(per_sample_priors, pool_ids, k, eps=eps)
-
-    # --------------------------
-    # 2) evaluate with "apply correction only to online low-conf"
-    # --------------------------
-    total_cost = 0.0
-    corrects = 0
-    C_cyc = float(k)
-
-    # offline prefix
-    for i in range(0, n):
-        total_cost += 1.0
-        corrects += 1 if base_correct[i] else 0
-
-    # online
-    for i in range(n, N):
-        dc = float(default_conf[i])
-        if dc >= float(th1):
-            total_cost += 1.0
-            corrects += 1 if base_correct[i] else 0
-            continue
-
-        # low-conf: PRIDE 적용
-        mc = float(mean_conf[i])
-        ps = np.asarray(per_sample_probs[i], dtype=np.float64)
-
-        if mc < float(th2):
-            # action == cyclic
-            total_cost += C_cyc
-            # cyclic rows만 correction
-            corrected = []
-            for idx in cyclic_indices:
-                corrected.append(_pride_correct_row(ps[idx], prior, eps=eps).tolist())
-            agg = _aggregate_probs_over_permutations(corrected, cyc_perms, k)
-            pred = option_ids[int(np.argmax(agg))]
-            corrects += 1 if (pred == ideals[i]) else 0
-        else:
-            # action == probe2
-            total_cost += 2.0
-
-            base_raw = np.asarray(ps[identity_idx], dtype=np.float64)
-            shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_raw, k)
-            probe_perm_idx = cyclic_indices[shift]
-
-            base_corr = _pride_correct_row(ps[identity_idx], prior, eps=eps)  # identity라 content-space 그대로
-            probe_corr = _pride_correct_row(ps[probe_perm_idx], prior, eps=eps)
-            agg_probe = _aggregate_probs_over_permutations([probe_corr.tolist()], [cyc_perms[shift]], k)
-
-            mean_probs = (base_corr + agg_probe) / 2.0
-            pred = option_ids[int(np.argmax(mean_probs))]
-            corrects += 1 if (pred == ideals[i]) else 0
-
-    return total_cost / float(N), corrects / float(N), int(len(pool_ids))
-
 # =========================================================
-# Curves: baseline (all methods) + PRIDE_FREE (single policy)
+# Curves: baseline (all methods)
 # =========================================================
 def _compute_curves_for_one_percentile(
     subject: str,
@@ -1987,7 +1270,7 @@ def _log_baseline_report(curve_obj: dict):
     PRIDE_FREE는 (아래 main에서) 한 줄만 찍는다.
     """
     p = curve_obj.get("percentile")
-    logger.info(_purple(f"==== BASELINE Derived policy report (REAL-WORLD online, beta=0, p={p}) ===="))
+    logger.info(_purple(f"==== BASELINE Derived policy report (REAL-WORLD online, p={p}) ===="))
 
     always = curve_obj.get("always", {})
     logger.info(f"BASELINE default(ensemble) : cost={always['default']['cost']:.3f}, acc={always['default']['acc']:.4f}")
@@ -2033,9 +1316,6 @@ def main():
                 "eval_names": getattr(args, "eval_names", None),
                 "option_id_set": getattr(args, "option_id_set", None),
                 "ours_low_conf_percent": getattr(args, "ours_low_conf_percent", None),
-                "disable_pride": getattr(args, "disable_pride", False),
-                # We FORCE no alpha (no EMA) for PRIDE in this script.
-                "pride_ema_alpha_forced": 0.0,
             }
             wandb_run = wandb.init(project=project, entity=entity, name=run_name, config=cfg)
             logger.info(_blue(f"W&B init ok: project={project}, entity={entity}, name={run_name}"))
@@ -2402,7 +1682,7 @@ def main():
                             # [ADD] log heuristic point performances (no plot annotation)
                             try:
                                 base_acc0 = float(np.mean(np.asarray(base_correct_list, dtype=np.float64))) if len(base_correct_list) else float("nan")
-                                logger.info(_purple(f"==== HEURISTIC Point report (beta=0, p={int(round(perc))}) ===="))
+                                logger.info(_purple(f"==== HEURISTIC Point report (p={int(round(perc))}) ===="))
                                 logger.info(f"{'default':<18}: cost=1.000, acc={base_acc0:.4f}")
                                 for hp in extra_pts:
                                     acc = float(hp.get("acc", float("nan")))
@@ -2420,7 +1700,7 @@ def main():
                             _plot_baseline_points_scatter(
                                 curve_obj=cobj,
                                 out_path=out_pts,
-                                title=f"{args.task} {subject} — Baseline Policies (REAL-WORLD online, beta=0, {ptag}, Heuristics 5)",
+                                title=f"{args.task} {subject} — Baseline Policies (REAL-WORLD online, {ptag}, Heuristics 5)",
                                 extra_points=extra_pts
                             )
                             if wandb_ok and wandb_run is not None:
