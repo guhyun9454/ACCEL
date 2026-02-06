@@ -194,14 +194,14 @@ def _plot_baseline_points_scatter(
     #     plt.scatter(always["full"]["cost"], always["full"]["acc"], 
     #                marker='X', s=150, color='black', label='Full', zorder=10)
 
-    # 2. Policy Points (beta=0)
+    # 2. Policy Points (REAL-WORLD online; single point)
     policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
     markers = ['s', '^', 'v', 'o']
     colors = ['orange', 'brown', 'green', 'blue']
     
     for key, m, c in zip(policies, markers, colors):
         if key in curve_obj:
-            # beta=0 is the first element
+            # single point (length-1)
             cost = float(curve_obj[key]["costs"][0])
             acc = float(curve_obj[key]["accuracies"][0])
             plt.scatter(cost, acc, marker=m, s=120, color=c, label=key, alpha=0.9)
@@ -971,21 +971,13 @@ def _compute_curves_for_one_percentile(
     probe2_correct: np.ndarray,
     perc_value: float,
     full_enabled: bool = True,
-    betas: Optional[List[float]] = None
 ) -> dict:
     """
-    baseline curves:
-      cyclic, full, switch_full, switch_cyclic, ours_top2flip, ours_avggap
-    + always(default/cyclic/full ensemble) points
+    REAL-WORLD online evaluation (no beta / no offline prefix).
 
-    beta 의미: offline prefix 비율 (n = beta*N)
-      - first n samples: base only (cost=1)
-      - remaining N-n: policy applied (potentially expensive)
-    => beta↑ (offline↑)  → cost↓
+    Returns a curve_obj where each policy has a SINGLE point (cost, acc),
+    represented as length-1 lists: {"costs":[...], "accuracies":[...]}.
     """
-    if betas is None:
-        betas = [i / 10.0 for i in range(11)]
-
     N = len(base_correct_list)
     if N == 0:
         return {}
@@ -999,116 +991,72 @@ def _compute_curves_for_one_percentile(
     cyclic_acc_always = float(np.mean(np.asarray(cyclic_correct_list, dtype=np.float64)))
     full_acc_always = float(np.mean(np.asarray(full_correct_list, dtype=np.float64))) if full_enabled and len(full_correct_list) == N else float("nan")
 
-    # 1) cyclic/full beta curves
-    curve_cyc = []
-    curve_full = []
-    for beta in betas:
-        n = int(N * beta + 1e-9)
+    # 1) switch policies (REAL-WORLD online)
+    total_cost_sc = 0.0
+    corrects_sc = 0
+    total_cost_sf = 0.0
+    corrects_sf = 0
+    past_gaps: List[float] = []
+    for i in range(N):
+        if len(past_gaps) > 0:
+            thresh = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), perc01))
+        else:
+            thresh = float("-inf")
+        amb = (float(default_conf[i]) < thresh)
 
-        acc_cyc = (sum(base_correct_list[:n]) + sum(cyclic_correct_list[n:])) / float(N)
-        acc_full = (sum(base_correct_list[:n]) + sum(full_correct_list[n:])) / float(N) if full_enabled and len(full_correct_list) == N else float("nan")
-
-        cost_cyc = beta * 1.0 + (1.0 - beta) * C_cyc
-        cost_full = beta * 1.0 + (1.0 - beta) * C_full if full_enabled else float("nan")
-
-        curve_cyc.append((cost_cyc, acc_cyc))
-        if full_enabled:
-            curve_full.append((cost_full, acc_full))
-
-    # 2) switch curves
-    curve_switch_full = []
-    curve_switch_cyc = []
-    for beta in betas:
-        n = int(N * beta + 1e-9)
-
-        total_cost_sf = 0.0
-        corrects_sf = 0
-        total_cost_sc = 0.0
-        corrects_sc = 0
-        past_gaps: List[float] = []
-
-        # offline prefix: base only
-        for i in range(0, n):
-            total_cost_sf += 1.0
+        # switch_cyclic
+        if amb:
+            total_cost_sc += C_cyc
+            corrects_sc += 1 if cyclic_correct_list[i] else 0
+        else:
             total_cost_sc += 1.0
-            if base_correct_list[i]:
-                corrects_sf += 1
-                corrects_sc += 1
-            # online thresholding uses observed gaps only (past)
-            past_gaps.append(float(default_conf[i]))
+            corrects_sc += 1 if base_correct_list[i] else 0
 
-        # online: apply switch
-        for i in range(n, N):
-            # Online th1 threshold = running-quantile over PAST gaps only
-            if len(past_gaps) > 0:
-                thresh = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), perc01))
-            else:
-                # no past info yet -> don't treat as ambiguous (avoid oracle / avoid over-trigger)
-                thresh = float("-inf")
-
-            amb = (float(default_conf[i]) < thresh)
-
-            if full_enabled and len(full_correct_list) == N:
-                if amb:
-                    total_cost_sf += C_full
-                    corrects_sf += 1 if full_correct_list[i] else 0
-                else:
-                    total_cost_sf += 1.0
-                    corrects_sf += 1 if base_correct_list[i] else 0
-
-            if amb:
-                total_cost_sc += C_cyc
-                corrects_sc += 1 if cyclic_correct_list[i] else 0
-            else:
-                total_cost_sc += 1.0
-                corrects_sc += 1 if base_correct_list[i] else 0
-
-            # Update past gaps AFTER decision
-            past_gaps.append(float(default_conf[i]))
-
+        # switch_full (only if available)
         if full_enabled and len(full_correct_list) == N:
-            curve_switch_full.append((total_cost_sf / float(N), corrects_sf / float(N)))
-        curve_switch_cyc.append((total_cost_sc / float(N), corrects_sc / float(N)))
+            if amb:
+                total_cost_sf += C_full
+                corrects_sf += 1 if full_correct_list[i] else 0
+            else:
+                total_cost_sf += 1.0
+                corrects_sf += 1 if base_correct_list[i] else 0
 
-    # 3) ours_top2flip
-    curve_top2flip = []
-    for beta in betas:
-        n = int(N * beta + 1e-9)
-        c, a = _run_online_top2flip_policy(
-            default_conf=default_conf,
-            flip_trigger=flip_trigger,
-            base_correct=base_correct_list,
-            cyclic_correct=cyclic_correct_list,
-            probe2_correct=probe2_correct,
-            k=k,
-            th1_percent=perc_value,
-            offline_prefix_n=n,
-        )
-        curve_top2flip.append((float(c), float(a)))
+        past_gaps.append(float(default_conf[i]))
 
-    # 4) ours_avggap
-    curve_avggap = []
-    for beta in betas:
-        n = int(N * beta + 1e-9)
-        c, a = _run_online_avggap_policy(
-            default_conf=default_conf,
-            mean_conf=mean_conf,
-            base_correct=base_correct_list,
-            cyclic_correct=cyclic_correct_list,
-            probe2_correct=probe2_correct,
-            k=k,
-            th1_percent=perc_value,
-            th2_percent=perc_value,
-            offline_prefix_n=n,
-        )
-        curve_avggap.append((float(c), float(a)))
+    switch_cyclic_cost = total_cost_sc / float(N)
+    switch_cyclic_acc = corrects_sc / float(N)
+    switch_full_cost = (total_cost_sf / float(N)) if (full_enabled and len(full_correct_list) == N) else float("nan")
+    switch_full_acc = (corrects_sf / float(N)) if (full_enabled and len(full_correct_list) == N) else float("nan")
+
+    # 2) ours_top2flip / ours_avggap (REAL-WORLD online)
+    c_top2, a_top2 = _run_online_top2flip_policy(
+        default_conf=default_conf,
+        flip_trigger=flip_trigger,
+        base_correct=base_correct_list,
+        cyclic_correct=cyclic_correct_list,
+        probe2_correct=probe2_correct,
+        k=k,
+        th1_percent=perc_value,
+        offline_prefix_n=0,
+    )
+    c_avg, a_avg = _run_online_avggap_policy(
+        default_conf=default_conf,
+        mean_conf=mean_conf,
+        base_correct=base_correct_list,
+        cyclic_correct=cyclic_correct_list,
+        probe2_correct=probe2_correct,
+        k=k,
+        th1_percent=perc_value,
+        th2_percent=perc_value,
+        offline_prefix_n=0,
+    )
 
     curve_obj = {
         "subject": subject,
         "tag": str(tag),
         "k": int(k),
         "percentile": float(perc_value),
-        "betas": [float(b) for b in betas],
+        "n_samples": int(N),
         "default_accuracy": float(default_acc),
 
         "always": {
@@ -1116,151 +1064,16 @@ def _compute_curves_for_one_percentile(
             "cyclic": {"cost": float(C_cyc), "acc": float(cyclic_acc_always)},
         },
 
-        "cyclic": {"costs": [float(c) for c, _ in curve_cyc], "accuracies": [float(a) for _, a in curve_cyc]},
-        "switch_cyclic": {"costs": [float(c) for c, _ in curve_switch_cyc], "accuracies": [float(a) for _, a in curve_switch_cyc]},
-        "ours_top2flip": {"costs": [float(c) for c, _ in curve_top2flip], "accuracies": [float(a) for _, a in curve_top2flip]},
-        "ours_avggap": {"costs": [float(c) for c, _ in curve_avggap], "accuracies": [float(a) for _, a in curve_avggap]},
+        "cyclic": {"costs": [float(C_cyc)], "accuracies": [float(cyclic_acc_always)]},
+        "switch_cyclic": {"costs": [float(switch_cyclic_cost)], "accuracies": [float(switch_cyclic_acc)]},
+        "ours_top2flip": {"costs": [float(c_top2)], "accuracies": [float(a_top2)]},
+        "ours_avggap": {"costs": [float(c_avg)], "accuracies": [float(a_avg)]},
     }
     if full_enabled:
         curve_obj["always"]["full"] = {"cost": float(C_full), "acc": float(full_acc_always)}
-        curve_obj["full"] = {"costs": [float(c) for c, _ in curve_full], "accuracies": [float(a) for _, a in curve_full]}
-        if len(curve_switch_full) > 0:
-            curve_obj["switch_full"] = {"costs": [float(c) for c, _ in curve_switch_full], "accuracies": [float(a) for _, a in curve_switch_full]}
-    return curve_obj
-
-
-def _compute_curve_for_single_policy(
-    subject: str,
-    tag: str,
-    policy_key: str,
-    k: int,
-    perm_list: List[Tuple[int, ...]],
-    base_correct_list: List[bool],
-    cyclic_correct_list: List[bool],
-    full_correct_list: List[bool],
-    default_conf: np.ndarray,
-    mean_conf: np.ndarray,
-    flip_trigger: np.ndarray,
-    probe2_correct: np.ndarray,
-    perc_value: float,
-    betas: Optional[List[float]] = None
-) -> dict:
-    """
-    Returns curve_obj containing ONLY:
-      - default_accuracy
-      - always(default/cyclic/full)
-      - <policy_key> curve
-    """
-    if betas is None:
-        betas = [i / 10.0 for i in range(11)]
-
-    N = len(base_correct_list)
-    if N == 0:
-        return {}
-
-    perc01 = float(max(0.0, min(100.0, perc_value))) / 100.0
-    C_cyc = float(k)
-    C_full = float(len(perm_list))
-
-    default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
-    cyclic_acc_always = float(np.mean(np.asarray(cyclic_correct_list, dtype=np.float64)))
-    full_acc_always = float(np.mean(np.asarray(full_correct_list, dtype=np.float64)))
-
-    curve = []
-
-    if policy_key == "switch_cyclic":
-        for beta in betas:
-            n = int(N * beta + 1e-9)
-            th1 = _quantile(default_conf[:n], perc01) if n > 0 else _quantile(default_conf, perc01)
-
-            total_cost = 0.0
-            corrects = 0
-
-            for i in range(0, n):
-                total_cost += 1.0
-                corrects += 1 if base_correct_list[i] else 0
-
-            for i in range(n, N):
-                if float(default_conf[i]) < th1:
-                    total_cost += C_cyc
-                    corrects += 1 if cyclic_correct_list[i] else 0
-                else:
-                    total_cost += 1.0
-                    corrects += 1 if base_correct_list[i] else 0
-
-            curve.append((total_cost / float(N), corrects / float(N)))
-
-    elif policy_key == "ours_top2flip":
-        for beta in betas:
-            n = int(N * beta + 1e-9)
-            th1 = _quantile(default_conf[:n], perc01) if n > 0 else _quantile(default_conf, perc01)
-
-            total_cost = 0.0
-            corrects = 0
-
-            for i in range(0, n):
-                total_cost += 1.0
-                corrects += 1 if base_correct_list[i] else 0
-
-            for i in range(n, N):
-                if float(default_conf[i]) >= th1:
-                    total_cost += 1.0
-                    corrects += 1 if base_correct_list[i] else 0
-                else:
-                    if bool(flip_trigger[i]):
-                        total_cost += C_cyc
-                        corrects += 1 if cyclic_correct_list[i] else 0
-                    else:
-                        total_cost += 2.0
-                        corrects += 1 if bool(probe2_correct[i]) else 0
-
-            curve.append((total_cost / float(N), corrects / float(N)))
-
-    elif policy_key == "ours_avggap":
-        for beta in betas:
-            n = int(N * beta + 1e-9)
-            th1 = _quantile(default_conf[:n], perc01) if n > 0 else _quantile(default_conf, perc01)
-            th2 = _quantile(mean_conf[:n], perc01) if n > 0 else _quantile(mean_conf, perc01)
-
-            total_cost = 0.0
-            corrects = 0
-
-            for i in range(0, n):
-                total_cost += 1.0
-                corrects += 1 if base_correct_list[i] else 0
-
-            for i in range(n, N):
-                if float(default_conf[i]) >= th1:
-                    total_cost += 1.0
-                    corrects += 1 if base_correct_list[i] else 0
-                else:
-                    if float(mean_conf[i]) < th2:
-                        total_cost += C_cyc
-                        corrects += 1 if cyclic_correct_list[i] else 0
-                    else:
-                        total_cost += 2.0
-                        corrects += 1 if bool(probe2_correct[i]) else 0
-
-            curve.append((total_cost / float(N), corrects / float(N)))
-    else:
-        raise ValueError(f"Unknown policy_key: {policy_key}")
-
-    curve_obj = {
-        "subject": subject,
-        "tag": str(tag),
-        "k": int(k),
-        "percentile": float(perc_value),
-        "betas": [float(b) for b in betas],
-        "default_accuracy": float(default_acc),
-
-        "always": {
-            "default": {"cost": 1.0, "acc": float(default_acc)},
-            "cyclic": {"cost": float(C_cyc), "acc": float(cyclic_acc_always)},
-            "full": {"cost": float(C_full), "acc": float(full_acc_always)},
-        },
-
-        policy_key: {"costs": [float(c) for c, _ in curve], "accuracies": [float(a) for _, a in curve]},
-    }
+        curve_obj["full"] = {"costs": [float(C_full)], "accuracies": [float(full_acc_always)]}
+        if full_enabled and len(full_correct_list) == N:
+            curve_obj["switch_full"] = {"costs": [float(switch_full_cost)], "accuracies": [float(switch_full_acc)]}
     return curve_obj
 
 
@@ -1348,6 +1161,12 @@ def main():
         (subjects, prepare_few_shot_samples,
          prepare_eval_samples, prepare_eval_fn) = prepare_eval(args, eval_name)
 
+        # =========================
+        # Aggregate (MMLU-style) summary over subjects
+        # =========================
+        eval_acc_records: List[dict] = []  # [{'subject':str,'corrects':int,'total':int,'acc':float}]
+        derived_records_by_p: Dict[float, List[dict]] = {}  # p -> list of curve_obj (per subject)
+
         for subject in subjects[::1]:
             cached_path = f'{args.save_path}/{subject}.jsonl'
             use_cached = (not bool(getattr(args, 'force', False))) and os.path.exists(cached_path)
@@ -1420,10 +1239,42 @@ def main():
                     metrics = {'type': 'metric', 'data': {'accuracy': acc}}
                     logger.info(_purple(f"==== Ensemble report ({args.setting}) ===="))
                     logger.info(f"accuracy: {acc:.4f}")
+
+                    # aggregate: (micro uses correct/total; macro uses per-subject acc mean)
+                    if total > 0:
+                        eval_acc_records.append({
+                            "subject": str(subject),
+                            "corrects": int(corrects),
+                            "total": int(total),
+                            "acc": float(acc),
+                        })
                 else:
                     metrics = {'type': 'metric', 'data': {}}
                     metrics['data']['accuracy'] = get_accuracy(results)
                     metrics['data']['boostrap_std'] = get_bootstrap_accuracy_std(results)
+
+                    # aggregate (base/noid/shuffle etc)
+                    total_b = 0
+                    corrects_b = 0
+                    for r in results:
+                        if r.get("type") != "result":
+                            continue
+                        data = r.get("data", {}) or {}
+                        corr = data.get("correct", None)
+                        if corr is None:
+                            if ("sampled" in data) and ("ideal" in data):
+                                corr = (data.get("sampled") == data.get("ideal"))
+                            else:
+                                continue
+                        total_b += 1
+                        corrects_b += 1 if bool(corr) else 0
+                    if total_b > 0:
+                        eval_acc_records.append({
+                            "subject": str(subject),
+                            "corrects": int(corrects_b),
+                            "total": int(total_b),
+                            "acc": float(corrects_b) / float(total_b),
+                        })
 
             logger.info(_orange(f"Run completed: {subject}"))
 
@@ -1612,7 +1463,7 @@ def main():
                     else:
                         logger.info(_purple(f"[{subject}] Accuracies — Full: (disabled), Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
 
-                    # ---------- compute & save beta curves (baseline) ----------
+                    # ---------- compute & save REAL-WORLD online curves (baseline; single point per policy) ----------
                     curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
                     if getattr(args, 'option_id_set', None):
                         curve_save_path += f'_id-{args.option_id_set}'
@@ -1643,6 +1494,9 @@ def main():
                             curve_objs_baseline.append(cobj)
                             baseline_by_p[perc] = cobj
                             _log_baseline_report(cobj)
+
+                            # aggregate derived policy report over subjects (per p)
+                            derived_records_by_p.setdefault(float(perc), []).append(cobj)
 
                             # [ADD] Baseline Point Plot with 3 Rules
                             ptag = f"p{int(round(perc))}"
@@ -1725,7 +1579,7 @@ def main():
                         except Exception:
                             pass
 
-                    save_results(f'{curve_save_path}/{subject}_beta_curve.jsonl', curve_objs_baseline, metrics=None)
+                    save_results(f'{curve_save_path}/{subject}_curve.jsonl', curve_objs_baseline, metrics=None)
 
                     # =========================================================
                     # th2 trade-off plot: th1 (5, 10, 20, 30)에 대해 각각 th2 (5, 10, 20, 30) curve
@@ -1754,11 +1608,54 @@ def main():
                         )
 
                 except Exception as e:
-                    logger.warning(f"Failed to derive beta curves for subject '{subject}': {e}")
+                    logger.warning(f"Failed to derive curves for subject '{subject}': {e}")
                     import traceback
                     traceback.print_exc()
 
             logging_cuda_memory_usage()
+
+        # ---------- end subjects loop: print aggregate summary ----------
+        if len(eval_acc_records) > 0:
+            macro_acc = float(np.mean([float(r["acc"]) for r in eval_acc_records]))
+            micro_total = int(np.sum([int(r["total"]) for r in eval_acc_records]))
+            micro_corrects = int(np.sum([int(r["corrects"]) for r in eval_acc_records]))
+            micro_acc = (float(micro_corrects) / float(micro_total)) if micro_total > 0 else float("nan")
+            logger.info(_purple(f"==== AGGREGATE report over subjects ({args.task}, setting={args.setting}) ===="))
+            logger.info(f"subjects: {len(eval_acc_records)}/{len(subjects)}")
+            logger.info(f"accuracy (macro mean over subjects): {macro_acc:.4f}")
+            logger.info(f"accuracy (micro = sum correct / sum total): {micro_acc:.4f}")
+
+        # Aggregate derived-policy summary (only available when args.setting == 'full')
+        if len(derived_records_by_p) > 0:
+            for p, cobjs in sorted(derived_records_by_p.items(), key=lambda t: t[0]):
+                keys = ["default", "cyclic", "full", "switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
+                logger.info(_purple(f"==== AGGREGATE Derived policy report (REAL-WORLD online, p={p}) ===="))
+                for key in keys:
+                    accs = []
+                    costs = []
+                    ws = []
+                    for cobj in cobjs:
+                        n = int(cobj.get("n_samples", 0)) or 0
+                        if key in ["default", "cyclic", "full"]:
+                            always = cobj.get("always", {}) or {}
+                            if key not in always:
+                                continue
+                            costs.append(float(always[key]["cost"]))
+                            accs.append(float(always[key]["acc"]))
+                        else:
+                            if key not in cobj:
+                                continue
+                            costs.append(float(cobj[key]["costs"][0]))
+                            accs.append(float(cobj[key]["accuracies"][0]))
+                        ws.append(n if n > 0 else 1)
+
+                    if len(accs) == 0:
+                        continue
+                    cost_macro = float(np.mean(costs))
+                    acc_macro = float(np.mean(accs))
+                    wsum = float(np.sum(ws))
+                    acc_micro = float(np.sum([a * w for a, w in zip(accs, ws)]) / wsum) if wsum > 0 else float("nan")
+                    logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
 
     # -------- finalize W&B --------
     try:
