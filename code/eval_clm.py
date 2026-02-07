@@ -1508,7 +1508,7 @@ def main():
                             
                             # Helper to calc static rule points for baseline plot
                             def _get_static_pt(th1_p, rule_func, label, marker, color):
-                                c, a, _ = _run_online_th1_quantile_th2_from_th1_rule(
+                                c, a, th2p = _run_online_th1_quantile_th2_from_th1_rule(
                                     default_conf=default_conf,
                                     mean_conf=mean_conf,
                                     base_correct=base_correct_list,
@@ -1518,7 +1518,7 @@ def main():
                                     th1_percent=float(th1_p),
                                     th2_rule_from_th1_value=rule_func,
                                 )
-                                return {'cost': c, 'acc': a, 'label': label, 'marker': marker, 'color': color}
+                                return {'cost': c, 'acc': a, 'th2_p': float(th2p), 'label': label, 'marker': marker, 'color': color}
 
                             # 1. Static Heuristics (division heuristic scaled by #choices)
                             # th2 = th1 / sqrt(k)  (k=4 -> th1/2, k=5 -> th1/sqrt(5), ...)
@@ -1528,10 +1528,24 @@ def main():
                             extra_pts.append(_get_static_pt(th1p, lambda x: x ** 1.5, 'th1^1.5', '^', 'gray'))
 
                             # 2. [ONLINE Sqrt]
-                            c_sqrt, a_sqrt, _ = _run_online_sqrt_policy(
+                            c_sqrt, a_sqrt, p_sqrt = _run_online_sqrt_policy(
                                 default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1_percent=perc
                             )
-                            extra_pts.append({'cost': c_sqrt, 'acc': a_sqrt, 'label': 'Online Sqrt', 'marker': 'D', 'color': 'orange'})
+                            extra_pts.append({'cost': c_sqrt, 'acc': a_sqrt, 'th2_p': float(p_sqrt), 'label': 'Online Sqrt', 'marker': 'D', 'color': 'orange'})
+
+                            # Save heuristic points into curve_obj for aggregate reporting
+                            try:
+                                cobj["heuristic_points"] = [
+                                    {
+                                        "label": str(hp.get("label")),
+                                        "cost": float(hp.get("cost")),
+                                        "acc": float(hp.get("acc")),
+                                        "th2_p": float(hp.get("th2_p", float("nan"))),
+                                    }
+                                    for hp in (extra_pts or [])
+                                ]
+                            except Exception:
+                                pass
 
                             # [ADD] log heuristic point performances (no plot annotation)
                             try:
@@ -1656,6 +1670,41 @@ def main():
                     wsum = float(np.sum(ws))
                     acc_micro = float(np.sum([a * w for a, w in zip(accs, ws)]) / wsum) if wsum > 0 else float("nan")
                     logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+
+                # Heuristic points (e.g., th1/2, th1/sqrt(k), Online Sqrt) if available
+                heuristic_labels = set()
+                for cobj in cobjs:
+                    for hp in (cobj.get("heuristic_points", []) or []):
+                        if isinstance(hp, dict) and hp.get("label") is not None:
+                            heuristic_labels.add(str(hp.get("label")))
+
+                if len(heuristic_labels) > 0:
+                    logger.info(_purple(f"---- Heuristic points (aggregated over subjects, p={p}) ----"))
+                    for lab in sorted(heuristic_labels):
+                        costs = []
+                        accs = []
+                        ws = []
+                        for cobj in cobjs:
+                            n = int(cobj.get("n_samples", 0)) or 0
+                            hp_map = {str(h.get("label")): h for h in (cobj.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                            if lab not in hp_map:
+                                continue
+                            h = hp_map[lab]
+                            costs.append(float(h.get("cost", float("nan"))))
+                            accs.append(float(h.get("acc", float("nan"))))
+                            ws.append(n if n > 0 else 1)
+                        # filter out nans
+                        filt = [(c, a, w) for c, a, w in zip(costs, accs, ws) if (not np.isnan(c)) and (not np.isnan(a))]
+                        if len(filt) == 0:
+                            continue
+                        costs_f = [t[0] for t in filt]
+                        accs_f = [t[1] for t in filt]
+                        ws_f = [t[2] for t in filt]
+                        cost_macro = float(np.mean(costs_f))
+                        acc_macro = float(np.mean(accs_f))
+                        wsum = float(np.sum(ws_f))
+                        acc_micro = float(np.sum([a * w for a, w in zip(accs_f, ws_f)]) / wsum) if wsum > 0 else float("nan")
+                        logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
 
     # -------- finalize W&B --------
     try:
