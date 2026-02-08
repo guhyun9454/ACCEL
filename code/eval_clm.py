@@ -1531,7 +1531,12 @@ def main():
                             c_sqrt, a_sqrt, p_sqrt = _run_online_sqrt_policy(
                                 default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1_percent=perc
                             )
-                            extra_pts.append({'cost': c_sqrt, 'acc': a_sqrt, 'th2_p': float(p_sqrt), 'label': 'Online Sqrt', 'marker': 'D', 'color': 'orange'})
+                            extra_pts.append({'cost': c_sqrt, 'acc': a_sqrt, 'th2_p': float(p_sqrt), 'label': 'Online Sqrt (All)', 'marker': 'D', 'color': 'orange'})
+
+                            c_sqrt_lc, a_sqrt_lc, p_sqrt_lc = _run_online_sqrt_policy_lowconf_update(
+                                default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1_percent=perc
+                            )
+                            extra_pts.append({'cost': c_sqrt_lc, 'acc': a_sqrt_lc, 'th2_p': float(p_sqrt_lc), 'label': 'Online Sqrt (LowConf-only)', 'marker': 'X', 'color': 'orange'})
 
                             # Save heuristic points into curve_obj for aggregate reporting
                             try:
@@ -1568,7 +1573,7 @@ def main():
                             _plot_baseline_points_scatter(
                                 curve_obj=cobj,
                                 out_path=out_pts,
-                                title=f"{args.task} {subject} — Baseline Policies (REAL-WORLD online, {ptag}, Heuristics 5)",
+                                title=f"{args.task} {subject} — Baseline Policies (REAL-WORLD online, {ptag}, Heuristics 6)",
                                 extra_points=extra_pts
                             )
                             if wandb_ok and wandb_run is not None:
