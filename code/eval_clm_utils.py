@@ -68,6 +68,8 @@ def parse_arguments():
     # Ours method hyperparameters (existing)
     parser.add_argument("--ours_low_conf_percent", type=float, default=30.0,
                         help="Bottom percentile (e.g., 30.0) of confidence (from beta subset) to trigger cascading ensemble")
+    parser.add_argument("--ours_low_conf_percent_list", type=str, default="5,10,20,30",
+                        help="Comma-separated percentile list for derived-policy reports/plots (default: '5,10,20,30'). Overrides --ours_low_conf_percent. Use empty string \"\" to disable and fall back to --ours_low_conf_percent.")
     parser.add_argument("--ours_th1_tradeoff", type=str, default="5,10,20,30",
                         help="th1 percentile values for trade-off plot (e.g., 5,10,20,30). 각 th1에 대해 th2 curve를 그림.")
     parser.add_argument("--ours_th2_tradeoff", type=str,

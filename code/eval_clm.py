@@ -1469,7 +1469,10 @@ def main():
                         curve_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(curve_save_path, exist_ok=True)
 
-                    perc_list = _parse_percent_value_list(getattr(args, "ours_low_conf_percent", 10.0))
+                    perc_src = getattr(args, "ours_low_conf_percent_list", None)
+                    if perc_src is None or (isinstance(perc_src, str) and perc_src.strip() == ""):
+                        perc_src = getattr(args, "ours_low_conf_percent", 10.0)
+                    perc_list = _parse_percent_value_list(perc_src)
                     curve_objs_baseline = []
                     baseline_by_p = {}
 
