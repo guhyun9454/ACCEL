@@ -88,6 +88,9 @@ def parse_arguments():
     parser.add_argument("--pride_seed", type=int, default=0,
                         help="Seed for PRIDE random prefix sampling (default=0).")
 
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print verbose logs (extra summaries).")
+
     # =========================================================
     # [ADD] AvgGap(PSEUDO, ONLINE) knobs (eval_clm.py에서 getattr로 쓰는 것들)
     # =========================================================

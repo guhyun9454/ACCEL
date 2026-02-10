@@ -1275,9 +1275,7 @@ def _run_online_sqrt_policy(
     forced_cyclic_ids: Optional[set] = None,
 ) -> Tuple[float, float, float]:
     """
-    [Online Sqrt Policy]
-    th1 = online percentile (running quantile over observed default_conf gaps)
-    th2 = th1 * sqrt(1 - CurrentAvgGap) (Online)
+    [Online Sqrt Policy] with Forced Prefix Logic
     """
     N = len(base_correct)
     if N == 0:
@@ -1298,40 +1296,43 @@ def _run_online_sqrt_policy(
     for i in range(N):
         gap_i = float(dc[i])
 
-        # 0) Online th1 (decision uses past observed gaps only)
+        # 1. Update Stats
         if len(past_gaps) > 0:
             th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), float(th1_percent) / 100.0))
         else:
-            # 초기에는 보수적/공격적 선택이 필요함. 여기서는 "일단 통과" 쪽(0.0)으로 둠.
             th1_val = 0.0
         
-        # 1. Update Running Average
         if running_cnt > 0:
             current_avg_gap = running_gap_sum / running_cnt
         else:
             current_avg_gap = 0.0
             
-        # 2. Dynamic th2
         safe_avg = min(1.0, max(0.0, current_avg_gap))
         current_th2_val = th1_val * np.sqrt(1.0 - safe_avg)
         final_th2_val = current_th2_val
 
-        # 3. Execution
-        if gap_i >= th1_val:
-            c_step = 1.0
-            corrects += 1 if base_correct[i] else 0
-        else:
-            if float(mc[i]) < current_th2_val:
-                c_step = float(k)
-                corrects += 1 if cyclic_correct[i] else 0
-            else:
-                c_step = 2.0
-                corrects += 1 if bool(probe2_correct[i]) else 0
+        # 2. Check Forced
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
 
-        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
-            c_step = max(float(c_step), float(k))
+        if is_forced:
+            # [Prefix] Force Cyclic
+            c_step = float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+        else:
+            # [Postfix] Policy
+            if gap_i >= th1_val:
+                c_step = 1.0
+                corrects += 1 if base_correct[i] else 0
+            else:
+                if float(mc[i]) < current_th2_val:
+                    c_step = float(k)
+                    corrects += 1 if cyclic_correct[i] else 0
+                else:
+                    c_step = 2.0
+                    corrects += 1 if bool(probe2_correct[i]) else 0
+
+        # 3. Accumulate
         total_cost += float(c_step)
-        
         running_gap_sum += gap_i
         running_cnt += 1
         past_gaps.append(gap_i)
@@ -1440,12 +1441,7 @@ def _run_online_th1_quantile_th2_from_th1_rule(
     forced_cyclic_ids: Optional[set] = None,
 ) -> Tuple[float, float, float]:
     """
-    [Real-world Online Policy Template]
-    - th1: online running-quantile over PAST default_conf gaps (percentile = th1_percent)
-    - th2: derived from current th1 value by a deterministic rule: th2 = f(th1)
-
-    NOTE: returned th2_percentile is only for plotting (maps final th2 value onto *full* mean_conf distribution).
-    Decision itself never uses future information.
+    [Real-world Online Policy Template] with Forced Prefix Logic
     """
     N = len(base_correct)
     if N == 0:
@@ -1464,27 +1460,106 @@ def _run_online_th1_quantile_th2_from_th1_rule(
     for i in range(N):
         gap_i = float(dc[i])
 
+        if len(past_gaps) > 0:
+            th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), q))
+        else:
+            th1_val = 0.0
+
+        th2_val = float(th2_rule_from_th1_value(th1_val))
+        final_th2_val = th2_val
+
+        # Check Forced
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+
+        if is_forced:
+             # [Prefix] Force Cyclic
+            c_step = float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+        else:
+            # [Postfix] Policy
+            if gap_i >= th1_val:
+                c_step = 1.0
+                corrects += 1 if base_correct[i] else 0
+            else:
+                if float(mc[i]) < th2_val:
+                    c_step = float(k)
+                    corrects += 1 if cyclic_correct[i] else 0
+                else:
+                    c_step = 2.0
+                    corrects += 1 if bool(probe2_correct[i]) else 0
+
+        total_cost += float(c_step)
+        past_gaps.append(gap_i)
+
+    if len(mc) > 0:
+        final_th2_perc = (np.sum(mc < final_th2_val) / len(mc)) * 100.0
+    else:
+        final_th2_perc = 0.0
+
+    return total_cost / float(N), corrects / float(N), final_th2_perc
+
+
+def _run_online_th1_quantile_th2_from_th1_rule_with_stats(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    th2_rule_from_th1_value,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, float, Dict[str, int]]:
+    """
+    Same as `_run_online_th1_quantile_th2_from_th1_rule`, but returns decision counts.
+    """
+    N = len(base_correct)
+    if N == 0:
+        return 0.0, 0.0, 0.0, {"n_base": 0, "n_probe2": 0, "n_cyclic": 0}
+
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+
+    total_cost = 0.0
+    corrects = 0
+    past_gaps: List[float] = []
+    final_th2_val = 0.0
+
+    n_base = 0
+    n_probe2 = 0
+    n_cyclic = 0
+
+    q = float(th1_percent) / 100.0
+
+    for i in range(N):
+        gap_i = float(dc[i])
+
         # Online th1 (past only)
         if len(past_gaps) > 0:
             th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), q))
         else:
             th1_val = 0.0
 
-        # th2 derived from th1 value
-        th2_val = float(th2_rule_from_th1_value(th1_val))
+        th2_val = float(th2_rule_from_th1_value(float(th1_val)))
+        if th2_val < 0.0:
+            th2_val = 0.0
+        if th2_val > 1.0:
+            th2_val = 1.0
         final_th2_val = th2_val
 
-        # Execute
         if gap_i >= th1_val:
             c_step = 1.0
             corrects += 1 if base_correct[i] else 0
+            n_base += 1
         else:
             if float(mc[i]) < th2_val:
                 c_step = float(k)
                 corrects += 1 if cyclic_correct[i] else 0
+                n_cyclic += 1
             else:
                 c_step = 2.0
                 corrects += 1 if bool(probe2_correct[i]) else 0
+                n_probe2 += 1
 
         if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
             c_step = max(float(c_step), float(k))
@@ -1497,7 +1572,7 @@ def _run_online_th1_quantile_th2_from_th1_rule(
     else:
         final_th2_perc = 0.0
 
-    return total_cost / float(N), corrects / float(N), final_th2_perc
+    return total_cost / float(N), corrects / float(N), float(final_th2_perc), {"n_base": int(n_base), "n_probe2": int(n_probe2), "n_cyclic": int(n_cyclic)}
 
 
 def _run_online_top2flip_policy(
@@ -1512,10 +1587,7 @@ def _run_online_top2flip_policy(
     forced_cyclic_ids: Optional[set] = None,
 ) -> Tuple[float, float]:
     """
-    [Real-world Online top2flip]
-    - th1: online running-quantile over PAST default_conf gaps (percentile = th1_percent)
-    - low-conf (dc < th1): if flip_trigger -> cyclic else probe2
-    - offline_prefix_n: first n samples are base-only, but still update running stats.
+    [Real-world Online top2flip] with Forced Prefix Logic
     """
     N = len(base_correct)
     if N == 0:
@@ -1532,36 +1604,37 @@ def _run_online_top2flip_policy(
     for i in range(N):
         gap_i = float(dc[i])
 
-        # prefix: base only
         if i < int(offline_prefix_n):
             total_cost += 1.0
             corrects += 1 if base_correct[i] else 0
             past_gaps.append(gap_i)
             continue
 
-        # online th1 from past only
         if len(past_gaps) > 0:
             th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), q))
         else:
             th1_val = 0.0
 
-        if gap_i >= th1_val:
-            c_step = 1.0
-            corrects += 1 if base_correct[i] else 0
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+
+        if is_forced:
+            # [Prefix] Force Cyclic
+            c_step = float(k)
+            corrects += 1 if cyclic_correct[i] else 0
         else:
-            if bool(flip[i]):
-                c_step = float(k)
-                corrects += 1 if cyclic_correct[i] else 0
+            # [Postfix] Policy
+            if gap_i >= th1_val:
+                c_step = 1.0
+                corrects += 1 if base_correct[i] else 0
             else:
-                c_step = 2.0
-                corrects += 1 if bool(probe2_correct[i]) else 0
+                if bool(flip[i]):
+                    c_step = float(k)
+                    corrects += 1 if cyclic_correct[i] else 0
+                else:
+                    c_step = 2.0
+                    corrects += 1 if bool(probe2_correct[i]) else 0
 
-        # Prefix overhead: if this sample was used for PRIDE prefix (cyclic observed),
-        # we assume at least k cost was paid (but accuracy follows policy decision).
-        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
-            c_step = max(float(c_step), float(k))
         total_cost += float(c_step)
-
         past_gaps.append(gap_i)
 
     return total_cost / float(N), corrects / float(N)
@@ -1581,12 +1654,7 @@ def _run_online_avggap_policy(
 ) -> Tuple[float, float]:
     """
     [Real-world Online avggap]
-    - th1: online running-quantile over PAST default_conf gaps (percentile = th1_percent)
-    - th2: online running-quantile over PAST mean_conf gaps (percentile = th2_percent)
-    - low-conf (dc < th1): if mc < th2 -> cyclic else probe2
-    - offline_prefix_n: first n samples are base-only, but still update running stats.
-
-    Note: mean_conf values are precomputed for analysis; decision uses only past thresholds (no future).
+    [Modified] If forced_cyclic_ids matches, force Cost=k and Acc=Cyclic.
     """
     N = len(base_correct)
     if N == 0:
@@ -1613,6 +1681,7 @@ def _run_online_avggap_policy(
             past_mc.append(mgap_i)
             continue
 
+        # 1. Update Thresholds from Past
         if len(past_dc) > 0:
             th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q1))
         else:
@@ -1623,16 +1692,98 @@ def _run_online_avggap_policy(
         else:
             th2_val = 0.0
 
+        # 2. Check Forced (Prefix)
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+
+        if is_forced:
+            # [Prefix] 무조건 Cyclic
+            c_step = float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+        else:
+            # [Postfix] Policy Decision
+            if gap_i >= th1_val:
+                c_step = 1.0
+                corrects += 1 if base_correct[i] else 0
+            else:
+                if mgap_i < th2_val:
+                    c_step = float(k)
+                    corrects += 1 if cyclic_correct[i] else 0
+                else:
+                    c_step = 2.0
+                    corrects += 1 if bool(probe2_correct[i]) else 0
+
+        # 3. Accumulate & Update Stats
+        total_cost += float(c_step)
+        past_dc.append(gap_i)
+        past_mc.append(mgap_i)
+
+    return total_cost / float(N), corrects / float(N)
+
+
+def _run_online_avggap_policy_with_stats(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    th2_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, Dict[str, int]]:
+    """
+    Same as `_run_online_avggap_policy`, but returns decision counts:
+    - n_base: used base (dc >= th1)
+    - n_probe2: used probe2 (dc < th1 and mc >= th2)
+    - n_cyclic: used cyclic (dc < th1 and mc < th2)
+    """
+    N = len(base_correct)
+    if N == 0:
+        return float("nan"), float("nan"), {"n_base": 0, "n_probe2": 0, "n_cyclic": 0}
+
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+
+    total_cost = 0.0
+    corrects = 0
+    past_dc: List[float] = []
+    past_mc: List[float] = []
+    q1 = float(th1_percent) / 100.0
+    q2 = float(th2_percent) / 100.0
+
+    n_base = 0
+    n_probe2 = 0
+    n_cyclic = 0
+
+    for i in range(N):
+        gap_i = float(dc[i])
+        mgap_i = float(mc[i])
+
+        if i < int(offline_prefix_n):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+            past_dc.append(gap_i)
+            past_mc.append(mgap_i)
+            continue
+
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q1)) if len(past_dc) > 0 else 0.0
+        th2_val = float(np.quantile(np.asarray(past_mc, dtype=np.float64), q2)) if len(past_mc) > 0 else 0.0
+
         if gap_i >= th1_val:
             c_step = 1.0
             corrects += 1 if base_correct[i] else 0
+            n_base += 1
         else:
             if mgap_i < th2_val:
                 c_step = float(k)
                 corrects += 1 if cyclic_correct[i] else 0
+                n_cyclic += 1
             else:
                 c_step = 2.0
                 corrects += 1 if bool(probe2_correct[i]) else 0
+                n_probe2 += 1
 
         if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
             c_step = max(float(c_step), float(k))
@@ -1641,7 +1792,7 @@ def _run_online_avggap_policy(
         past_dc.append(gap_i)
         past_mc.append(mgap_i)
 
-    return total_cost / float(N), corrects / float(N)
+    return total_cost / float(N), corrects / float(N), {"n_base": int(n_base), "n_probe2": int(n_probe2), "n_cyclic": int(n_cyclic)}
 
 
 def _run_online_dynamic_policy(
@@ -1961,15 +2112,16 @@ def _compute_and_plot_th2_tradeoff(
         ax3.scatter([c_sqt_lc], [d_sqt_lc], marker='X', s=70, color=color, edgecolors='black', zorder=6,
                     label='Online Sqrt (LowConf-only)' if idx==0 else "")
 
-        # Log
-        logger.info(_purple(f"==== TH2 online-point report (th1={int(th1p)}) ===="))
-        logger.info(f"default              : cost=1.000, acc={default_acc:.4f}")
-        logger.info(f"th1/2                : cost={c_h:.3f}, acc={a_h:.4f}, th2≈p{p_h:.1f}")
-        logger.info(f"th1/sqrt(k)          : cost={c_hk:.3f}, acc={a_hk:.4f}, th2≈p{p_hk:.1f}")
-        logger.info(f"th1^2                : cost={c_s:.3f}, acc={a_s:.4f}, th2≈p{p_s:.1f}")
-        logger.info(f"th1^1.5              : cost={c_p:.3f}, acc={a_p:.4f}, th2≈p{p_p:.1f}")
-        logger.info(f"Online Sqrt (All)    : cost={c_sqt:.3f}, acc={a_sqt:.4f}, th2≈p{p_sqt:.1f}")
-        logger.info(f"Online Sqrt (LowConf): cost={c_sqt_lc:.3f}, acc={a_sqt_lc:.4f}, th2≈p{p_sqt_lc:.1f}")
+        # Log (verbose only; this block is very long)
+        if bool(getattr(args, "verbose", False)):
+            logger.info(_purple(f"==== TH2 online-point report (th1={int(th1p)}) ===="))
+            logger.info(f"default              : cost=1.000, acc={default_acc:.4f}")
+            logger.info(f"th1/2                : cost={c_h:.3f}, acc={a_h:.4f}, th2≈p{p_h:.1f}")
+            logger.info(f"th1/sqrt(k)          : cost={c_hk:.3f}, acc={a_hk:.4f}, th2≈p{p_hk:.1f}")
+            logger.info(f"th1^2                : cost={c_s:.3f}, acc={a_s:.4f}, th2≈p{p_s:.1f}")
+            logger.info(f"th1^1.5              : cost={c_p:.3f}, acc={a_p:.4f}, th2≈p{p_p:.1f}")
+            logger.info(f"Online Sqrt (All)    : cost={c_sqt:.3f}, acc={a_sqt:.4f}, th2≈p{p_sqt:.1f}")
+            logger.info(f"Online Sqrt (LowConf): cost={c_sqt_lc:.3f}, acc={a_sqt_lc:.4f}, th2≈p{p_sqt_lc:.1f}")
 
     ax3.scatter([1.0], [0.0], marker='*', s=200, label='default', color='gray', zorder=5)
     ax3.set_xlabel("Computational Cost (× of default)", fontsize=11)
@@ -2049,9 +2201,7 @@ def _compute_curves_for_one_percentile(
 ) -> dict:
     """
     REAL-WORLD online evaluation (no beta / no offline prefix).
-
-    Returns a curve_obj where each policy has a SINGLE point (cost, acc),
-    represented as length-1 lists: {"costs":[...], "accuracies":[...]}.
+    [Modified] If forced_cyclic_ids (Prefix) is active, force Cost=k and Acc=Cyclic.
     """
     N = len(base_correct_list)
     if N == 0:
@@ -2072,42 +2222,61 @@ def _compute_curves_for_one_percentile(
     total_cost_sf = 0.0
     corrects_sf = 0
     past_gaps: List[float] = []
+
     for i in range(N):
+        # 1. Calculate Threshold based on PAST data
         if len(past_gaps) > 0:
             thresh = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), perc01))
         else:
             thresh = float("-inf")
+        
+        # 2. Check if current sample is in Prefix (Investment Phase)
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+        
+        # 3. Policy Decision (Ambiguous?)
+        # Even if forced, we calculate this to simulate what the policy *would* have thought
         amb = (float(default_conf[i]) < thresh)
 
-        # switch_cyclic
-        if amb:
+        # -----------------------------------------------------
+        # Logic: switch_cyclic
+        # -----------------------------------------------------
+        if is_forced:
+            # [Prefix] 무조건 Cyclic 수행 (Cost=k, Acc=Cyclic)
             c_step_sc = C_cyc
             corrects_sc += 1 if cyclic_correct_list[i] else 0
         else:
-            c_step_sc = 1.0
-            corrects_sc += 1 if base_correct_list[i] else 0
-
-        # switch_full (only if available)
-        if full_enabled and len(full_correct_list) == N:
+            # [Postfix] Policy 판단에 따름
             if amb:
-                c_step_sf = C_full
+                c_step_sc = C_cyc
+                corrects_sc += 1 if cyclic_correct_list[i] else 0
+            else:
+                c_step_sc = 1.0
+                corrects_sc += 1 if base_correct_list[i] else 0
+
+        # -----------------------------------------------------
+        # Logic: switch_full (if enabled)
+        # -----------------------------------------------------
+        if full_enabled and len(full_correct_list) == N:
+            if is_forced:
+                # [Prefix] Full 수행 (Cost=Full/Cyclic, Acc=Full)
+                c_step_sf = C_full 
                 corrects_sf += 1 if full_correct_list[i] else 0
             else:
-                c_step_sf = 1.0
-                corrects_sf += 1 if base_correct_list[i] else 0
+                # [Postfix]
+                if amb:
+                    c_step_sf = C_full
+                    corrects_sf += 1 if full_correct_list[i] else 0
+                else:
+                    c_step_sf = 1.0
+                    corrects_sf += 1 if base_correct_list[i] else 0
         else:
             c_step_sf = 0.0
 
-        # Prefix overhead: prior-estimation prefix assumed to pay at least cyclic cost k
-        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
-            c_step_sc = max(float(c_step_sc), float(C_cyc))
-            if full_enabled and len(full_correct_list) == N:
-                c_step_sf = max(float(c_step_sf), float(C_cyc))
-
+        # Update History (Observe the gap regardless of decision)
         total_cost_sc += float(c_step_sc)
         if full_enabled and len(full_correct_list) == N:
             total_cost_sf += float(c_step_sf)
-
+            
         past_gaps.append(float(default_conf[i]))
 
     switch_cyclic_cost = total_cost_sc / float(N)
@@ -2127,7 +2296,7 @@ def _compute_curves_for_one_percentile(
         offline_prefix_n=0,
         forced_cyclic_ids=forced_cyclic_ids,
     )
-    c_avg, a_avg = _run_online_avggap_policy(
+    c_avg, a_avg, avg_stats = _run_online_avggap_policy_with_stats(
         default_conf=default_conf,
         mean_conf=mean_conf,
         base_correct=base_correct_list,
@@ -2140,13 +2309,12 @@ def _compute_curves_for_one_percentile(
         forced_cyclic_ids=forced_cyclic_ids,
     )
 
-    # Prefix overhead accounting for "always" ensembles:
-    # - default: extra (k-1) cost for prefix samples used to estimate PRIDE prior
-    # - cyclic/full: already >=k per sample, so prefix adds no extra (by design)
+    # Prefix overhead accounting for "always" ensembles
     default_cost_always = 1.0
     if forced_cyclic_ids is not None and N > 0:
         m = int(len(forced_cyclic_ids))
         if m > 0:
+            # Default ensemble also paid 'k' for the prefix samples to estimate prior
             default_cost_always = 1.0 + (float(m) * (float(k) - 1.0)) / float(N)
 
     curve_obj = {
@@ -2166,6 +2334,7 @@ def _compute_curves_for_one_percentile(
         "switch_cyclic": {"costs": [float(switch_cyclic_cost)], "accuracies": [float(switch_cyclic_acc)]},
         "ours_top2flip": {"costs": [float(c_top2)], "accuracies": [float(a_top2)]},
         "ours_avggap": {"costs": [float(c_avg)], "accuracies": [float(a_avg)]},
+        "ours_avggap_stats": dict(avg_stats),
     }
     if full_enabled:
         curve_obj["always"]["full"] = {"cost": float(C_full), "acc": float(full_acc_always)}
@@ -2195,7 +2364,12 @@ def _log_baseline_report(curve_obj: dict):
         if key in curve_obj:
             c0 = float(curve_obj[key]["costs"][0])
             a0 = float(curve_obj[key]["accuracies"][0])
-            logger.info(f"BASELINE {key:<12} : cost={c0:.3f}, acc={a0:.4f}")
+            extra = ""
+            if key == "ours_avggap":
+                st = curve_obj.get("ours_avggap_stats")
+                if isinstance(st, dict):
+                    extra = f", n_probe2={int(st.get('n_probe2', 0))}, n_cyclic={int(st.get('n_cyclic', 0))}"
+            logger.info(f"BASELINE {key:<12} : cost={c0:.3f}, acc={a0:.4f}{extra}")
 
 
 def _log_named_report(name: str, curve_obj: dict):
@@ -2215,7 +2389,12 @@ def _log_named_report(name: str, curve_obj: dict):
         if key in curve_obj:
             c0 = float(curve_obj[key]["costs"][0])
             a0 = float(curve_obj[key]["accuracies"][0])
-            logger.info(f"{name} {key:<12} : cost={c0:.3f}, acc={a0:.4f}")
+            extra = ""
+            if key == "ours_avggap":
+                st = curve_obj.get("ours_avggap_stats")
+                if isinstance(st, dict):
+                    extra = f", n_probe2={int(st.get('n_probe2', 0))}, n_cyclic={int(st.get('n_cyclic', 0))}"
+            logger.info(f"{name} {key:<12} : cost={c0:.3f}, acc={a0:.4f}{extra}")
 
 
 def main():
@@ -2686,10 +2865,12 @@ def main():
 
                     logger.info(_orange(f"Derived and saved cyclic results: {subject}"))
                     logger.info(_orange(f"Derived and saved base results: {subject}"))
-                    if full_enabled:
-                        logger.info(_purple(f"[{subject}] Accuracies — Full: {full_acc:.4f}, Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
-                    else:
-                        logger.info(_purple(f"[{subject}] Accuracies — Full: (disabled), Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
+                    # (optional) verbose summary
+                    if bool(getattr(args, "verbose", False)):
+                        if full_enabled:
+                            logger.info(_purple(f"[{subject}] Accuracies — Full: {full_acc:.4f}, Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
+                        else:
+                            logger.info(_purple(f"[{subject}] Accuracies — Full: (disabled), Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
 
                     # ---------- compute & save REAL-WORLD online curves (baseline; single point per policy) ----------
                     curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
@@ -3165,8 +3346,8 @@ def main():
                                 except Exception:
                                     pass
 
-                            # Δ plot/log (PRIDE+OURS - BASELINE) including heuristics
-                            if pride_enabled and pride_prior is not None and 'cobj_pr' in locals() and cobj_pr and isinstance(cobj_pr, dict):
+                            # Δ plot/log (PRIDE+OURS - BASELINE) including heuristics (verbose only)
+                            if bool(getattr(args, "verbose", False)) and pride_enabled and pride_prior is not None and 'cobj_pr' in locals() and cobj_pr and isinstance(cobj_pr, dict):
                                 try:
                                     delta_pts = []
                                     # policies
@@ -3602,8 +3783,8 @@ def main():
                         else:
                             logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
 
-                # cost overhead vs BASELINE (macro)
-                if float(p) in derived_records_by_p:
+                # cost/acc overhead vs BASELINE (verbose only; can be long)
+                if bool(getattr(args, "verbose", False)) and float(p) in derived_records_by_p:
                     try:
                         base_cobjs = derived_records_by_p[float(p)]
                         logger.info(_purple(f"---- Prefix overhead Δcost (PRIDE+OURS - BASELINE), p={p} ----"))
