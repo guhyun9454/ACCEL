@@ -473,6 +473,217 @@ def _plot_delta_cost_bars_by_p(
     plt.close(fig)
 
 
+def _plot_delta_scatter(
+    delta_points: List[dict],
+    out_path: str,
+    title: str,
+    xlabel: str = "Δ Cost (PRIDE+OURS - BASELINE)",
+    ylabel: str = "Δ Accuracy (PRIDE+OURS - BASELINE)",
+):
+    """
+    delta_points: [{'label': str, 'dcost': float, 'dacc': float, 'marker': str, 'color': str}, ...]
+    """
+    if not delta_points:
+        return
+    plt.figure(figsize=(8.4, 6.0), dpi=180)
+    for p in delta_points:
+        dcost = float(p.get("dcost", float("nan")))
+        dacc = float(p.get("dacc", float("nan")))
+        if not (np.isfinite(dcost) and np.isfinite(dacc)):
+            continue
+        lab = str(p.get("label", ""))
+        mk = str(p.get("marker", "o"))
+        col = str(p.get("color", "black"))
+        plt.scatter(dcost, dacc, marker=mk, s=110, color=col, edgecolors="black", alpha=0.85)
+        if lab:
+            plt.annotate(lab, (dcost, dacc), textcoords="offset points", xytext=(6, 4), fontsize=7, alpha=0.85)
+    plt.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.7)
+    plt.axvline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.7)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True, linestyle="--", alpha=0.35)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_th2_tradeoff_curve_compare(
+    subject: str,
+    curve_save_path: str,
+    th1_list: List[float],
+    default_conf_base: np.ndarray,
+    mean_conf_base: np.ndarray,
+    base_correct_base: List[bool],
+    cyclic_correct_base: List[bool],
+    probe2_correct_base: np.ndarray,
+    default_conf_pr: np.ndarray,
+    mean_conf_pr: np.ndarray,
+    base_correct_pr: List[bool],
+    cyclic_correct_pr: List[bool],
+    probe2_correct_pr: np.ndarray,
+    k: int,
+    args: Any,
+    wandb_ok: bool = False,
+    wandb_run: Any = None,
+    fname_tag: str = "PRIDE_COMPARE",
+):
+    """
+    Compare dense th2-sweep curves (baseline vs PRIDE+OURS debiased stats).
+    Lines: baseline solid, PRIDE dashed. Colors encode th1.
+    """
+    dense_th2_list = list(range(1, 31))
+    default_acc_base = float(np.mean(np.asarray(base_correct_base, dtype=np.float64))) if len(base_correct_base) else float("nan")
+    default_acc_pr = float(np.mean(np.asarray(base_correct_pr, dtype=np.float64))) if len(base_correct_pr) else float("nan")
+
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    suffix = f"_{str(fname_tag).strip()}" if str(fname_tag).strip() else ""
+
+    # Plot A: Cost vs th2
+    fig1, ax1 = plt.subplots(figsize=(9.0, 6.0), dpi=160)
+    for idx, th1p in enumerate(th1_list):
+        th1p = float(th1p)
+        color = colors[idx % len(colors)]
+        costs_b = []
+        costs_p = []
+        for th2p in dense_th2_list:
+            cb, _ = _run_online_avggap_policy(
+                default_conf=default_conf_base,
+                mean_conf=mean_conf_base,
+                base_correct=base_correct_base,
+                cyclic_correct=cyclic_correct_base,
+                probe2_correct=probe2_correct_base,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
+            )
+            cp, _ = _run_online_avggap_policy(
+                default_conf=default_conf_pr,
+                mean_conf=mean_conf_pr,
+                base_correct=base_correct_pr,
+                cyclic_correct=cyclic_correct_pr,
+                probe2_correct=probe2_correct_pr,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
+            )
+            costs_b.append(float(cb))
+            costs_p.append(float(cp))
+        ax1.plot(dense_th2_list, costs_b, color=color, linewidth=1.6, alpha=0.75)
+        ax1.plot(dense_th2_list, costs_p, color=color, linewidth=1.6, alpha=0.75, linestyle="--")
+    ax1.set_xlabel("th2 (percentile, avg gap)")
+    ax1.set_ylabel("Computational Cost (× of default)")
+    ax1.set_title(f"{getattr(args,'task','task')} {subject} — Cost vs th2 (BASELINE solid vs PRIDE dashed)")
+    ax1.grid(True, linestyle="--", alpha=0.35)
+    out_cost = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_compare{suffix}.png")
+    os.makedirs(os.path.dirname(out_cost), exist_ok=True)
+    fig1.tight_layout()
+    fig1.savefig(out_cost, bbox_inches="tight")
+    plt.close(fig1)
+
+    # Plot B: ΔAcc vs th2 (each relative to its own default)
+    fig2, ax2 = plt.subplots(figsize=(9.0, 6.0), dpi=160)
+    for idx, th1p in enumerate(th1_list):
+        th1p = float(th1p)
+        color = colors[idx % len(colors)]
+        da_b = []
+        da_p = []
+        for th2p in dense_th2_list:
+            _, ab = _run_online_avggap_policy(
+                default_conf=default_conf_base,
+                mean_conf=mean_conf_base,
+                base_correct=base_correct_base,
+                cyclic_correct=cyclic_correct_base,
+                probe2_correct=probe2_correct_base,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
+            )
+            _, ap = _run_online_avggap_policy(
+                default_conf=default_conf_pr,
+                mean_conf=mean_conf_pr,
+                base_correct=base_correct_pr,
+                cyclic_correct=cyclic_correct_pr,
+                probe2_correct=probe2_correct_pr,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
+            )
+            da_b.append((float(ab) - float(default_acc_base)) * 100.0)
+            da_p.append((float(ap) - float(default_acc_pr)) * 100.0)
+        ax2.plot(dense_th2_list, da_b, color=color, linewidth=1.6, alpha=0.75)
+        ax2.plot(dense_th2_list, da_p, color=color, linewidth=1.6, alpha=0.75, linestyle="--")
+    ax2.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6)
+    ax2.set_xlabel("th2 (percentile, avg gap)")
+    ax2.set_ylabel("Δ Accuracy (%)")
+    ax2.set_title(f"{getattr(args,'task','task')} {subject} — ΔAcc vs th2 (BASELINE solid vs PRIDE dashed)")
+    ax2.grid(True, linestyle="--", alpha=0.35)
+    out_da = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_DELTA_ACC_compare{suffix}.png")
+    fig2.tight_layout()
+    fig2.savefig(out_da, bbox_inches="tight")
+    plt.close(fig2)
+
+    # Plot C: Cost vs ΔAcc (trade-off)
+    fig3, ax3 = plt.subplots(figsize=(9.0, 6.0), dpi=160)
+    for idx, th1p in enumerate(th1_list):
+        th1p = float(th1p)
+        color = colors[idx % len(colors)]
+        xs_b, ys_b = [], []
+        xs_p, ys_p = [], []
+        for th2p in dense_th2_list:
+            cb, ab = _run_online_avggap_policy(
+                default_conf=default_conf_base,
+                mean_conf=mean_conf_base,
+                base_correct=base_correct_base,
+                cyclic_correct=cyclic_correct_base,
+                probe2_correct=probe2_correct_base,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
+            )
+            cp, ap = _run_online_avggap_policy(
+                default_conf=default_conf_pr,
+                mean_conf=mean_conf_pr,
+                base_correct=base_correct_pr,
+                cyclic_correct=cyclic_correct_pr,
+                probe2_correct=probe2_correct_pr,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
+            )
+            xs_b.append(float(cb)); ys_b.append((float(ab) - float(default_acc_base)) * 100.0)
+            xs_p.append(float(cp)); ys_p.append((float(ap) - float(default_acc_pr)) * 100.0)
+        ax3.plot(xs_b, ys_b, color=color, linewidth=1.4, alpha=0.55)
+        ax3.plot(xs_p, ys_p, color=color, linewidth=1.4, alpha=0.55, linestyle="--")
+    ax3.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6)
+    ax3.set_xlabel("Computational Cost (× of default)")
+    ax3.set_ylabel("Δ Accuracy (%)")
+    ax3.set_title(f"{getattr(args,'task','task')} {subject} — Trade-off (BASELINE solid vs PRIDE dashed)")
+    ax3.grid(True, linestyle="--", alpha=0.35)
+    out_tr = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_vs_DELTA_compare{suffix}.png")
+    fig3.tight_layout()
+    fig3.savefig(out_tr, bbox_inches="tight")
+    plt.close(fig3)
+
+    if wandb_ok and wandb_run is not None:
+        try:
+            import wandb
+            wandb_run.log({
+                f"plots/{subject}/th2_tradeoff_COST_compare{suffix}": wandb.Image(out_cost),
+                f"plots/{subject}/th2_tradeoff_DELTA_ACC_compare{suffix}": wandb.Image(out_da),
+                f"plots/{subject}/th2_tradeoff_COST_vs_DELTA_compare{suffix}": wandb.Image(out_tr),
+            })
+        except Exception:
+            pass
+
+
 def _run_online_sqrt_policy(
     default_conf: np.ndarray,
     mean_conf: np.ndarray,
@@ -935,6 +1146,8 @@ def _compute_and_plot_th2_tradeoff(
     args: Any,
     wandb_ok: bool = False,
     wandb_run: Any = None,
+    plot_tag: str = "BASELINE",
+    fname_tag: str = "",
 ):
     """
     th1/th2 trade-off plot with heuristic points:
@@ -1022,12 +1235,13 @@ def _compute_and_plot_th2_tradeoff(
 
     ax1.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
     ax1.set_ylabel("Computational Cost (× of default)", fontsize=11)
-    ax1.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs th2 (Heuristics Comparison)", fontsize=12)
+    ax1.set_title(f"{getattr(args, 'task', 'task')} {subject} — Cost vs th2 ({plot_tag})", fontsize=12)
     ax1.set_xticks([1, 5, 10, 15, 20, 25, 30])
     ax1.set_xticklabels([str(t) for t in [1, 5, 10, 15, 20, 25, 30]])
     ax1.legend(loc='best', fontsize=9, ncol=2)
     ax1.grid(True, linestyle='--', alpha=0.4)
-    out_cost = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST.png")
+    suffix = f"_{str(fname_tag).strip()}" if str(fname_tag).strip() else ""
+    out_cost = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST{suffix}.png")
     os.makedirs(os.path.dirname(out_cost), exist_ok=True)
     fig1.tight_layout()
     fig1.savefig(out_cost, bbox_inches="tight")
@@ -1090,12 +1304,12 @@ def _compute_and_plot_th2_tradeoff(
     ax2.axhline(y=0.0, color='gray', linestyle=':', linewidth=1.0, alpha=0.5)
     ax2.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
     ax2.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs th2", fontsize=12)
+    ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs th2 ({plot_tag})", fontsize=12)
     ax2.set_xticks([1, 5, 10, 15, 20, 25, 30])
     ax2.set_xticklabels([str(t) for t in [1, 5, 10, 15, 20, 25, 30]])
     ax2.legend(loc='best', fontsize=9, ncol=2)
     ax2.grid(True, linestyle='--', alpha=0.4)
-    out_delta = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_DELTA_ACC.png")
+    out_delta = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_DELTA_ACC{suffix}.png")
     fig2.tight_layout()
     fig2.savefig(out_delta, bbox_inches="tight")
     plt.close(fig2)
@@ -1176,22 +1390,22 @@ def _compute_and_plot_th2_tradeoff(
     ax3.scatter([1.0], [0.0], marker='*', s=200, label='default', color='gray', zorder=5)
     ax3.set_xlabel("Computational Cost (× of default)", fontsize=11)
     ax3.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — Trade-off (All Heuristics)", fontsize=12)
+    ax3.set_title(f"{getattr(args, 'task', 'task')} {subject} — Trade-off (All Heuristics, {plot_tag})", fontsize=12)
     ax3.legend(loc='best', fontsize=9, ncol=2)
     ax3.grid(True, linestyle='--', alpha=0.4)
-    out_trade = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_vs_DELTA.png")
+    out_trade = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_vs_DELTA{suffix}.png")
     fig3.tight_layout()
     fig3.savefig(out_trade, bbox_inches="tight")
     plt.close(fig3)
 
-    logger.info(_purple(f"th2 trade-off plots saved (dense th2=1..30 + online points): {subject}"))
+    logger.info(_purple(f"th2 trade-off plots saved ({plot_tag}): {subject}"))
     if wandb_ok and wandb_run is not None:
         try:
             import wandb
             wandb_run.log({
-                f"plots/{subject}/th2_tradeoff_COST": wandb.Image(out_cost),
-                f"plots/{subject}/th2_tradeoff_DELTA_ACC": wandb.Image(out_delta),
-                f"plots/{subject}/th2_tradeoff_COST_vs_DELTA": wandb.Image(out_trade),
+                f"plots/{subject}/th2_tradeoff_COST{suffix}": wandb.Image(out_cost),
+                f"plots/{subject}/th2_tradeoff_DELTA_ACC{suffix}": wandb.Image(out_delta),
+                f"plots/{subject}/th2_tradeoff_COST_vs_DELTA{suffix}": wandb.Image(out_trade),
             })
         except Exception:
             pass
@@ -1478,6 +1692,7 @@ def main():
         eval_acc_records: List[dict] = []  # [{'subject':str,'corrects':int,'total':int,'acc':float}]
         derived_records_by_p: Dict[float, List[dict]] = {}  # p -> list of curve_obj (per subject)
         derived_records_pride_by_p: Dict[float, List[dict]] = {}  # p -> list of PRIDE+OURS curve_obj (per subject)
+        pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
 
         for subject in subjects[::1]:
             cached_path = f'{args.save_path}/{subject}.jsonl'
@@ -1776,6 +1991,7 @@ def main():
                                 base_preds.append(int(np.argmax(base_row_corr)))
                             rstd = _recall_std(base_labels, base_preds, k=k)
                             logger.info(_purple(f"PRIDE recall_std (base-only, over labels): {rstd:.4f}"))
+                            pride_recall_std_records.append({"subject": str(subject), "rstd": float(rstd), "m": int(pride_meta.get("m", 0)), "N": int(pride_meta.get("N", 0))})
                         except Exception:
                             pass
 
@@ -2075,6 +2291,50 @@ def main():
                                 except Exception:
                                     pass
 
+                            # Δ plot/log (PRIDE+OURS - BASELINE) including heuristics
+                            if pride_enabled and pride_prior is not None and 'cobj_pr' in locals() and cobj_pr and isinstance(cobj_pr, dict):
+                                try:
+                                    delta_pts = []
+                                    # policies
+                                    for key in ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]:
+                                        if key in cobj and key in cobj_pr:
+                                            dcost = float(cobj_pr[key]["costs"][0]) - float(cobj[key]["costs"][0])
+                                            dacc = float(cobj_pr[key]["accuracies"][0]) - float(cobj[key]["accuracies"][0])
+                                            delta_pts.append({"label": key, "dcost": dcost, "dacc": dacc, "marker": "o", "color": "black"})
+
+                                    # heuristics
+                                    bmap = {str(h.get("label")): h for h in (cobj.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                                    pmap = {str(h.get("label")): h for h in (cobj_pr.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                                    for lab in sorted(set(bmap.keys()) & set(pmap.keys())):
+                                        dcost = float(pmap[lab].get("cost")) - float(bmap[lab].get("cost"))
+                                        dacc = float(pmap[lab].get("acc")) - float(bmap[lab].get("acc"))
+                                        delta_pts.append({
+                                            "label": lab,
+                                            "dcost": dcost,
+                                            "dacc": dacc,
+                                            "marker": str(pmap[lab].get("marker", "o")),
+                                            "color": str(pmap[lab].get("color", "black")),
+                                        })
+
+                                    logger.info(_purple(f"==== DELTA report (PRIDE+OURS - BASELINE, p={int(round(perc))}) ===="))
+                                    for dp in delta_pts:
+                                        logger.info(f"{dp['label']:<22}: Δcost={dp['dcost']:+.3f}, Δacc={dp['dacc']:+.4f}")
+
+                                    out_d = os.path.join(curve_save_path, f"{subject}_{ptag}_pride_delta_scatter.png")
+                                    _plot_delta_scatter(
+                                        delta_points=delta_pts,
+                                        out_path=out_d,
+                                        title=f"{args.task} {subject} — Δ (PRIDE+OURS - BASELINE), {ptag}",
+                                    )
+                                    if wandb_ok and wandb_run is not None:
+                                        try:
+                                            import wandb
+                                            wandb_run.log({f"plots/{subject}/{ptag}/pride_delta_scatter": wandb.Image(out_d)})
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+
                             # 3. [ONLINE DYNAMIC] REMOVED
                             # c_dyn, a_dyn, _ = _run_online_dynamic_policy(
                             #     default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k
@@ -2137,7 +2397,48 @@ def main():
                             args=args,
                             wandb_ok=wandb_ok,
                             wandb_run=wandb_run,
+                            plot_tag="BASELINE",
+                            fname_tag="BASE",
                         )
+
+                        # PRIDE-only curves (debiased stats) + overlay compare
+                        if pride_enabled and pride_prior is not None:
+                            _compute_and_plot_th2_tradeoff(
+                                subject=subject,
+                                curve_save_path=curve_save_path,
+                                th1_list=th1_tradeoff_list,
+                                th2_list=th2_tradeoff_list,
+                                default_conf=default_conf_pr,
+                                mean_conf=mean_conf_pr,
+                                base_correct_list=base_correct_list_pr,
+                                cyclic_correct_list=cyclic_correct_list_pr,
+                                arr_probe2_correct=arr_probe2_correct_pr,
+                                k=k,
+                                args=args,
+                                wandb_ok=wandb_ok,
+                                wandb_run=wandb_run,
+                                plot_tag="PRIDE+OURS (debiased)",
+                                fname_tag="PRIDE",
+                            )
+                            _plot_th2_tradeoff_curve_compare(
+                                subject=subject,
+                                curve_save_path=curve_save_path,
+                                th1_list=th1_tradeoff_list,
+                                default_conf_base=default_conf,
+                                mean_conf_base=mean_conf,
+                                base_correct_base=base_correct_list,
+                                cyclic_correct_base=cyclic_correct_list,
+                                probe2_correct_base=arr_probe2_correct,
+                                default_conf_pr=default_conf_pr,
+                                mean_conf_pr=mean_conf_pr,
+                                base_correct_pr=base_correct_list_pr,
+                                cyclic_correct_pr=cyclic_correct_list_pr,
+                                probe2_correct_pr=arr_probe2_correct_pr,
+                                k=k,
+                                args=args,
+                                wandb_ok=wandb_ok,
+                                wandb_run=wandb_run,
+                            )
 
                 except Exception as e:
                     logger.warning(f"Failed to derive curves for subject '{subject}': {e}")
@@ -2156,6 +2457,36 @@ def main():
             logger.info(f"subjects: {len(eval_acc_records)}/{len(subjects)}")
             logger.info(f"accuracy (macro mean over subjects): {macro_acc:.4f}")
             logger.info(f"accuracy (micro = sum correct / sum total): {micro_acc:.4f}")
+
+        # Recall std histogram plot (PRIDE)
+        if len(pride_recall_std_records) > 0:
+            try:
+                out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
+                if getattr(args, 'option_id_set', None):
+                    out_dir += f"_id-{args.option_id_set}"
+                os.makedirs(out_dir, exist_ok=True)
+                rstds = [float(r.get("rstd", float("nan"))) for r in pride_recall_std_records]
+                rstds = [r for r in rstds if np.isfinite(r)]
+                if len(rstds) > 0:
+                    fig, ax = plt.subplots(figsize=(8.6, 5.2), dpi=180)
+                    ax.hist(rstds, bins=20, color="#4c78a8", alpha=0.85)
+                    ax.set_title(f"{args.task} — PRIDE recall std (base-only debiased), n={len(rstds)}")
+                    ax.set_xlabel("recall_std")
+                    ax.set_ylabel("count")
+                    ax.grid(True, linestyle="--", alpha=0.35)
+                    out_png = os.path.join(out_dir, f"{args.task}_aggregate_pride_recall_std_hist.png")
+                    fig.tight_layout()
+                    fig.savefig(out_png, bbox_inches="tight")
+                    plt.close(fig)
+                    logger.info(_purple(f"Saved PRIDE recall_std histogram: {out_png}"))
+                    if wandb_ok and wandb_run is not None:
+                        try:
+                            import wandb
+                            wandb_run.log({f"plots/{args.task}/aggregate/pride_recall_std_hist": wandb.Image(out_png)})
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         # Aggregate derived-policy summary (only available when args.setting == 'full')
         if len(derived_records_by_p) > 0:
@@ -2229,6 +2560,8 @@ def main():
             # For plotting: delta cost per p (policies + heuristics)
             delta_cost_policies_by_p: Dict[float, Dict[str, float]] = {}
             delta_cost_heur_by_p: Dict[float, Dict[str, float]] = {}
+            delta_acc_policies_by_p: Dict[float, Dict[str, float]] = {}
+            delta_acc_heur_by_p: Dict[float, Dict[str, float]] = {}
 
             for p, cobjs in sorted(derived_records_pride_by_p.items(), key=lambda t: t[0]):
                 keys = ["default", "cyclic", "full", "switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
@@ -2317,6 +2650,25 @@ def main():
                             logger.info(f"{key:<14}: Δcost≈{d:+.3f}")
                             delta_cost_policies_by_p.setdefault(float(p), {})[str(key)] = float(d)
 
+                            # Δacc (macro over subjects)
+                            try:
+                                base_accs = []
+                                pride_accs = []
+                                for b, pr in zip(base_cobjs, cobjs):
+                                    if key in ["default", "cyclic", "full"]:
+                                        if key in (b.get("always", {}) or {}) and key in (pr.get("always", {}) or {}):
+                                            base_accs.append(float(b["always"][key]["acc"]))
+                                            pride_accs.append(float(pr["always"][key]["acc"]))
+                                    else:
+                                        if key in b and key in pr:
+                                            base_accs.append(float(b[key]["accuracies"][0]))
+                                            pride_accs.append(float(pr[key]["accuracies"][0]))
+                                if len(base_accs) > 0 and len(pride_accs) > 0:
+                                    da = float(np.mean(np.asarray(pride_accs, dtype=np.float64) - np.asarray(base_accs, dtype=np.float64)))
+                                    delta_acc_policies_by_p.setdefault(float(p), {})[str(key)] = float(da)
+                            except Exception:
+                                pass
+
                         # Heuristic delta-costs (if present on both)
                         heur_labels = set()
                         for b, pr in zip(base_cobjs, cobjs):
@@ -2340,6 +2692,25 @@ def main():
                             pp = np.asarray([t[1] for t in filt], dtype=np.float64)
                             d2 = float(np.mean(pp - bb))
                             delta_cost_heur_by_p.setdefault(float(p), {})[str(lab)] = float(d2)
+
+                            # heuristic Δacc (macro)
+                            try:
+                                baccs = []
+                                paccs = []
+                                for b, pr in zip(base_cobjs, cobjs):
+                                    bmap = {str(h.get("label")): h for h in (b.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                                    pmap = {str(h.get("label")): h for h in (pr.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                                    if lab in bmap and lab in pmap:
+                                        baccs.append(float(bmap[lab].get("acc", float("nan"))))
+                                        paccs.append(float(pmap[lab].get("acc", float("nan"))))
+                                filt2 = [(ba, pa) for ba, pa in zip(baccs, paccs) if np.isfinite(ba) and np.isfinite(pa)]
+                                if len(filt2) > 0:
+                                    ba = np.asarray([t[0] for t in filt2], dtype=np.float64)
+                                    pa = np.asarray([t[1] for t in filt2], dtype=np.float64)
+                                    da2 = float(np.mean(pa - ba))
+                                    delta_acc_heur_by_p.setdefault(float(p), {})[str(lab)] = float(da2)
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
@@ -2377,6 +2748,39 @@ def main():
                         try:
                             import wandb
                             wandb_run.log({f"plots/{args.task}/aggregate/prefix_delta_cost_heuristics": wandb.Image(out_png)})
+                        except Exception:
+                            pass
+
+                # Δacc bar plots
+                if len(delta_acc_policies_by_p) > 0:
+                    out_png = os.path.join(out_dir, f"{args.task}_aggregate_pride_prefix_delta_acc_POLICIES.png")
+                    _plot_delta_cost_bars_by_p(
+                        delta_cost_by_p=delta_acc_policies_by_p,
+                        out_path=out_png,
+                        title=f"{args.task} — ΔAcc by p (Policies) [PRIDE+OURS - BASELINE]",
+                        ylabel="Δ Accuracy (PRIDE+OURS - BASELINE)",
+                    )
+                    logger.info(_purple(f"Saved Δacc bar plot (policies): {out_png}"))
+                    if wandb_ok and wandb_run is not None:
+                        try:
+                            import wandb
+                            wandb_run.log({f"plots/{args.task}/aggregate/pride_delta_acc_policies": wandb.Image(out_png)})
+                        except Exception:
+                            pass
+
+                if len(delta_acc_heur_by_p) > 0:
+                    out_png = os.path.join(out_dir, f"{args.task}_aggregate_pride_prefix_delta_acc_HEURISTICS.png")
+                    _plot_delta_cost_bars_by_p(
+                        delta_cost_by_p=delta_acc_heur_by_p,
+                        out_path=out_png,
+                        title=f"{args.task} — ΔAcc by p (Heuristics) [PRIDE+OURS - BASELINE]",
+                        ylabel="Δ Accuracy (PRIDE+OURS - BASELINE)",
+                    )
+                    logger.info(_purple(f"Saved Δacc bar plot (heuristics): {out_png}"))
+                    if wandb_ok and wandb_run is not None:
+                        try:
+                            import wandb
+                            wandb_run.log({f"plots/{args.task}/aggregate/pride_delta_acc_heuristics": wandb.Image(out_png)})
                         except Exception:
                             pass
             except Exception:
