@@ -373,22 +373,24 @@ def _plot_baseline_vs_pride_points_scatter(
                 label=f"{prefix}{key}",
             )
 
-        # heuristic points, if present
+        # heuristic points, if present (use stored marker/color when available)
         for hp in (obj.get("heuristic_points", []) or []):
             if not isinstance(hp, dict):
                 continue
             cost = float(hp.get("cost", float("nan")))
             acc = float(hp.get("acc", float("nan")))
             lab = str(hp.get("label", "heuristic"))
+            mk = str(hp.get("marker", "o"))
+            col = str(hp.get("color", "black"))
             if np.isnan(cost) or np.isnan(acc):
                 continue
             plt.scatter(
                 cost,
                 acc,
-                marker="o",
+                marker=mk,
                 s=80,
-                facecolors="none" if hollow else "black",
-                edgecolors="black",
+                facecolors="none" if hollow else col,
+                edgecolors=col,
                 linewidths=1.8 if hollow else 1.0,
                 alpha=0.45,
                 label=f"{prefix}{lab}" if prefix else lab,
@@ -1993,6 +1995,8 @@ def main():
                                         "cost": float(hp.get("cost")),
                                         "acc": float(hp.get("acc")),
                                         "th2_p": float(hp.get("th2_p", float("nan"))),
+                                        "marker": str(hp.get("marker", "o")),
+                                        "color": str(hp.get("color", "black")),
                                     }
                                     for hp in (extra_pts or [])
                                 ]
@@ -2026,6 +2030,8 @@ def main():
                                             "cost": float(hp.get("cost")),
                                             "acc": float(hp.get("acc")),
                                             "th2_p": float(hp.get("th2_p", float("nan"))),
+                                            "marker": str(hp.get("marker", "o")),
+                                            "color": str(hp.get("color", "black")),
                                         }
                                         for hp in (extra_pts_pr or [])
                                     ]
@@ -2057,6 +2063,17 @@ def main():
                                     logger.info(f"{hp.get('label','?'):<18}: cost={cost:.3f}, acc={acc:.4f}")
                             except Exception:
                                 pass
+
+                            # PRIDE+OURS heuristic point report (same p)
+                            if pride_enabled and pride_prior is not None and 'cobj_pr' in locals() and cobj_pr and isinstance(cobj_pr, dict):
+                                try:
+                                    logger.info(_purple(f"==== PRIDE+OURS HEURISTIC Point report (p={int(round(perc))}) ===="))
+                                    for hp in (cobj_pr.get("heuristic_points", []) or []):
+                                        acc = float(hp.get("acc", float("nan")))
+                                        cost = float(hp.get("cost", float("nan")))
+                                        logger.info(f"{hp.get('label','?'):<18}: cost={cost:.3f}, acc={acc:.4f}")
+                                except Exception:
+                                    pass
 
                             # 3. [ONLINE DYNAMIC] REMOVED
                             # c_dyn, a_dyn, _ = _run_online_dynamic_policy(
@@ -2242,6 +2259,40 @@ def main():
                     wsum = float(np.sum(ws))
                     acc_micro = float(np.sum([a * w for a, w in zip(accs, ws)]) / wsum) if wsum > 0 else float("nan")
                     logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+
+                # Heuristic points averages (PRIDE+OURS)
+                heuristic_labels = set()
+                for cobj in cobjs:
+                    for hp in (cobj.get("heuristic_points", []) or []):
+                        if isinstance(hp, dict) and hp.get("label") is not None:
+                            heuristic_labels.add(str(hp.get("label")))
+
+                if len(heuristic_labels) > 0:
+                    logger.info(_purple(f"---- Heuristic points (PRIDE+OURS aggregated over subjects, p={p}) ----"))
+                    for lab in sorted(heuristic_labels):
+                        costs = []
+                        accs = []
+                        ws = []
+                        for cobj in cobjs:
+                            n = int(cobj.get("n_samples", 0)) or 0
+                            hp_map = {str(h.get("label")): h for h in (cobj.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                            if lab not in hp_map:
+                                continue
+                            h = hp_map[lab]
+                            costs.append(float(h.get("cost", float("nan"))))
+                            accs.append(float(h.get("acc", float("nan"))))
+                            ws.append(n if n > 0 else 1)
+                        filt = [(c, a, w) for c, a, w in zip(costs, accs, ws) if (not np.isnan(c)) and (not np.isnan(a))]
+                        if len(filt) == 0:
+                            continue
+                        costs_f = [t[0] for t in filt]
+                        accs_f = [t[1] for t in filt]
+                        ws_f = [t[2] for t in filt]
+                        cost_macro = float(np.mean(costs_f))
+                        acc_macro = float(np.mean(accs_f))
+                        wsum = float(np.sum(ws_f))
+                        acc_micro = float(np.sum([a * w for a, w in zip(accs_f, ws_f)]) / wsum) if wsum > 0 else float("nan")
+                        logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
 
                 # cost overhead vs BASELINE (macro)
                 if float(p) in derived_records_by_p:
