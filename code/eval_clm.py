@@ -885,6 +885,66 @@ def _plot_th2_tradeoff_curve_compare(
             costs_p.append(float(cp))
         ax1.plot(dense_th2_list, costs_b, color=color, linewidth=1.6, alpha=0.75)
         ax1.plot(dense_th2_list, costs_p, color=color, linewidth=1.6, alpha=0.75, linestyle="--")
+
+        # Heuristic points on Cost-vs-th2 compare
+        try:
+            def _pt(rule_func):
+                return _run_online_th1_quantile_th2_from_th1_rule(
+                    default_conf=default_conf_base,
+                    mean_conf=mean_conf_base,
+                    base_correct=base_correct_base,
+                    cyclic_correct=cyclic_correct_base,
+                    probe2_correct=probe2_correct_base,
+                    k=k,
+                    th1_percent=th1p,
+                    th2_rule_from_th1_value=rule_func,
+                    forced_cyclic_ids=None,
+                )
+
+            def _pt_pr(rule_func):
+                return _run_online_th1_quantile_th2_from_th1_rule(
+                    default_conf=default_conf_pr,
+                    mean_conf=mean_conf_pr,
+                    base_correct=base_correct_pr,
+                    cyclic_correct=cyclic_correct_pr,
+                    probe2_correct=probe2_correct_pr,
+                    k=k,
+                    th1_percent=th1p,
+                    th2_rule_from_th1_value=rule_func,
+                    forced_cyclic_ids=forced_cyclic_ids_pr,
+                )
+
+            pts = [
+                ("*", lambda x: x / 2.0),
+                ("P", lambda x, kk=k: x / math.sqrt(float(kk))),
+                ("s", lambda x: x ** 2),
+                ("^", lambda x: x ** 1.5),
+            ]
+            for mk, rf in pts:
+                cb, _, p_b = _pt(rf)
+                cp2, _, p_p2 = _pt_pr(rf)
+                ax1.scatter([float(p_b)], [float(cb)], marker=mk, s=70, color=color, edgecolors="black", zorder=7)
+                ax1.scatter([float(p_p2)], [float(cp2)], marker=mk, s=70, facecolors="none", edgecolors=color, linewidths=1.8, zorder=7)
+
+            cb_s, _, p_b_s = _run_online_sqrt_policy(
+                default_conf_base, mean_conf_base, base_correct_base, cyclic_correct_base, probe2_correct_base, k, th1p, forced_cyclic_ids=None
+            )
+            cp_s, _, p_p_s = _run_online_sqrt_policy(
+                default_conf_pr, mean_conf_pr, base_correct_pr, cyclic_correct_pr, probe2_correct_pr, k, th1p, forced_cyclic_ids=forced_cyclic_ids_pr
+            )
+            ax1.scatter([float(p_b_s)], [float(cb_s)], marker="D", s=60, color=color, edgecolors="black", zorder=7)
+            ax1.scatter([float(p_p_s)], [float(cp_s)], marker="D", s=60, facecolors="none", edgecolors=color, linewidths=1.8, zorder=7)
+
+            cb_lc, _, p_b_lc = _run_online_sqrt_policy_lowconf_update(
+                default_conf_base, mean_conf_base, base_correct_base, cyclic_correct_base, probe2_correct_base, k, th1p, forced_cyclic_ids=None
+            )
+            cp_lc, _, p_p_lc = _run_online_sqrt_policy_lowconf_update(
+                default_conf_pr, mean_conf_pr, base_correct_pr, cyclic_correct_pr, probe2_correct_pr, k, th1p, forced_cyclic_ids=forced_cyclic_ids_pr
+            )
+            ax1.scatter([float(p_b_lc)], [float(cb_lc)], marker="X", s=60, color=color, edgecolors="black", zorder=7)
+            ax1.scatter([float(p_p_lc)], [float(cp_lc)], marker="X", s=60, facecolors="none", edgecolors=color, linewidths=1.8, zorder=7)
+        except Exception:
+            pass
     ax1.set_xlabel("th2 (percentile, avg gap)")
     ax1.set_ylabel("Computational Cost (× of default)")
     ax1.set_title(f"{getattr(args,'task','task')} {subject} — Cost vs th2 (BASELINE solid vs PRIDE dashed)")
@@ -939,6 +999,66 @@ def _plot_th2_tradeoff_curve_compare(
             da_p.append((float(ap) - float(anchor_default_acc)) * 100.0)
         ax2.plot(dense_th2_list, da_b, color=color, linewidth=1.6, alpha=0.75)
         ax2.plot(dense_th2_list, da_p, color=color, linewidth=1.6, alpha=0.75, linestyle="--")
+
+        # Heuristic points on ΔAcc-vs-th2 compare
+        try:
+            def _pt(rule_func):
+                return _run_online_th1_quantile_th2_from_th1_rule(
+                    default_conf=default_conf_base,
+                    mean_conf=mean_conf_base,
+                    base_correct=base_correct_base,
+                    cyclic_correct=cyclic_correct_base,
+                    probe2_correct=probe2_correct_base,
+                    k=k,
+                    th1_percent=th1p,
+                    th2_rule_from_th1_value=rule_func,
+                    forced_cyclic_ids=None,
+                )
+
+            def _pt_pr(rule_func):
+                return _run_online_th1_quantile_th2_from_th1_rule(
+                    default_conf=default_conf_pr,
+                    mean_conf=mean_conf_pr,
+                    base_correct=base_correct_pr,
+                    cyclic_correct=cyclic_correct_pr,
+                    probe2_correct=probe2_correct_pr,
+                    k=k,
+                    th1_percent=th1p,
+                    th2_rule_from_th1_value=rule_func,
+                    forced_cyclic_ids=forced_cyclic_ids_pr,
+                )
+
+            pts = [
+                ("*", lambda x: x / 2.0),
+                ("P", lambda x, kk=k: x / math.sqrt(float(kk))),
+                ("s", lambda x: x ** 2),
+                ("^", lambda x: x ** 1.5),
+            ]
+            for mk, rf in pts:
+                cb, ab, p_b = _pt(rf)
+                cp2, ap2, p_p2 = _pt_pr(rf)
+                ax2.scatter([float(p_b)], [(float(ab) - float(anchor_default_acc)) * 100.0], marker=mk, s=70, color=color, edgecolors="black", zorder=7)
+                ax2.scatter([float(p_p2)], [(float(ap2) - float(anchor_default_acc)) * 100.0], marker=mk, s=70, facecolors="none", edgecolors=color, linewidths=1.8, zorder=7)
+
+            cb_s, ab_s, p_b_s = _run_online_sqrt_policy(
+                default_conf_base, mean_conf_base, base_correct_base, cyclic_correct_base, probe2_correct_base, k, th1p, forced_cyclic_ids=None
+            )
+            cp_s, ap_s, p_p_s = _run_online_sqrt_policy(
+                default_conf_pr, mean_conf_pr, base_correct_pr, cyclic_correct_pr, probe2_correct_pr, k, th1p, forced_cyclic_ids=forced_cyclic_ids_pr
+            )
+            ax2.scatter([float(p_b_s)], [(float(ab_s) - float(anchor_default_acc)) * 100.0], marker="D", s=60, color=color, edgecolors="black", zorder=7)
+            ax2.scatter([float(p_p_s)], [(float(ap_s) - float(anchor_default_acc)) * 100.0], marker="D", s=60, facecolors="none", edgecolors=color, linewidths=1.8, zorder=7)
+
+            cb_lc, ab_lc, p_b_lc = _run_online_sqrt_policy_lowconf_update(
+                default_conf_base, mean_conf_base, base_correct_base, cyclic_correct_base, probe2_correct_base, k, th1p, forced_cyclic_ids=None
+            )
+            cp_lc, ap_lc, p_p_lc = _run_online_sqrt_policy_lowconf_update(
+                default_conf_pr, mean_conf_pr, base_correct_pr, cyclic_correct_pr, probe2_correct_pr, k, th1p, forced_cyclic_ids=forced_cyclic_ids_pr
+            )
+            ax2.scatter([float(p_b_lc)], [(float(ab_lc) - float(anchor_default_acc)) * 100.0], marker="X", s=60, color=color, edgecolors="black", zorder=7)
+            ax2.scatter([float(p_p_lc)], [(float(ap_lc) - float(anchor_default_acc)) * 100.0], marker="X", s=60, facecolors="none", edgecolors=color, linewidths=1.8, zorder=7)
+        except Exception:
+            pass
     ax2.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6)
     ax2.set_xlabel("th2 (percentile, avg gap)")
     ax2.set_ylabel("Δ Accuracy (%)")
@@ -1608,6 +1728,7 @@ def _compute_and_plot_th2_tradeoff(
     wandb_run: Any = None,
     plot_tag: str = "BASELINE",
     fname_tag: str = "",
+    forced_cyclic_ids: Optional[set] = None,
 ):
     """
     th1/th2 trade-off plot with heuristic points:
@@ -1634,6 +1755,7 @@ def _compute_and_plot_th2_tradeoff(
             k=k,
             th1_percent=float(th1_p),
             th2_rule_from_th1_value=rule_func,
+            forced_cyclic_ids=forced_cyclic_ids,
         )
 
     # Plot 1: Cost vs th2
@@ -1658,6 +1780,7 @@ def _compute_and_plot_th2_tradeoff(
                 th1_percent=th1p,
                 th2_percent=float(th2p),
                 offline_prefix_n=0,
+                forced_cyclic_ids=forced_cyclic_ids,
             )
             costs.append(c)
         ax1.plot(dense_th2_list, costs, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.6)
@@ -1681,14 +1804,14 @@ def _compute_and_plot_th2_tradeoff(
 
         # (D) Online Sqrt
         c_sqrt, _, p_sqrt = _run_online_sqrt_policy(
-            default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
+            default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, forced_cyclic_ids=forced_cyclic_ids
         )
         ax1.scatter([p_sqrt], [c_sqrt], marker='D', s=80, color=color, edgecolors='black', zorder=6,
                     label='Online Sqrt (All)' if idx==0 else "")
 
         # (E) Online Sqrt (LowConf-only update)
         c_sqrt_lc, _, p_sqrt_lc = _run_online_sqrt_policy_lowconf_update(
-            default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
+            default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p, forced_cyclic_ids=forced_cyclic_ids
         )
         ax1.scatter([p_sqrt_lc], [c_sqrt_lc], marker='X', s=70, color=color, edgecolors='black', zorder=6,
                     label='Online Sqrt (LowConf-only)' if idx==0 else "")
@@ -1707,17 +1830,18 @@ def _compute_and_plot_th2_tradeoff(
     fig1.savefig(out_cost, bbox_inches="tight")
     plt.close(fig1)
 
-    # Plot 2: Δ Accuracy (%) vs th2
+    # Plot 2: Δ Accuracy (%) vs Cost   (trade-off axis)
     fig2, ax2 = plt.subplots(figsize=(9.0, 6.0), dpi=160)
     
     for idx, th1p in enumerate(th1_list):
         th1p = float(th1p)
         color = colors[idx % len(colors)]
         
-        # 1) Dense Curve
-        accs = []
+        # 1) Dense Curve (sweep th2 -> (cost, Δacc))
+        costs_line = []
+        delta_accs_line = []
         for th2p in dense_th2_list:
-            _, a = _run_online_avggap_policy(
+            c, a = _run_online_avggap_policy(
                 default_conf=default_conf,
                 mean_conf=mean_conf,
                 base_correct=base_correct_list,
@@ -1727,46 +1851,45 @@ def _compute_and_plot_th2_tradeoff(
                 th1_percent=th1p,
                 th2_percent=float(th2p),
                 offline_prefix_n=0,
+                forced_cyclic_ids=forced_cyclic_ids,
             )
-            accs.append(a)
-        delta_accs = [(a - default_acc) * 100.0 for a in accs]
-        ax2.plot(dense_th2_list, delta_accs, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.6)
+            costs_line.append(float(c))
+            delta_accs_line.append((float(a) - float(default_acc)) * 100.0)
+        ax2.plot(costs_line, delta_accs_line, label=f'th1={int(th1p)}', color=color, linewidth=1.5, alpha=0.5)
 
-        # 2) Heuristics
+        # 2) Heuristics (points on cost axis)
         # (A) th1 / 2
-        _, a_half, p_half = _online_point(th1p, lambda x: x / 2.0)
-        ax2.scatter([p_half], [(a_half-default_acc)*100], marker='*', s=120, color=color, edgecolors='black', zorder=6)
+        c_half, a_half, _ = _online_point(th1p, lambda x: x / 2.0)
+        ax2.scatter([c_half], [(a_half-default_acc)*100], marker='*', s=120, color=color, edgecolors='black', zorder=6)
 
         # (A2) th1 / sqrt(k)
-        _, a_sqrtk, p_sqrtk = _online_point(th1p, lambda x, kk=k: x / math.sqrt(float(kk)))
-        ax2.scatter([p_sqrtk], [(a_sqrtk-default_acc)*100], marker='P', s=110, color=color, edgecolors='black', zorder=6)
+        c_sqrtk, a_sqrtk, _ = _online_point(th1p, lambda x, kk=k: x / math.sqrt(float(kk)))
+        ax2.scatter([c_sqrtk], [(a_sqrtk-default_acc)*100], marker='P', s=110, color=color, edgecolors='black', zorder=6)
         
         # (B) th1 ^ 2
-        _, a_sq, p_sq = _online_point(th1p, lambda x: x ** 2)
-        ax2.scatter([p_sq], [(a_sq-default_acc)*100], marker='s', s=80, color=color, edgecolors='black', zorder=6)
+        c_sq, a_sq, _ = _online_point(th1p, lambda x: x ** 2)
+        ax2.scatter([c_sq], [(a_sq-default_acc)*100], marker='s', s=80, color=color, edgecolors='black', zorder=6)
 
         # (C) th1 ^ 1.5
-        _, a_pow, p_pow = _online_point(th1p, lambda x: x ** 1.5)
-        ax2.scatter([p_pow], [(a_pow-default_acc)*100], marker='^', s=90, color=color, edgecolors='black', zorder=6)
+        c_pow, a_pow, _ = _online_point(th1p, lambda x: x ** 1.5)
+        ax2.scatter([c_pow], [(a_pow-default_acc)*100], marker='^', s=90, color=color, edgecolors='black', zorder=6)
 
         # (D) Online Sqrt
-        _, a_sqrt, p_sqrt = _run_online_sqrt_policy(
+        c_sqrt, a_sqrt, _ = _run_online_sqrt_policy(
             default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
         )
-        ax2.scatter([p_sqrt], [(a_sqrt-default_acc)*100], marker='D', s=80, color=color, edgecolors='black', zorder=6)
+        ax2.scatter([c_sqrt], [(a_sqrt-default_acc)*100], marker='D', s=80, color=color, edgecolors='black', zorder=6)
 
         # (E) Online Sqrt (LowConf-only update)
-        _, a_sqrt_lc, p_sqrt_lc = _run_online_sqrt_policy_lowconf_update(
+        c_sqrt_lc, a_sqrt_lc, _ = _run_online_sqrt_policy_lowconf_update(
             default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1p
         )
-        ax2.scatter([p_sqrt_lc], [(a_sqrt_lc-default_acc)*100], marker='X', s=70, color=color, edgecolors='black', zorder=6)
+        ax2.scatter([c_sqrt_lc], [(a_sqrt_lc-default_acc)*100], marker='X', s=70, color=color, edgecolors='black', zorder=6)
 
     ax2.axhline(y=0.0, color='gray', linestyle=':', linewidth=1.0, alpha=0.5)
-    ax2.set_xlabel("th2 (percentile, avg gap)", fontsize=11)
+    ax2.set_xlabel("Computational Cost (× of default)", fontsize=11)
     ax2.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs th2 ({plot_tag})", fontsize=12)
-    ax2.set_xticks([1, 5, 10, 15, 20, 25, 30])
-    ax2.set_xticklabels([str(t) for t in [1, 5, 10, 15, 20, 25, 30]])
+    ax2.set_title(f"{getattr(args, 'task', 'task')} {subject} — Δ Accuracy vs Cost ({plot_tag})", fontsize=12)
     ax2.legend(loc='best', fontsize=9, ncol=2)
     ax2.grid(True, linestyle='--', alpha=0.4)
     out_delta = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_DELTA_ACC{suffix}.png")
@@ -1795,6 +1918,7 @@ def _compute_and_plot_th2_tradeoff(
                 th1_percent=th1p,
                 th2_percent=float(th2p),
                 offline_prefix_n=0,
+                forced_cyclic_ids=forced_cyclic_ids,
             )
             costs_line.append(c)
             delta_accs_line.append((a - default_acc) * 100.0)
@@ -3124,6 +3248,7 @@ def main():
                             wandb_run=wandb_run,
                             plot_tag="BASELINE",
                             fname_tag="BASE",
+                            forced_cyclic_ids=None,
                         )
 
                         # PRIDE-only curves (debiased stats) + overlay compare
@@ -3144,6 +3269,7 @@ def main():
                                 wandb_run=wandb_run,
                                 plot_tag="PRIDE+OURS (debiased)",
                                 fname_tag="PRIDE",
+                                forced_cyclic_ids=prefix_ids_set,
                             )
                             _plot_th2_tradeoff_curve_compare(
                                 subject=subject,
@@ -3181,8 +3307,11 @@ def main():
             micro_acc = (float(micro_corrects) / float(micro_total)) if micro_total > 0 else float("nan")
             logger.info(_purple(f"==== AGGREGATE report over subjects ({args.task}, setting={args.setting}) ===="))
             logger.info(f"subjects: {len(eval_acc_records)}/{len(subjects)}")
-            logger.info(f"accuracy (macro mean over subjects): {macro_acc:.4f}")
-            logger.info(f"accuracy (micro = sum correct / sum total): {micro_acc:.4f}")
+            if len(eval_acc_records) <= 1:
+                logger.info(f"accuracy: {macro_acc:.4f}")
+            else:
+                logger.info(f"accuracy (macro mean over subjects): {macro_acc:.4f}")
+                logger.info(f"accuracy (micro = sum correct / sum total): {micro_acc:.4f}")
 
         # Recall std histogram plot (PRIDE)
         if len(pride_recall_std_records) > 0:
@@ -3248,7 +3377,10 @@ def main():
                             ax.plot(ps, ys_b, color=col, linestyle="-", marker="o", linewidth=2.0, alpha=0.9, label=m)
                             ax.plot(ps, ys_p, color=col, linestyle="--", marker="o", linewidth=2.0, alpha=0.9)
 
-                        ax.set_title(f"{args.task} — Recall std vs p {title_suffix} (macro over subjects)")
+                        # For single-subject tasks (e.g., csqa), "macro" wording is confusing.
+                        uniq_subj = sorted(list({str(r.get("subject")) for r in recall_std_vs_p_records if r.get("subject") is not None}))
+                        macro_note = "(macro over subjects)" if len(uniq_subj) > 1 else ""
+                        ax.set_title(f"{args.task} — Recall std vs p {title_suffix} {macro_note}".strip())
                         ax.set_xlabel("p (th1 percentile)")
                         ax.set_ylabel("recall_std")
                         ax.grid(True, linestyle="--", alpha=0.35)
@@ -3297,6 +3429,7 @@ def main():
             for p, cobjs in sorted(derived_records_by_p.items(), key=lambda t: t[0]):
                 keys = ["default", "cyclic", "full", "switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
                 logger.info(_purple(f"==== AGGREGATE Derived policy report (REAL-WORLD online, p={p}) ===="))
+                single_subject = (len(cobjs) <= 1)
                 for key in keys:
                     accs = []
                     costs = []
@@ -3322,7 +3455,10 @@ def main():
                     acc_macro = float(np.mean(accs))
                     wsum = float(np.sum(ws))
                     acc_micro = float(np.sum([a * w for a, w in zip(accs, ws)]) / wsum) if wsum > 0 else float("nan")
-                    logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+                    if single_subject:
+                        logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}")
+                    else:
+                        logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
 
                 # Heuristic points (e.g., th1/2, th1/sqrt(k), Online Sqrt) if available
                 heuristic_labels = set()
@@ -3357,7 +3493,10 @@ def main():
                         acc_macro = float(np.mean(accs_f))
                         wsum = float(np.sum(ws_f))
                         acc_micro = float(np.sum([a * w for a, w in zip(accs_f, ws_f)]) / wsum) if wsum > 0 else float("nan")
-                        logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+                        if single_subject:
+                            logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}")
+                        else:
+                            logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
 
         # Aggregate PRIDE+OURS derived-policy summary (if enabled)
         if len(derived_records_pride_by_p) > 0:
@@ -3370,6 +3509,7 @@ def main():
             for p, cobjs in sorted(derived_records_pride_by_p.items(), key=lambda t: t[0]):
                 keys = ["default", "cyclic", "full", "switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
                 logger.info(_purple(f"==== AGGREGATE PRIDE+OURS Derived policy report (REAL-WORLD online, p={p}) ===="))
+                single_subject = (len(cobjs) <= 1)
                 for key in keys:
                     accs = []
                     costs = []
@@ -3395,7 +3535,10 @@ def main():
                     acc_macro = float(np.mean(accs))
                     wsum = float(np.sum(ws))
                     acc_micro = float(np.sum([a * w for a, w in zip(accs, ws)]) / wsum) if wsum > 0 else float("nan")
-                    logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+                    if single_subject:
+                        logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}")
+                    else:
+                        logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
 
                 # Heuristic points averages (PRIDE+OURS)
                 heuristic_labels = set()
@@ -3429,7 +3572,10 @@ def main():
                         acc_macro = float(np.mean(accs_f))
                         wsum = float(np.sum(ws_f))
                         acc_micro = float(np.sum([a * w for a, w in zip(accs_f, ws_f)]) / wsum) if wsum > 0 else float("nan")
-                        logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+                        if single_subject:
+                            logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}")
+                        else:
+                            logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
 
                 # cost overhead vs BASELINE (macro)
                 if float(p) in derived_records_by_p:
