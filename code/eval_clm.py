@@ -835,6 +835,7 @@ def _plot_th2_tradeoff_curve_compare(
     wandb_ok: bool = False,
     wandb_run: Any = None,
     fname_tag: str = "PRIDE_COMPARE",
+    forced_cyclic_ids_pr: Optional[set] = None,
 ):
     """
     Compare dense th2-sweep curves (baseline vs PRIDE+OURS debiased stats).
@@ -843,6 +844,8 @@ def _plot_th2_tradeoff_curve_compare(
     dense_th2_list = list(range(1, 31))
     default_acc_base = float(np.mean(np.asarray(base_correct_base, dtype=np.float64))) if len(base_correct_base) else float("nan")
     default_acc_pr = float(np.mean(np.asarray(base_correct_pr, dtype=np.float64))) if len(base_correct_pr) else float("nan")
+    # Anchor for PRIDE curves: use BASELINE default as reference (requested)
+    anchor_default_acc = float(default_acc_base)
 
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
     suffix = f"_{str(fname_tag).strip()}" if str(fname_tag).strip() else ""
@@ -876,6 +879,7 @@ def _plot_th2_tradeoff_curve_compare(
                 th1_percent=th1p,
                 th2_percent=float(th2p),
                 offline_prefix_n=0,
+                forced_cyclic_ids=forced_cyclic_ids_pr,
             )
             costs_b.append(float(cb))
             costs_p.append(float(cp))
@@ -900,7 +904,7 @@ def _plot_th2_tradeoff_curve_compare(
     fig1.savefig(out_cost, bbox_inches="tight")
     plt.close(fig1)
 
-    # Plot B: ΔAcc vs th2 (each relative to its own default)
+    # Plot B: ΔAcc vs th2 (reference = BASELINE default; PRIDE also uses BASELINE default)
     fig2, ax2 = plt.subplots(figsize=(9.0, 6.0), dpi=160)
     for idx, th1p in enumerate(th1_list):
         th1p = float(th1p)
@@ -929,15 +933,16 @@ def _plot_th2_tradeoff_curve_compare(
                 th1_percent=th1p,
                 th2_percent=float(th2p),
                 offline_prefix_n=0,
+                forced_cyclic_ids=forced_cyclic_ids_pr,
             )
-            da_b.append((float(ab) - float(default_acc_base)) * 100.0)
-            da_p.append((float(ap) - float(default_acc_pr)) * 100.0)
+            da_b.append((float(ab) - float(anchor_default_acc)) * 100.0)
+            da_p.append((float(ap) - float(anchor_default_acc)) * 100.0)
         ax2.plot(dense_th2_list, da_b, color=color, linewidth=1.6, alpha=0.75)
         ax2.plot(dense_th2_list, da_p, color=color, linewidth=1.6, alpha=0.75, linestyle="--")
     ax2.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6)
     ax2.set_xlabel("th2 (percentile, avg gap)")
     ax2.set_ylabel("Δ Accuracy (%)")
-    ax2.set_title(f"{getattr(args,'task','task')} {subject} — ΔAcc vs th2 (BASELINE solid vs PRIDE dashed)")
+    ax2.set_title(f"{getattr(args,'task','task')} {subject} — ΔAcc vs th2 (ref=BASE default; BASE solid vs PRIDE dashed)")
     try:
         from matplotlib.lines import Line2D
         handles = [
@@ -953,7 +958,50 @@ def _plot_th2_tradeoff_curve_compare(
     fig2.savefig(out_da, bbox_inches="tight")
     plt.close(fig2)
 
-    # Plot C: Cost vs ΔAcc (trade-off)
+    # Plot B2: Absolute ΔAcc(PRIDE - BASELINE) vs th2  (same reference; explains heuristic delta)
+    fig2b, ax2b = plt.subplots(figsize=(9.0, 6.0), dpi=160)
+    for idx, th1p in enumerate(th1_list):
+        th1p = float(th1p)
+        color = colors[idx % len(colors)]
+        dabs = []
+        for th2p in dense_th2_list:
+            _, ab = _run_online_avggap_policy(
+                default_conf=default_conf_base,
+                mean_conf=mean_conf_base,
+                base_correct=base_correct_base,
+                cyclic_correct=cyclic_correct_base,
+                probe2_correct=probe2_correct_base,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
+            )
+            _, ap = _run_online_avggap_policy(
+                default_conf=default_conf_pr,
+                mean_conf=mean_conf_pr,
+                base_correct=base_correct_pr,
+                cyclic_correct=cyclic_correct_pr,
+                probe2_correct=probe2_correct_pr,
+                k=k,
+                th1_percent=th1p,
+                th2_percent=float(th2p),
+                offline_prefix_n=0,
+                forced_cyclic_ids=forced_cyclic_ids_pr,
+            )
+            dabs.append((float(ap) - float(ab)) * 100.0)
+        ax2b.plot(dense_th2_list, dabs, color=color, linewidth=1.8, alpha=0.85, label=f"th1={int(th1p)}")
+    ax2b.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6)
+    ax2b.set_xlabel("th2 (percentile, avg gap)")
+    ax2b.set_ylabel("Δ Accuracy (PRIDE - BASELINE, %)")
+    ax2b.set_title(f"{getattr(args,'task','task')} {subject} — ΔAcc(PRIDE - BASELINE) vs th2")
+    ax2b.grid(True, linestyle="--", alpha=0.35)
+    ax2b.legend(loc="best", fontsize=9, ncol=2)
+    out_da2 = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_DELTA_ACC_PRIDE_MINUS_BASE{suffix}.png")
+    fig2b.tight_layout()
+    fig2b.savefig(out_da2, bbox_inches="tight")
+    plt.close(fig2b)
+
+    # Plot C: Cost vs ΔAcc (trade-off; reference = BASELINE default)
     fig3, ax3 = plt.subplots(figsize=(9.0, 6.0), dpi=160)
     for idx, th1p in enumerate(th1_list):
         th1p = float(th1p)
@@ -982,15 +1030,79 @@ def _plot_th2_tradeoff_curve_compare(
                 th1_percent=th1p,
                 th2_percent=float(th2p),
                 offline_prefix_n=0,
+                forced_cyclic_ids=forced_cyclic_ids_pr,
             )
-            xs_b.append(float(cb)); ys_b.append((float(ab) - float(default_acc_base)) * 100.0)
-            xs_p.append(float(cp)); ys_p.append((float(ap) - float(default_acc_pr)) * 100.0)
+            xs_b.append(float(cb)); ys_b.append((float(ab) - float(anchor_default_acc)) * 100.0)
+            xs_p.append(float(cp)); ys_p.append((float(ap) - float(anchor_default_acc)) * 100.0)
         ax3.plot(xs_b, ys_b, color=color, linewidth=1.4, alpha=0.55)
         ax3.plot(xs_p, ys_p, color=color, linewidth=1.4, alpha=0.55, linestyle="--")
+
+        # Heuristic points on the compare trade-off plot (same marker set as th2_tradeoff)
+        try:
+            # baseline (filled)
+            def _pt(rule_func):
+                return _run_online_th1_quantile_th2_from_th1_rule(
+                    default_conf=default_conf_base,
+                    mean_conf=mean_conf_base,
+                    base_correct=base_correct_base,
+                    cyclic_correct=cyclic_correct_base,
+                    probe2_correct=probe2_correct_base,
+                    k=k,
+                    th1_percent=th1p,
+                    th2_rule_from_th1_value=rule_func,
+                    forced_cyclic_ids=None,
+                )
+
+            def _pt_pr(rule_func):
+                return _run_online_th1_quantile_th2_from_th1_rule(
+                    default_conf=default_conf_pr,
+                    mean_conf=mean_conf_pr,
+                    base_correct=base_correct_pr,
+                    cyclic_correct=cyclic_correct_pr,
+                    probe2_correct=probe2_correct_pr,
+                    k=k,
+                    th1_percent=th1p,
+                    th2_rule_from_th1_value=rule_func,
+                    forced_cyclic_ids=forced_cyclic_ids_pr,
+                )
+
+            pts = [
+                ("*", lambda x: x / 2.0),
+                ("P", lambda x, kk=k: x / math.sqrt(float(kk))),
+                ("s", lambda x: x ** 2),
+                ("^", lambda x: x ** 1.5),
+            ]
+
+            for mk, rf in pts:
+                cb, ab, _ = _pt(rf)
+                cp2, ap2, _ = _pt_pr(rf)
+                ax3.scatter([float(cb)], [(float(ab) - float(anchor_default_acc)) * 100.0], marker=mk, s=75, color=color, edgecolors="black", zorder=7)
+                ax3.scatter([float(cp2)], [(float(ap2) - float(anchor_default_acc)) * 100.0], marker=mk, s=75, facecolors="none", edgecolors=color, linewidths=1.8, zorder=7)
+
+            # Online sqrt points
+            cb_s, ab_s, _ = _run_online_sqrt_policy(
+                default_conf_base, mean_conf_base, base_correct_base, cyclic_correct_base, probe2_correct_base, k, th1p, forced_cyclic_ids=None
+            )
+            cp_s, ap_s, _ = _run_online_sqrt_policy(
+                default_conf_pr, mean_conf_pr, base_correct_pr, cyclic_correct_pr, probe2_correct_pr, k, th1p, forced_cyclic_ids=forced_cyclic_ids_pr
+            )
+            ax3.scatter([float(cb_s)], [(float(ab_s) - float(anchor_default_acc)) * 100.0], marker="D", s=65, color=color, edgecolors="black", zorder=7)
+            ax3.scatter([float(cp_s)], [(float(ap_s) - float(anchor_default_acc)) * 100.0], marker="D", s=65, facecolors="none", edgecolors=color, linewidths=1.8, zorder=7)
+
+            cb_lc, ab_lc, _ = _run_online_sqrt_policy_lowconf_update(
+                default_conf_base, mean_conf_base, base_correct_base, cyclic_correct_base, probe2_correct_base, k, th1p, forced_cyclic_ids=None
+            )
+            cp_lc, ap_lc, _ = _run_online_sqrt_policy_lowconf_update(
+                default_conf_pr, mean_conf_pr, base_correct_pr, cyclic_correct_pr, probe2_correct_pr, k, th1p, forced_cyclic_ids=forced_cyclic_ids_pr
+            )
+            ax3.scatter([float(cb_lc)], [(float(ab_lc) - float(anchor_default_acc)) * 100.0], marker="X", s=65, color=color, edgecolors="black", zorder=7)
+            ax3.scatter([float(cp_lc)], [(float(ap_lc) - float(anchor_default_acc)) * 100.0], marker="X", s=65, facecolors="none", edgecolors=color, linewidths=1.8, zorder=7)
+        except Exception:
+            pass
     ax3.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6)
     ax3.set_xlabel("Computational Cost (× of default)")
     ax3.set_ylabel("Δ Accuracy (%)")
-    ax3.set_title(f"{getattr(args,'task','task')} {subject} — Trade-off (BASELINE solid vs PRIDE dashed)")
+    ax3.set_title(f"{getattr(args,'task','task')} {subject} — Trade-off (ΔAcc ref=BASE default; BASE solid vs PRIDE dashed)")
     try:
         from matplotlib.lines import Line2D
         handles = [
@@ -1001,6 +1113,19 @@ def _plot_th2_tradeoff_curve_compare(
     except Exception:
         pass
     ax3.grid(True, linestyle="--", alpha=0.35)
+    try:
+        ax3.text(
+            0.01,
+            0.01,
+            "Heuristic markers: * th1/2, P th1/sqrt(k), s th1^2, ^ th1^1.5, D Sqrt(All), X Sqrt(LowConf)\n"
+            "PRIDE heuristic pts are hollow (edge=color), BASELINE are filled.",
+            transform=ax3.transAxes,
+            fontsize=7,
+            alpha=0.85,
+            va="bottom",
+        )
+    except Exception:
+        pass
     out_tr = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_vs_DELTA_compare{suffix}.png")
     fig3.tight_layout()
     fig3.savefig(out_tr, bbox_inches="tight")
@@ -1012,6 +1137,7 @@ def _plot_th2_tradeoff_curve_compare(
             wandb_run.log({
                 f"plots/{subject}/th2_tradeoff_COST_compare{suffix}": wandb.Image(out_cost),
                 f"plots/{subject}/th2_tradeoff_DELTA_ACC_compare{suffix}": wandb.Image(out_da),
+                f"plots/{subject}/th2_tradeoff_DELTA_ACC_PRIDE_MINUS_BASE{suffix}": wandb.Image(out_da2),
                 f"plots/{subject}/th2_tradeoff_COST_vs_DELTA_compare{suffix}": wandb.Image(out_tr),
             })
         except Exception:
@@ -3037,6 +3163,7 @@ def main():
                                 args=args,
                                 wandb_ok=wandb_ok,
                                 wandb_run=wandb_run,
+                                forced_cyclic_ids_pr=prefix_ids_set,
                             )
 
                 except Exception as e:
