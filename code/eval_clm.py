@@ -2750,6 +2750,22 @@ def main():
                                 )
                                 if cobj_pr:
                                     curve_objs_pride.append(cobj_pr)
+                                    # For fair comparison: keep ensemble baselines (cyclic/full) identical to BASELINE.
+                                    # PRIDE+OURS is meant to debias before running our *policies*; the "cyclic/full(ensemble)"
+                                    # lines are anchors and should not move across PRIDE on/off.
+                                    try:
+                                        if isinstance(cobj, dict) and isinstance(cobj_pr, dict):
+                                            if "always" in cobj and "always" in cobj_pr:
+                                                if "cyclic" in cobj["always"]:
+                                                    cobj_pr["always"]["cyclic"] = dict(cobj["always"]["cyclic"])
+                                                if "full" in (cobj["always"] or {}) and "full" in (cobj_pr["always"] or {}):
+                                                    cobj_pr["always"]["full"] = dict(cobj["always"]["full"])
+                                            if "cyclic" in cobj:
+                                                cobj_pr["cyclic"] = dict(cobj["cyclic"])
+                                            if "full" in cobj and "full" in cobj_pr:
+                                                cobj_pr["full"] = dict(cobj["full"])
+                                    except Exception:
+                                        pass
                                     _log_named_report("PRIDE+OURS", cobj_pr)
                                     derived_records_pride_by_p.setdefault(float(perc), []).append(cobj_pr)
                                     # NOTE: heuristic_points for PRIDE+OURS are filled below (after baseline_points helpers are defined)
