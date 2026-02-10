@@ -83,6 +83,313 @@ def _recall_std(labels: List[int], preds: List[int], k: int) -> float:
     return float(np.std(np.asarray(recalls, dtype=np.float64)))
 
 
+def _run_online_avggap_policy_with_preds(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_pred_idx: List[int],
+    cyclic_pred_idx: List[int],
+    probe2_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+    th2_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, List[int]]:
+    """
+    Same decision rule as `_run_online_avggap_policy`, but returns predicted class indices.
+    Used for recall-std analysis vs percentile p.
+    """
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), []
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    past_dc: List[float] = []
+    past_mc: List[float] = []
+    q1 = float(th1_percent) / 100.0
+    q2 = float(th2_percent) / 100.0
+
+    for i in range(N):
+        gap_i = float(dc[i])
+        mgap_i = float(mc[i])
+
+        if i < int(offline_prefix_n):
+            pred_i = int(base_pred_idx[i])
+            preds.append(pred_i)
+            total_cost += 1.0
+            corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+            past_dc.append(gap_i)
+            past_mc.append(mgap_i)
+            continue
+
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q1)) if len(past_dc) > 0 else 0.0
+        th2_val = float(np.quantile(np.asarray(past_mc, dtype=np.float64), q2)) if len(past_mc) > 0 else 0.0
+
+        if gap_i >= th1_val:
+            c_step = 1.0
+            pred_i = int(base_pred_idx[i])
+        else:
+            if mgap_i < th2_val:
+                c_step = float(k)
+                pred_i = int(cyclic_pred_idx[i])
+            else:
+                c_step = 2.0
+                pred_i = int(probe2_pred_idx[i])
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+
+        preds.append(pred_i)
+        total_cost += float(c_step)
+        corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+        past_dc.append(gap_i)
+        past_mc.append(mgap_i)
+
+    return total_cost / float(N), corrects / float(N), preds
+
+
+def _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_pred_idx: List[int],
+    cyclic_pred_idx: List[int],
+    probe2_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+    th2_rule_from_th1_value,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, float, List[int]]:
+    """
+    Same as `_run_online_th1_quantile_th2_from_th1_rule`, but returns preds.
+    Returns: (cost, acc, th2_percent_estimate_over_all_samples, preds)
+    """
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), float("nan"), []
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+    q1 = float(th1_percent) / 100.0
+
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    past_dc: List[float] = []
+    final_th2_val = 0.0
+
+    for i in range(N):
+        gap_i = float(dc[i])
+        mgap_i = float(mc[i])
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q1)) if len(past_dc) > 0 else 0.0
+        th2_val = float(th2_rule_from_th1_value(float(th1_val)))
+        if th2_val < 0.0:
+            th2_val = 0.0
+        if th2_val > 1.0:
+            th2_val = 1.0
+        final_th2_val = th2_val
+
+        if gap_i >= th1_val:
+            c_step = 1.0
+            pred_i = int(base_pred_idx[i])
+        else:
+            if mgap_i < th2_val:
+                c_step = float(k)
+                pred_i = int(cyclic_pred_idx[i])
+            else:
+                c_step = 2.0
+                pred_i = int(probe2_pred_idx[i])
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+
+        preds.append(pred_i)
+        total_cost += float(c_step)
+        corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+        past_dc.append(gap_i)
+
+    th2_perc = (np.sum(mc < float(final_th2_val)) / float(len(mc))) * 100.0 if len(mc) > 0 else 0.0
+    return total_cost / float(N), corrects / float(N), float(th2_perc), preds
+
+
+def _run_online_switch_cyclic_with_preds(
+    default_conf: np.ndarray,
+    base_pred_idx: List[int],
+    cyclic_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, List[int]]:
+    """
+    Online switch_cyclic:
+    - th1: online running-quantile over PAST default_conf gaps (percentile=th1_percent)
+    - if dc >= th1 -> base, else -> cyclic
+    Returns (cost, acc, preds_idx).
+    """
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), []
+    dc = np.asarray(default_conf, dtype=np.float64)
+    q1 = float(th1_percent) / 100.0
+
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    past_dc: List[float] = []
+
+    for i in range(N):
+        gap_i = float(dc[i])
+
+        if i < int(offline_prefix_n):
+            pred_i = int(base_pred_idx[i])
+            preds.append(pred_i)
+            total_cost += 1.0
+            corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+            past_dc.append(gap_i)
+            continue
+
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q1)) if len(past_dc) > 0 else 0.0
+        if gap_i >= th1_val:
+            c_step = 1.0
+            pred_i = int(base_pred_idx[i])
+        else:
+            c_step = float(k)
+            pred_i = int(cyclic_pred_idx[i])
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+
+        preds.append(pred_i)
+        total_cost += float(c_step)
+        corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+        past_dc.append(gap_i)
+
+    return total_cost / float(N), corrects / float(N), preds
+
+
+def _run_online_sqrt_policy_with_preds(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_pred_idx: List[int],
+    cyclic_pred_idx: List[int],
+    probe2_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, List[int]]:
+    """
+    Pred-returning version of `_run_online_sqrt_policy` (Online Sqrt All).
+    """
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), []
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    running_gap_sum = 0.0
+    running_cnt = 0
+    past_gaps: List[float] = []
+
+    for i in range(N):
+        gap_i = float(dc[i])
+        th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), float(th1_percent) / 100.0)) if len(past_gaps) > 0 else 0.0
+        current_avg_gap = (running_gap_sum / running_cnt) if running_cnt > 0 else 0.0
+        safe_avg = min(1.0, max(0.0, float(current_avg_gap)))
+        th2_val = float(th1_val) * float(np.sqrt(1.0 - safe_avg))
+
+        if gap_i >= th1_val:
+            c_step = 1.0
+            pred_i = int(base_pred_idx[i])
+        else:
+            if float(mc[i]) < float(th2_val):
+                c_step = float(k)
+                pred_i = int(cyclic_pred_idx[i])
+            else:
+                c_step = 2.0
+                pred_i = int(probe2_pred_idx[i])
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+
+        preds.append(pred_i)
+        total_cost += float(c_step)
+        corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+        running_gap_sum += gap_i
+        running_cnt += 1
+        past_gaps.append(gap_i)
+
+    return total_cost / float(N), corrects / float(N), preds
+
+
+def _run_online_sqrt_policy_lowconf_update_with_preds(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_pred_idx: List[int],
+    cyclic_pred_idx: List[int],
+    probe2_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, List[int]]:
+    """
+    Pred-returning version of `_run_online_sqrt_policy_lowconf_update`.
+    """
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), []
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    low_sum = 0.0
+    low_cnt = 0
+    past_gaps: List[float] = []
+
+    for i in range(N):
+        gap_i = float(dc[i])
+        th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), float(th1_percent) / 100.0)) if len(past_gaps) > 0 else 0.0
+        current_avg_gap = (low_sum / low_cnt) if low_cnt > 0 else 0.0
+        safe_avg = min(1.0, max(0.0, float(current_avg_gap)))
+        th2_val = float(th1_val) * float(np.sqrt(1.0 - safe_avg))
+
+        if gap_i >= th1_val:
+            c_step = 1.0
+            pred_i = int(base_pred_idx[i])
+        else:
+            if float(mc[i]) < float(th2_val):
+                c_step = float(k)
+                pred_i = int(cyclic_pred_idx[i])
+            else:
+                c_step = 2.0
+                pred_i = int(probe2_pred_idx[i])
+            # update low-conf running stats (low-conf only update)
+            low_sum += gap_i
+            low_cnt += 1
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+
+        preds.append(pred_i)
+        total_cost += float(c_step)
+        corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+        past_gaps.append(gap_i)
+
+    return total_cost / float(N), corrects / float(N), preds
+
+
 def _stable_u32_seed(s: str, base_seed: int = 0) -> int:
     return (int(zlib.crc32(s.encode("utf-8"))) + int(base_seed)) & 0xFFFFFFFF
 
@@ -577,6 +884,15 @@ def _plot_th2_tradeoff_curve_compare(
     ax1.set_xlabel("th2 (percentile, avg gap)")
     ax1.set_ylabel("Computational Cost (× of default)")
     ax1.set_title(f"{getattr(args,'task','task')} {subject} — Cost vs th2 (BASELINE solid vs PRIDE dashed)")
+    try:
+        from matplotlib.lines import Line2D
+        handles = [
+            Line2D([0], [0], color="black", lw=2.0, linestyle="-", label="BASELINE (solid)"),
+            Line2D([0], [0], color="black", lw=2.0, linestyle="--", label="PRIDE+OURS (dashed)"),
+        ]
+        ax1.legend(handles=handles, loc="best", fontsize=9)
+    except Exception:
+        pass
     ax1.grid(True, linestyle="--", alpha=0.35)
     out_cost = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_compare{suffix}.png")
     os.makedirs(os.path.dirname(out_cost), exist_ok=True)
@@ -622,6 +938,15 @@ def _plot_th2_tradeoff_curve_compare(
     ax2.set_xlabel("th2 (percentile, avg gap)")
     ax2.set_ylabel("Δ Accuracy (%)")
     ax2.set_title(f"{getattr(args,'task','task')} {subject} — ΔAcc vs th2 (BASELINE solid vs PRIDE dashed)")
+    try:
+        from matplotlib.lines import Line2D
+        handles = [
+            Line2D([0], [0], color="black", lw=2.0, linestyle="-", label="BASELINE (solid)"),
+            Line2D([0], [0], color="black", lw=2.0, linestyle="--", label="PRIDE+OURS (dashed)"),
+        ]
+        ax2.legend(handles=handles, loc="best", fontsize=9)
+    except Exception:
+        pass
     ax2.grid(True, linestyle="--", alpha=0.35)
     out_da = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_DELTA_ACC_compare{suffix}.png")
     fig2.tight_layout()
@@ -666,6 +991,15 @@ def _plot_th2_tradeoff_curve_compare(
     ax3.set_xlabel("Computational Cost (× of default)")
     ax3.set_ylabel("Δ Accuracy (%)")
     ax3.set_title(f"{getattr(args,'task','task')} {subject} — Trade-off (BASELINE solid vs PRIDE dashed)")
+    try:
+        from matplotlib.lines import Line2D
+        handles = [
+            Line2D([0], [0], color="black", lw=2.0, linestyle="-", label="BASELINE (solid)"),
+            Line2D([0], [0], color="black", lw=2.0, linestyle="--", label="PRIDE+OURS (dashed)"),
+        ]
+        ax3.legend(handles=handles, loc="best", fontsize=9)
+    except Exception:
+        pass
     ax3.grid(True, linestyle="--", alpha=0.35)
     out_tr = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_COST_vs_DELTA_compare{suffix}.png")
     fig3.tight_layout()
@@ -1693,6 +2027,7 @@ def main():
         derived_records_by_p: Dict[float, List[dict]] = {}  # p -> list of curve_obj (per subject)
         derived_records_pride_by_p: Dict[float, List[dict]] = {}  # p -> list of PRIDE+OURS curve_obj (per subject)
         pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
+        recall_std_vs_p_records: List[dict] = []  # [{'subject':str,'p':float,'method':str,'kind':str,'rstd':float}]
 
         for subject in subjects[::1]:
             cached_path = f'{args.save_path}/{subject}.jsonl'
@@ -1854,6 +2189,9 @@ def main():
                     full_correct_list = []
 
                     base_probs_list = []  # identity row (letter-space)
+                    base_pred_idx_list = []     # argmax(base_probs) as index
+                    cyclic_pred_idx_list = []   # argmax(agg_cyc) as index
+                    probe2_pred_idx_list = []   # argmax(mean_probs) as index
 
                     cyclic_results = []
                     base_results = []
@@ -1890,6 +2228,7 @@ def main():
                         })
                         agg_cyc = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs], cyc_perms, k)
                         pred_cyc = option_ids[int(np.argmax(agg_cyc))]
+                        cyclic_pred_idx_list.append(int(np.argmax(agg_cyc)))
                         corr_cyc = (pred_cyc == data['ideal'])
                         cyclic_correct_list.append(corr_cyc)
                         cyclic_corrects += 1 if corr_cyc else 0
@@ -1899,6 +2238,7 @@ def main():
                         base_probs = np.asarray(probs_seq_np[identity_idx], dtype=np.float64)
                         base_probs_list.append(base_probs)
                         pred_base = option_ids[int(np.argmax(base_probs))]
+                        base_pred_idx_list.append(int(np.argmax(base_probs)))
                         corr_base = (pred_base == data['ideal'])
                         base_correct_list.append(corr_base)
                         base_results.append({
@@ -1955,6 +2295,7 @@ def main():
                         flip_trigger_mask.append(pred_base_cs != pred_probe_cs)
 
                         pred2 = option_ids[int(np.argmax(mean_probs))]
+                        probe2_pred_idx_list.append(int(np.argmax(mean_probs)))
                         probe2_correct_list.append(pred2 == ideals[i])
 
                     default_conf = np.asarray(default_conf, dtype=np.float64)
@@ -2003,6 +2344,9 @@ def main():
                         mean_gap_list_pr = []
                         flip_trigger_mask_pr = []
                         probe2_correct_list_pr = []
+                        base_pred_idx_list_pr = []
+                        cyclic_pred_idx_list_pr = []
+                        probe2_pred_idx_list_pr = []
 
                         for i in range(len(per_sample_probs)):
                             ps = np.asarray(per_sample_probs[i], dtype=np.float64)
@@ -2012,12 +2356,14 @@ def main():
                             cyc_probs_corr = [ps_corr[idx] for idx in cyclic_indices]
                             agg_cyc_corr = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs_corr], cyc_perms, k)
                             pred_cyc_corr = option_ids[int(np.argmax(agg_cyc_corr))]
+                            cyclic_pred_idx_list_pr.append(int(np.argmax(agg_cyc_corr)))
                             corr_cyc_corr = (pred_cyc_corr == ideals[i])
                             cyclic_correct_list_pr.append(corr_cyc_corr)
 
                             # base (identity)
                             base_row_corr = np.asarray(ps_corr[identity_idx], dtype=np.float64)
                             pred_base_corr = option_ids[int(np.argmax(base_row_corr))]
+                            base_pred_idx_list_pr.append(int(np.argmax(base_row_corr)))
                             corr_base_corr = (pred_base_corr == ideals[i])
                             base_correct_list_pr.append(corr_base_corr)
 
@@ -2050,6 +2396,7 @@ def main():
                             flip_trigger_mask_pr.append(pred_base_cs != pred_probe_cs)
 
                             pred2 = option_ids[int(np.argmax(mean_probs))]
+                            probe2_pred_idx_list_pr.append(int(np.argmax(mean_probs)))
                             probe2_correct_list_pr.append(pred2 == ideals[i])
 
                         default_conf_pr = np.asarray(default_conf_pr, dtype=np.float64)
@@ -2147,6 +2494,258 @@ def main():
                                     _log_named_report("PRIDE+OURS", cobj_pr)
                                     derived_records_pride_by_p.setdefault(float(perc), []).append(cobj_pr)
                                     # NOTE: heuristic_points for PRIDE+OURS are filled below (after baseline_points helpers are defined)
+
+                            # ---- Recall std vs p (BASELINE vs PRIDE) — macro over subjects (MMLU-friendly) ----
+                            try:
+                                labels_idx = [option_ids.index(str(x)) for x in ideals]
+
+                                # BASELINE: default / cyclic (always)
+                                recall_std_vs_p_records.append({
+                                    "subject": str(subject), "p": float(perc), "method": "default", "kind": "BASELINE",
+                                    "rstd": float(_recall_std(labels_idx, base_pred_idx_list, k=k))
+                                })
+                                recall_std_vs_p_records.append({
+                                    "subject": str(subject), "p": float(perc), "method": "cyclic", "kind": "BASELINE",
+                                    "rstd": float(_recall_std(labels_idx, cyclic_pred_idx_list, k=k))
+                                })
+
+                                # BASELINE: switch_cyclic (online th1 quantile; dc gate)
+                                _, _, preds_sc = _run_online_switch_cyclic_with_preds(
+                                    default_conf=default_conf,
+                                    base_pred_idx=base_pred_idx_list,
+                                    cyclic_pred_idx=cyclic_pred_idx_list,
+                                    labels_idx=labels_idx,
+                                    k=k,
+                                    th1_percent=float(perc),
+                                    offline_prefix_n=0,
+                                    forced_cyclic_ids=None,
+                                )
+                                recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "switch_cyclic", "kind": "BASELINE", "rstd": float(_recall_std(labels_idx, preds_sc, k=k))})
+
+                                # BASELINE: ours_avggap (th1=p, th2=p)
+                                _, _, preds_avg = _run_online_avggap_policy_with_preds(
+                                    default_conf=default_conf,
+                                    mean_conf=mean_conf,
+                                    base_pred_idx=base_pred_idx_list,
+                                    cyclic_pred_idx=cyclic_pred_idx_list,
+                                    probe2_pred_idx=probe2_pred_idx_list,
+                                    labels_idx=labels_idx,
+                                    k=k,
+                                    th1_percent=float(perc),
+                                    th2_percent=float(perc),
+                                    offline_prefix_n=0,
+                                    forced_cyclic_ids=None,
+                                )
+                                rstd_avg = _recall_std(labels_idx, preds_avg, k=k)
+                                recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "ours_avggap", "kind": "BASELINE", "rstd": float(rstd_avg)})
+
+                                # BASELINE: heuristic points (th2 derived from online th1)
+                                _, _, _, preds_h1 = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                    default_conf=default_conf,
+                                    mean_conf=mean_conf,
+                                    base_pred_idx=base_pred_idx_list,
+                                    cyclic_pred_idx=cyclic_pred_idx_list,
+                                    probe2_pred_idx=probe2_pred_idx_list,
+                                    labels_idx=labels_idx,
+                                    k=k,
+                                    th1_percent=float(perc),
+                                    th2_rule_from_th1_value=lambda x: x / 2.0,
+                                    forced_cyclic_ids=None,
+                                )
+                                recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1/2", "kind": "BASELINE", "rstd": float(_recall_std(labels_idx, preds_h1, k=k))})
+
+                                _, _, _, preds_hk = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                    default_conf=default_conf,
+                                    mean_conf=mean_conf,
+                                    base_pred_idx=base_pred_idx_list,
+                                    cyclic_pred_idx=cyclic_pred_idx_list,
+                                    probe2_pred_idx=probe2_pred_idx_list,
+                                    labels_idx=labels_idx,
+                                    k=k,
+                                    th1_percent=float(perc),
+                                    th2_rule_from_th1_value=lambda x, kk=k: x / math.sqrt(float(kk)),
+                                    forced_cyclic_ids=None,
+                                )
+                                recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1/sqrt(k)", "kind": "BASELINE", "rstd": float(_recall_std(labels_idx, preds_hk, k=k))})
+
+                                _, _, _, preds_sq = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                    default_conf=default_conf,
+                                    mean_conf=mean_conf,
+                                    base_pred_idx=base_pred_idx_list,
+                                    cyclic_pred_idx=cyclic_pred_idx_list,
+                                    probe2_pred_idx=probe2_pred_idx_list,
+                                    labels_idx=labels_idx,
+                                    k=k,
+                                    th1_percent=float(perc),
+                                    th2_rule_from_th1_value=lambda x: x ** 2,
+                                    forced_cyclic_ids=None,
+                                )
+                                recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1^2", "kind": "BASELINE", "rstd": float(_recall_std(labels_idx, preds_sq, k=k))})
+
+                                _, _, _, preds_pow = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                    default_conf=default_conf,
+                                    mean_conf=mean_conf,
+                                    base_pred_idx=base_pred_idx_list,
+                                    cyclic_pred_idx=cyclic_pred_idx_list,
+                                    probe2_pred_idx=probe2_pred_idx_list,
+                                    labels_idx=labels_idx,
+                                    k=k,
+                                    th1_percent=float(perc),
+                                    th2_rule_from_th1_value=lambda x: x ** 1.5,
+                                    forced_cyclic_ids=None,
+                                )
+                                recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1^1.5", "kind": "BASELINE", "rstd": float(_recall_std(labels_idx, preds_pow, k=k))})
+
+                                _, _, preds_sqrt = _run_online_sqrt_policy_with_preds(
+                                    default_conf=default_conf,
+                                    mean_conf=mean_conf,
+                                    base_pred_idx=base_pred_idx_list,
+                                    cyclic_pred_idx=cyclic_pred_idx_list,
+                                    probe2_pred_idx=probe2_pred_idx_list,
+                                    labels_idx=labels_idx,
+                                    k=k,
+                                    th1_percent=float(perc),
+                                    forced_cyclic_ids=None,
+                                )
+                                recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "Online Sqrt (All)", "kind": "BASELINE", "rstd": float(_recall_std(labels_idx, preds_sqrt, k=k))})
+
+                                _, _, preds_sqrt_lc = _run_online_sqrt_policy_lowconf_update_with_preds(
+                                    default_conf=default_conf,
+                                    mean_conf=mean_conf,
+                                    base_pred_idx=base_pred_idx_list,
+                                    cyclic_pred_idx=cyclic_pred_idx_list,
+                                    probe2_pred_idx=probe2_pred_idx_list,
+                                    labels_idx=labels_idx,
+                                    k=k,
+                                    th1_percent=float(perc),
+                                    forced_cyclic_ids=None,
+                                )
+                                recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "Online Sqrt (LowConf-only)", "kind": "BASELINE", "rstd": float(_recall_std(labels_idx, preds_sqrt_lc, k=k))})
+
+                                # PRIDE versions (if enabled)
+                                if pride_enabled and pride_prior is not None:
+                                    # PRIDE: default / cyclic (always)
+                                    recall_std_vs_p_records.append({
+                                        "subject": str(subject), "p": float(perc), "method": "default", "kind": "PRIDE+OURS",
+                                        "rstd": float(_recall_std(labels_idx, base_pred_idx_list_pr, k=k))
+                                    })
+                                    recall_std_vs_p_records.append({
+                                        "subject": str(subject), "p": float(perc), "method": "cyclic", "kind": "PRIDE+OURS",
+                                        "rstd": float(_recall_std(labels_idx, cyclic_pred_idx_list_pr, k=k))
+                                    })
+
+                                    # PRIDE: switch_cyclic
+                                    _, _, preds_sc_pr = _run_online_switch_cyclic_with_preds(
+                                        default_conf=default_conf_pr,
+                                        base_pred_idx=base_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        labels_idx=labels_idx,
+                                        k=k,
+                                        th1_percent=float(perc),
+                                        offline_prefix_n=0,
+                                        forced_cyclic_ids=prefix_ids_set,
+                                    )
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "switch_cyclic", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_sc_pr, k=k))})
+
+                                    _, _, preds_avg_pr = _run_online_avggap_policy_with_preds(
+                                        default_conf=default_conf_pr,
+                                        mean_conf=mean_conf_pr,
+                                        base_pred_idx=base_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        probe2_pred_idx=probe2_pred_idx_list_pr,
+                                        labels_idx=labels_idx,
+                                        k=k,
+                                        th1_percent=float(perc),
+                                        th2_percent=float(perc),
+                                        offline_prefix_n=0,
+                                        forced_cyclic_ids=prefix_ids_set,
+                                    )
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "ours_avggap", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_avg_pr, k=k))})
+
+                                    # PRIDE: heuristic points
+                                    _, _, _, preds_h1_pr = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                        default_conf=default_conf_pr,
+                                        mean_conf=mean_conf_pr,
+                                        base_pred_idx=base_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        probe2_pred_idx=probe2_pred_idx_list_pr,
+                                        labels_idx=labels_idx,
+                                        k=k,
+                                        th1_percent=float(perc),
+                                        th2_rule_from_th1_value=lambda x: x / 2.0,
+                                        forced_cyclic_ids=prefix_ids_set,
+                                    )
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1/2", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_h1_pr, k=k))})
+
+                                    _, _, _, preds_hk_pr = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                        default_conf=default_conf_pr,
+                                        mean_conf=mean_conf_pr,
+                                        base_pred_idx=base_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        probe2_pred_idx=probe2_pred_idx_list_pr,
+                                        labels_idx=labels_idx,
+                                        k=k,
+                                        th1_percent=float(perc),
+                                        th2_rule_from_th1_value=lambda x, kk=k: x / math.sqrt(float(kk)),
+                                        forced_cyclic_ids=prefix_ids_set,
+                                    )
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1/sqrt(k)", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_hk_pr, k=k))})
+
+                                    _, _, _, preds_sq_pr = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                        default_conf=default_conf_pr,
+                                        mean_conf=mean_conf_pr,
+                                        base_pred_idx=base_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        probe2_pred_idx=probe2_pred_idx_list_pr,
+                                        labels_idx=labels_idx,
+                                        k=k,
+                                        th1_percent=float(perc),
+                                        th2_rule_from_th1_value=lambda x: x ** 2,
+                                        forced_cyclic_ids=prefix_ids_set,
+                                    )
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1^2", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_sq_pr, k=k))})
+
+                                    _, _, _, preds_pow_pr = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                        default_conf=default_conf_pr,
+                                        mean_conf=mean_conf_pr,
+                                        base_pred_idx=base_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        probe2_pred_idx=probe2_pred_idx_list_pr,
+                                        labels_idx=labels_idx,
+                                        k=k,
+                                        th1_percent=float(perc),
+                                        th2_rule_from_th1_value=lambda x: x ** 1.5,
+                                        forced_cyclic_ids=prefix_ids_set,
+                                    )
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1^1.5", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_pow_pr, k=k))})
+
+                                    _, _, preds_sqrt_pr = _run_online_sqrt_policy_with_preds(
+                                        default_conf=default_conf_pr,
+                                        mean_conf=mean_conf_pr,
+                                        base_pred_idx=base_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        probe2_pred_idx=probe2_pred_idx_list_pr,
+                                        labels_idx=labels_idx,
+                                        k=k,
+                                        th1_percent=float(perc),
+                                        forced_cyclic_ids=prefix_ids_set,
+                                    )
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "Online Sqrt (All)", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_sqrt_pr, k=k))})
+
+                                    _, _, preds_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update_with_preds(
+                                        default_conf=default_conf_pr,
+                                        mean_conf=mean_conf_pr,
+                                        base_pred_idx=base_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        probe2_pred_idx=probe2_pred_idx_list_pr,
+                                        labels_idx=labels_idx,
+                                        k=k,
+                                        th1_percent=float(perc),
+                                        forced_cyclic_ids=prefix_ids_set,
+                                    )
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "Online Sqrt (LowConf-only)", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_sqrt_lc_pr, k=k))})
+                            except Exception:
+                                pass
 
                             # [ADD] Baseline Point Plot with 3 Rules
                             ptag = f"p{int(round(perc))}"
@@ -2488,6 +3087,84 @@ def main():
             except Exception:
                 pass
 
+        # Recall std vs p plot (BASELINE vs PRIDE) — includes heuristics
+        if len(recall_std_vs_p_records) > 0:
+            try:
+                out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
+                if getattr(args, 'option_id_set', None):
+                    out_dir += f"_id-{args.option_id_set}"
+                os.makedirs(out_dir, exist_ok=True)
+
+                methods = sorted(list({str(r.get("method")) for r in recall_std_vs_p_records if r.get("method") is not None}))
+                kinds = ["BASELINE", "PRIDE+OURS"]
+
+                # build mean rstd per (method, kind, p) over subjects
+                def _mean_rstd(method: str, kind: str, p: float) -> float:
+                    vals = [float(r.get("rstd", float("nan"))) for r in recall_std_vs_p_records
+                            if str(r.get("method")) == method and str(r.get("kind")) == kind and float(r.get("p")) == float(p)]
+                    vals = [v for v in vals if np.isfinite(v)]
+                    return float(np.mean(vals)) if len(vals) > 0 else float("nan")
+
+                ps = sorted(list({float(r.get("p")) for r in recall_std_vs_p_records if r.get("p") is not None}))
+                if len(ps) > 0 and len(methods) > 0:
+                    def _plot_overlay(method_subset: List[str], out_png: str, title_suffix: str, wandb_key: str):
+                        if method_subset is None or len(method_subset) == 0:
+                            return
+                        fig, ax = plt.subplots(figsize=(11.0, 6.0), dpi=200)
+                        cmap = plt.get_cmap("tab20")
+                        method_colors = {m: cmap(i % 20) for i, m in enumerate(method_subset)}
+
+                        for m in method_subset:
+                            col = method_colors.get(m, "black")
+                            ys_b = [_mean_rstd(m, "BASELINE", p) for p in ps]
+                            ys_p = [_mean_rstd(m, "PRIDE+OURS", p) for p in ps]
+                            ax.plot(ps, ys_b, color=col, linestyle="-", marker="o", linewidth=2.0, alpha=0.9, label=m)
+                            ax.plot(ps, ys_p, color=col, linestyle="--", marker="o", linewidth=2.0, alpha=0.9)
+
+                        ax.set_title(f"{args.task} — Recall std vs p {title_suffix} (macro over subjects)")
+                        ax.set_xlabel("p (th1 percentile)")
+                        ax.set_ylabel("recall_std")
+                        ax.grid(True, linestyle="--", alpha=0.35)
+                        ax.set_xticks(ps)
+                        ax.set_xticklabels([f"p{int(round(p))}" for p in ps])
+
+                        # Legend for methods (colors)
+                        leg1 = ax.legend(title="Method (color)", loc="upper left", fontsize=8, title_fontsize=9, ncol=2)
+                        ax.add_artist(leg1)
+
+                        # Legend for line styles (meaning)
+                        try:
+                            from matplotlib.lines import Line2D
+                            style_handles = [
+                                Line2D([0], [0], color="black", lw=2.0, linestyle="-", label="BASELINE (solid)"),
+                                Line2D([0], [0], color="black", lw=2.0, linestyle="--", label="PRIDE+OURS (dashed)"),
+                            ]
+                            ax.legend(handles=style_handles, title="Line style", loc="upper right", fontsize=9, title_fontsize=9)
+                        except Exception:
+                            pass
+
+                        fig.tight_layout()
+                        fig.savefig(out_png, bbox_inches="tight")
+                        plt.close(fig)
+                        logger.info(_purple(f"Saved recall_std vs p overlay plot: {out_png}"))
+                        if wandb_ok and wandb_run is not None:
+                            try:
+                                import wandb
+                                wandb_run.log({wandb_key: wandb.Image(out_png)})
+                            except Exception:
+                                pass
+
+                    policy_methods = [m for m in methods if m in {"default", "cyclic", "switch_cyclic", "ours_avggap"}]
+                    heur_methods = [m for m in methods if m not in {"default", "cyclic", "switch_cyclic", "ours_avggap"}]
+
+                    out_png_pol = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_vs_p_overlay_POLICIES.png")
+                    _plot_overlay(policy_methods, out_png_pol, "(Policies)", f"plots/{args.task}/aggregate/recall_std_vs_p_overlay_policies")
+
+                    out_png_heur = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_vs_p_overlay_HEURISTICS.png")
+                    _plot_overlay(heur_methods, out_png_heur, "(Heuristics)", f"plots/{args.task}/aggregate/recall_std_vs_p_overlay_heuristics")
+            except Exception:
+                pass
+
         # Aggregate derived-policy summary (only available when args.setting == 'full')
         if len(derived_records_by_p) > 0:
             for p, cobjs in sorted(derived_records_by_p.items(), key=lambda t: t[0]):
@@ -2669,6 +3346,13 @@ def main():
                             except Exception:
                                 pass
 
+                        # Also print Δacc for policies (same section)
+                        if float(p) in delta_acc_policies_by_p:
+                            logger.info(_purple(f"---- Prefix overhead Δacc (PRIDE+OURS - BASELINE), p={p} ----"))
+                            for key in keys:
+                                if key in (delta_acc_policies_by_p.get(float(p), {}) or {}):
+                                    logger.info(f"{key:<14}: Δacc≈{float(delta_acc_policies_by_p[float(p)][key]):+.4f}")
+
                         # Heuristic delta-costs (if present on both)
                         heur_labels = set()
                         for b, pr in zip(base_cobjs, cobjs):
@@ -2711,6 +3395,16 @@ def main():
                                     delta_acc_heur_by_p.setdefault(float(p), {})[str(lab)] = float(da2)
                             except Exception:
                                 pass
+
+                        # Print heuristics Δcost/Δacc
+                        if float(p) in delta_cost_heur_by_p:
+                            logger.info(_purple(f"---- Prefix overhead Δcost (Heuristics), p={p} ----"))
+                            for lab, v in sorted((delta_cost_heur_by_p.get(float(p), {}) or {}).items(), key=lambda t: str(t[0])):
+                                logger.info(f"{str(lab):<18}: Δcost≈{float(v):+.3f}")
+                        if float(p) in delta_acc_heur_by_p:
+                            logger.info(_purple(f"---- Prefix overhead Δacc (Heuristics), p={p} ----"))
+                            for lab, v in sorted((delta_acc_heur_by_p.get(float(p), {}) or {}).items(), key=lambda t: str(t[0])):
+                                logger.info(f"{str(lab):<18}: Δacc≈{float(v):+.4f}")
                     except Exception:
                         pass
 
