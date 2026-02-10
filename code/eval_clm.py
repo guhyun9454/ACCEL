@@ -2140,6 +2140,15 @@ def _compute_curves_for_one_percentile(
         forced_cyclic_ids=forced_cyclic_ids,
     )
 
+    # Prefix overhead accounting for "always" ensembles:
+    # - default: extra (k-1) cost for prefix samples used to estimate PRIDE prior
+    # - cyclic/full: already >=k per sample, so prefix adds no extra (by design)
+    default_cost_always = 1.0
+    if forced_cyclic_ids is not None and N > 0:
+        m = int(len(forced_cyclic_ids))
+        if m > 0:
+            default_cost_always = 1.0 + (float(m) * (float(k) - 1.0)) / float(N)
+
     curve_obj = {
         "subject": subject,
         "tag": str(tag),
@@ -2149,7 +2158,7 @@ def _compute_curves_for_one_percentile(
         "default_accuracy": float(default_acc),
 
         "always": {
-            "default": {"cost": 1.0, "acc": float(default_acc)},
+            "default": {"cost": float(default_cost_always), "acc": float(default_acc)},
             "cyclic": {"cost": float(C_cyc), "acc": float(cyclic_acc_always)},
         },
 
