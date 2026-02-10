@@ -13,6 +13,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 import numpy as np
 import torch
+import zlib
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import logging as hf_logging
 
@@ -35,6 +36,9 @@ from utils import (
     patch_open,
 )
 
+# PriDe (PRIDE) helper: estimates option-token prior
+from debias_utils import simple as debias_simple
+
 # -------------------------
 # [FIX] Safe NVML init
 # -------------------------
@@ -46,6 +50,91 @@ except Exception:
     _NVML_OK = False
 
 logger = logging.getLogger(__name__)
+
+def _pride_correct_row(row: np.ndarray, prior: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """PriDe correction: divide by prior then renormalize."""
+    r = np.asarray(row, dtype=np.float64)
+    pr = np.asarray(prior, dtype=np.float64)
+    adj = r / (pr + eps)
+    adj = adj / (adj.sum() + eps)
+    return adj
+
+
+def _recall_std(labels: List[int], preds: List[int], k: int) -> float:
+    """
+    Simple recall std over classes 0..k-1.
+    recall(c) = TP_c / P_c. Classes with P_c==0 are ignored.
+    """
+    if k <= 0:
+        return float("nan")
+    P = [0] * int(k)
+    TP = [0] * int(k)
+    for y, p in zip(labels, preds):
+        if 0 <= int(y) < k:
+            P[int(y)] += 1
+            if int(p) == int(y):
+                TP[int(y)] += 1
+    recalls = []
+    for c in range(int(k)):
+        if P[c] > 0:
+            recalls.append(TP[c] / float(P[c]))
+    if len(recalls) == 0:
+        return float("nan")
+    return float(np.std(np.asarray(recalls, dtype=np.float64)))
+
+
+def _stable_u32_seed(s: str, base_seed: int = 0) -> int:
+    return (int(zlib.crc32(s.encode("utf-8"))) + int(base_seed)) & 0xFFFFFFFF
+
+
+def _estimate_pride_prior_random_prefix_mean(
+    per_sample_probs: List[np.ndarray],
+    cyclic_indices: List[int],
+    k: int,
+    prefix_ratio: float,
+    seed: int,
+    eps: float = 1e-12,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Estimate global prior over option letters using a random prefix subset (ratio),
+    WITHOUT EMA: compute per-sample prior_i and take their mean.
+    """
+    N = len(per_sample_probs)
+    if N <= 0:
+        prior = np.ones((k,), dtype=np.float64) / float(k)
+        return prior, {"N": 0, "m": 0, "used": 0, "ratio": float(prefix_ratio), "seed": int(seed), "prefix_ids": []}
+
+    ratio = float(max(0.0, min(1.0, prefix_ratio)))
+    m = int(max(1, int(round(N * ratio))))
+
+    rng = np.random.default_rng(int(seed))
+    prefix_ids = rng.choice(np.arange(N, dtype=np.int64), size=m, replace=False)
+    prefix_ids = [int(x) for x in prefix_ids.tolist()]
+
+    priors = []
+    used = 0
+    for i in prefix_ids:
+        ps = np.asarray(per_sample_probs[i], dtype=np.float64)
+        observed = np.asarray([ps[j] for j in cyclic_indices], dtype=np.float64)  # (k,k)
+        try:
+            _, _, prior_i = debias_simple(observed)
+        except Exception:
+            continue
+        prior_i = np.asarray(prior_i, dtype=np.float64)
+        prior_i = prior_i / (prior_i.sum() + eps)
+        priors.append(prior_i)
+        used += 1
+
+    if len(priors) == 0:
+        prior = np.ones((k,), dtype=np.float64) / float(k)
+    else:
+        prior = np.mean(np.asarray(priors, dtype=np.float64), axis=0)
+        prior = np.asarray(prior, dtype=np.float64)
+        prior = prior / (prior.sum() + eps)
+
+    meta = {"N": int(N), "m": int(m), "used": int(used), "ratio": float(ratio), "seed": int(seed), "prefix_ids": prefix_ids}
+    return prior, meta
+
 
 
 def logging_cuda_memory_usage():
@@ -224,6 +313,164 @@ def _plot_baseline_points_scatter(
     plt.close()
 
 
+def _plot_baseline_vs_pride_points_scatter(
+    baseline_obj: dict,
+    pride_obj: dict,
+    out_path: str,
+    title: str,
+):
+    """
+    Overlay baseline vs PRIDE+OURS (same p) on one scatter.
+    Baseline: filled markers
+    PRIDE+OURS: same markers but hollow (edge only)
+    """
+    plt.figure(figsize=(8, 6), dpi=160)
+
+    def _plot_one(obj: dict, prefix: str, hollow: bool):
+        always = obj.get("always", {}) if isinstance(obj, dict) else {}
+        if "default" in always:
+            plt.scatter(
+                float(always["default"]["cost"]),
+                float(always["default"]["acc"]),
+                marker="*",
+                s=260,
+                facecolors="none" if hollow else "gray",
+                edgecolors="gray",
+                linewidths=1.8 if hollow else 1.0,
+                label=f"{prefix}Default",
+                zorder=10,
+            )
+        if "cyclic" in always:
+            plt.scatter(
+                float(always["cyclic"]["cost"]),
+                float(always["cyclic"]["acc"]),
+                marker="d",
+                s=140,
+                facecolors="none" if hollow else "purple",
+                edgecolors="purple",
+                linewidths=1.8 if hollow else 1.0,
+                label=f"{prefix}Cyclic",
+                zorder=10,
+            )
+
+        policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
+        markers = ['s', '^', 'v', 'o']
+        colors = ['orange', 'brown', 'green', 'blue']
+        for key, m, c in zip(policies, markers, colors):
+            if key not in obj:
+                continue
+            cost = float(obj[key]["costs"][0])
+            acc = float(obj[key]["accuracies"][0])
+            plt.scatter(
+                cost,
+                acc,
+                marker=m,
+                s=110,
+                facecolors="none" if hollow else c,
+                edgecolors=c,
+                linewidths=1.8 if hollow else 1.0,
+                alpha=0.95,
+                label=f"{prefix}{key}",
+            )
+
+        # heuristic points, if present
+        for hp in (obj.get("heuristic_points", []) or []):
+            if not isinstance(hp, dict):
+                continue
+            cost = float(hp.get("cost", float("nan")))
+            acc = float(hp.get("acc", float("nan")))
+            lab = str(hp.get("label", "heuristic"))
+            if np.isnan(cost) or np.isnan(acc):
+                continue
+            plt.scatter(
+                cost,
+                acc,
+                marker="o",
+                s=80,
+                facecolors="none" if hollow else "black",
+                edgecolors="black",
+                linewidths=1.8 if hollow else 1.0,
+                alpha=0.45,
+                label=f"{prefix}{lab}" if prefix else lab,
+            )
+
+    _plot_one(baseline_obj, prefix="BASE_", hollow=False)
+    _plot_one(pride_obj, prefix="PRIDE_", hollow=True)
+
+    plt.xlabel("Computational Cost (× of default)")
+    plt.ylabel("Accuracy")
+    plt.title(title)
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.legend(loc='lower right', fontsize=7, ncol=2)
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
+def _plot_delta_cost_bars_by_p(
+    delta_cost_by_p: Dict[float, Dict[str, float]],
+    out_path: str,
+    title: str,
+    ylabel: str = "Δ Cost (PRIDE+OURS - BASELINE)",
+):
+    """
+    Grouped bar chart: x-axis = p values, bars = policies/heuristics.
+    delta_cost_by_p[p][label] = mean delta cost.
+    """
+    if not isinstance(delta_cost_by_p, dict) or len(delta_cost_by_p) == 0:
+        return
+
+    ps = sorted([float(p) for p in delta_cost_by_p.keys()])
+    # collect labels that have at least one finite value
+    all_labels = set()
+    for p in ps:
+        for lab, v in (delta_cost_by_p.get(p, {}) or {}).items():
+            all_labels.add(str(lab))
+    labels = sorted(list(all_labels))
+    if len(labels) == 0:
+        return
+
+    # filter labels with any finite
+    filt_labels = []
+    for lab in labels:
+        vs = []
+        for p in ps:
+            v = float((delta_cost_by_p.get(p, {}) or {}).get(lab, float("nan")))
+            vs.append(v)
+        if any(np.isfinite(v) for v in vs):
+            filt_labels.append(lab)
+    labels = filt_labels
+    if len(labels) == 0:
+        return
+
+    x = np.arange(len(ps), dtype=np.float64)
+    width = 0.80 / float(len(labels))
+    fig, ax = plt.subplots(figsize=(10.5, 5.8), dpi=180)
+
+    for i, lab in enumerate(labels):
+        vals = []
+        for p in ps:
+            v = float((delta_cost_by_p.get(p, {}) or {}).get(lab, float("nan")))
+            vals.append(0.0 if (not np.isfinite(v)) else v)
+        offset = (i - (len(labels) - 1) / 2.0) * width
+        ax.bar(x + offset, vals, width=width, label=str(lab))
+
+    ax.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.7)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"p{int(round(p))}" for p in ps])
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.35)
+    ax.legend(loc="best", fontsize=7, ncol=3)
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _run_online_sqrt_policy(
     default_conf: np.ndarray,
     mean_conf: np.ndarray,
@@ -231,7 +478,8 @@ def _run_online_sqrt_policy(
     cyclic_correct: List[bool],
     probe2_correct: np.ndarray,
     k: int,
-    th1_percent: float
+    th1_percent: float,
+    forced_cyclic_ids: Optional[set] = None,
 ) -> Tuple[float, float, float]:
     """
     [Online Sqrt Policy]
@@ -277,15 +525,19 @@ def _run_online_sqrt_policy(
 
         # 3. Execution
         if gap_i >= th1_val:
-            total_cost += 1.0
+            c_step = 1.0
             corrects += 1 if base_correct[i] else 0
         else:
             if float(mc[i]) < current_th2_val:
-                total_cost += float(k)
+                c_step = float(k)
                 corrects += 1 if cyclic_correct[i] else 0
             else:
-                total_cost += 2.0
+                c_step = 2.0
                 corrects += 1 if bool(probe2_correct[i]) else 0
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+        total_cost += float(c_step)
         
         running_gap_sum += gap_i
         running_cnt += 1
@@ -306,7 +558,8 @@ def _run_online_sqrt_policy_lowconf_update(
     cyclic_correct: List[bool],
     probe2_correct: np.ndarray,
     k: int,
-    th1_percent: float
+    th1_percent: float,
+    forced_cyclic_ids: Optional[set] = None,
 ) -> Tuple[float, float, float]:
     """
     [Online Sqrt Policy — LowConf-only update]
@@ -354,15 +607,19 @@ def _run_online_sqrt_policy_lowconf_update(
 
         # 3) Execute policy
         if gap_i >= th1_val:
-            total_cost += 1.0
+            c_step = 1.0
             corrects += 1 if base_correct[i] else 0
         else:
             if float(mc[i]) < current_th2_val:
-                total_cost += float(k)
+                c_step = float(k)
                 corrects += 1 if cyclic_correct[i] else 0
             else:
-                total_cost += 2.0
+                c_step = 2.0
                 corrects += 1 if bool(probe2_correct[i]) else 0
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+        total_cost += float(c_step)
 
         # 4) Update low-conf-only stats AFTER decision
         if gap_i < th1_val:
@@ -387,6 +644,7 @@ def _run_online_th1_quantile_th2_from_th1_rule(
     k: int,
     th1_percent: float,
     th2_rule_from_th1_value,
+    forced_cyclic_ids: Optional[set] = None,
 ) -> Tuple[float, float, float]:
     """
     [Real-world Online Policy Template]
@@ -425,15 +683,19 @@ def _run_online_th1_quantile_th2_from_th1_rule(
 
         # Execute
         if gap_i >= th1_val:
-            total_cost += 1.0
+            c_step = 1.0
             corrects += 1 if base_correct[i] else 0
         else:
             if float(mc[i]) < th2_val:
-                total_cost += float(k)
+                c_step = float(k)
                 corrects += 1 if cyclic_correct[i] else 0
             else:
-                total_cost += 2.0
+                c_step = 2.0
                 corrects += 1 if bool(probe2_correct[i]) else 0
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+        total_cost += float(c_step)
 
         past_gaps.append(gap_i)
 
@@ -454,6 +716,7 @@ def _run_online_top2flip_policy(
     k: int,
     th1_percent: float,
     offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
 ) -> Tuple[float, float]:
     """
     [Real-world Online top2flip]
@@ -490,15 +753,21 @@ def _run_online_top2flip_policy(
             th1_val = 0.0
 
         if gap_i >= th1_val:
-            total_cost += 1.0
+            c_step = 1.0
             corrects += 1 if base_correct[i] else 0
         else:
             if bool(flip[i]):
-                total_cost += float(k)
+                c_step = float(k)
                 corrects += 1 if cyclic_correct[i] else 0
             else:
-                total_cost += 2.0
+                c_step = 2.0
                 corrects += 1 if bool(probe2_correct[i]) else 0
+
+        # Prefix overhead: if this sample was used for PRIDE prefix (cyclic observed),
+        # we assume at least k cost was paid (but accuracy follows policy decision).
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+        total_cost += float(c_step)
 
         past_gaps.append(gap_i)
 
@@ -515,6 +784,7 @@ def _run_online_avggap_policy(
     th1_percent: float,
     th2_percent: float,
     offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
 ) -> Tuple[float, float]:
     """
     [Real-world Online avggap]
@@ -561,15 +831,19 @@ def _run_online_avggap_policy(
             th2_val = 0.0
 
         if gap_i >= th1_val:
-            total_cost += 1.0
+            c_step = 1.0
             corrects += 1 if base_correct[i] else 0
         else:
             if mgap_i < th2_val:
-                total_cost += float(k)
+                c_step = float(k)
                 corrects += 1 if cyclic_correct[i] else 0
             else:
-                total_cost += 2.0
+                c_step = 2.0
                 corrects += 1 if bool(probe2_correct[i]) else 0
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+        total_cost += float(c_step)
 
         past_dc.append(gap_i)
         past_mc.append(mgap_i)
@@ -971,6 +1245,7 @@ def _compute_curves_for_one_percentile(
     probe2_correct: np.ndarray,
     perc_value: float,
     full_enabled: bool = True,
+    forced_cyclic_ids: Optional[set] = None,
 ) -> dict:
     """
     REAL-WORLD online evaluation (no beta / no offline prefix).
@@ -1006,20 +1281,32 @@ def _compute_curves_for_one_percentile(
 
         # switch_cyclic
         if amb:
-            total_cost_sc += C_cyc
+            c_step_sc = C_cyc
             corrects_sc += 1 if cyclic_correct_list[i] else 0
         else:
-            total_cost_sc += 1.0
+            c_step_sc = 1.0
             corrects_sc += 1 if base_correct_list[i] else 0
 
         # switch_full (only if available)
         if full_enabled and len(full_correct_list) == N:
             if amb:
-                total_cost_sf += C_full
+                c_step_sf = C_full
                 corrects_sf += 1 if full_correct_list[i] else 0
             else:
-                total_cost_sf += 1.0
+                c_step_sf = 1.0
                 corrects_sf += 1 if base_correct_list[i] else 0
+        else:
+            c_step_sf = 0.0
+
+        # Prefix overhead: prior-estimation prefix assumed to pay at least cyclic cost k
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step_sc = max(float(c_step_sc), float(C_cyc))
+            if full_enabled and len(full_correct_list) == N:
+                c_step_sf = max(float(c_step_sf), float(C_cyc))
+
+        total_cost_sc += float(c_step_sc)
+        if full_enabled and len(full_correct_list) == N:
+            total_cost_sf += float(c_step_sf)
 
         past_gaps.append(float(default_conf[i]))
 
@@ -1038,6 +1325,7 @@ def _compute_curves_for_one_percentile(
         k=k,
         th1_percent=perc_value,
         offline_prefix_n=0,
+        forced_cyclic_ids=forced_cyclic_ids,
     )
     c_avg, a_avg = _run_online_avggap_policy(
         default_conf=default_conf,
@@ -1049,6 +1337,7 @@ def _compute_curves_for_one_percentile(
         th1_percent=perc_value,
         th2_percent=perc_value,
         offline_prefix_n=0,
+        forced_cyclic_ids=forced_cyclic_ids,
     )
 
     curve_obj = {
@@ -1098,6 +1387,26 @@ def _log_baseline_report(curve_obj: dict):
             c0 = float(curve_obj[key]["costs"][0])
             a0 = float(curve_obj[key]["accuracies"][0])
             logger.info(f"BASELINE {key:<12} : cost={c0:.3f}, acc={a0:.4f}")
+
+
+def _log_named_report(name: str, curve_obj: dict):
+    """Same format as baseline report, but with custom header prefix."""
+    p = curve_obj.get("percentile")
+    logger.info(_purple(f"==== {name} Derived policy report (REAL-WORLD online, p={p}) ===="))
+
+    always = curve_obj.get("always", {})
+    if "default" in always:
+        logger.info(f"{name} default(ensemble) : cost={always['default']['cost']:.3f}, acc={always['default']['acc']:.4f}")
+    if "cyclic" in always:
+        logger.info(f"{name} cyclic(ensemble)  : cost={always['cyclic']['cost']:.3f}, acc={always['cyclic']['acc']:.4f}")
+    if "full" in always:
+        logger.info(f"{name} full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}")
+
+    for key in ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]:
+        if key in curve_obj:
+            c0 = float(curve_obj[key]["costs"][0])
+            a0 = float(curve_obj[key]["accuracies"][0])
+            logger.info(f"{name} {key:<12} : cost={c0:.3f}, acc={a0:.4f}")
 
 
 def main():
@@ -1166,6 +1475,7 @@ def main():
         # =========================
         eval_acc_records: List[dict] = []  # [{'subject':str,'corrects':int,'total':int,'acc':float}]
         derived_records_by_p: Dict[float, List[dict]] = {}  # p -> list of curve_obj (per subject)
+        derived_records_pride_by_p: Dict[float, List[dict]] = {}  # p -> list of PRIDE+OURS curve_obj (per subject)
 
         for subject in subjects[::1]:
             cached_path = f'{args.save_path}/{subject}.jsonl'
@@ -1435,6 +1745,100 @@ def main():
                     arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
                     arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
 
+                    # ---------- optional: PRIDE debiasing then run OUR policies on debiased probs ----------
+                    pride_enabled = bool(getattr(args, "pride_mix", False))
+                    pride_prior = None
+                    pride_meta = None
+                    if pride_enabled:
+                        # deterministic seed per subject for reproducibility
+                        seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)))
+                        pride_prior, pride_meta = _estimate_pride_prior_random_prefix_mean(
+                            per_sample_probs=per_sample_probs,
+                            cyclic_indices=cyclic_indices,
+                            k=k,
+                            prefix_ratio=float(getattr(args, "pride_prefix_ratio", 0.02)),
+                            seed=seed,
+                        )
+                        prefix_ids_set = set(int(x) for x in (pride_meta.get("prefix_ids") or []))
+                        logger.info(_purple(f"==== PRIDE prior estimated (random prefix {pride_meta.get('m')}/{pride_meta.get('N')}) ===="))
+                        logger.info(f"prior: {[float(x) for x in np.asarray(pride_prior, dtype=np.float64).tolist()]}")
+
+                        # Recall test: base-only predictions with debiased base row (argmax)
+                        try:
+                            base_labels = [option_ids.index(str(x)) for x in ideals]
+                            base_preds = []
+                            for i in range(len(per_sample_probs)):
+                                ps = np.asarray(per_sample_probs[i], dtype=np.float64)
+                                base_row = np.asarray(ps[identity_idx], dtype=np.float64)
+                                base_row_corr = _pride_correct_row(base_row, pride_prior)
+                                base_preds.append(int(np.argmax(base_row_corr)))
+                            rstd = _recall_std(base_labels, base_preds, k=k)
+                            logger.info(_purple(f"PRIDE recall_std (base-only, over labels): {rstd:.4f}"))
+                        except Exception:
+                            pass
+
+                        # build debiased correctness + gaps (same pipeline, but on corrected probs)
+                        base_correct_list_pr = []
+                        cyclic_correct_list_pr = []
+                        full_correct_list_pr = []
+                        default_conf_pr = []
+                        mean_gap_list_pr = []
+                        flip_trigger_mask_pr = []
+                        probe2_correct_list_pr = []
+
+                        for i in range(len(per_sample_probs)):
+                            ps = np.asarray(per_sample_probs[i], dtype=np.float64)
+                            ps_corr = np.asarray([_pride_correct_row(ps[j], pride_prior) for j in range(ps.shape[0])], dtype=np.float64)
+
+                            # cyclic ensemble (k rotations)
+                            cyc_probs_corr = [ps_corr[idx] for idx in cyclic_indices]
+                            agg_cyc_corr = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs_corr], cyc_perms, k)
+                            pred_cyc_corr = option_ids[int(np.argmax(agg_cyc_corr))]
+                            corr_cyc_corr = (pred_cyc_corr == ideals[i])
+                            cyclic_correct_list_pr.append(corr_cyc_corr)
+
+                            # base (identity)
+                            base_row_corr = np.asarray(ps_corr[identity_idx], dtype=np.float64)
+                            pred_base_corr = option_ids[int(np.argmax(base_row_corr))]
+                            corr_base_corr = (pred_base_corr == ideals[i])
+                            base_correct_list_pr.append(corr_base_corr)
+
+                            # full (if available)
+                            if full_enabled:
+                                agg_full_corr = _aggregate_probs_over_permutations(ps_corr, perm_list, k)
+                                pred_full_corr = option_ids[int(np.argmax(agg_full_corr))]
+                                full_correct_list_pr.append(pred_full_corr == ideals[i])
+
+                            # gaps + probe2
+                            vals = np.sort(base_row_corr)[::-1]
+                            top1 = float(vals[0]) if vals.shape[0] > 0 else 0.0
+                            top2 = float(vals[1]) if vals.shape[0] > 1 else 0.0
+                            default_conf_pr.append(top1 - top2)
+
+                            shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_row_corr, k)
+                            probe_perm_idx = cyclic_indices[shift]
+
+                            agg_base = _aggregate_probs_over_permutations([base_row_corr.tolist()], [tuple(range(k))], k)
+                            probe_row_corr = np.asarray(ps_corr[probe_perm_idx], dtype=np.float64)
+                            agg_probe = _aggregate_probs_over_permutations([probe_row_corr.tolist()], [cyc_perms[shift]], k)
+
+                            mean_probs = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_probe, dtype=np.float64)) / 2.0
+                            vals_mean = np.sort(mean_probs)[::-1]
+                            mean_gap = float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0
+                            mean_gap_list_pr.append(mean_gap)
+
+                            pred_base_cs = option_ids[int(np.argmax(agg_base))]
+                            pred_probe_cs = option_ids[int(np.argmax(agg_probe))]
+                            flip_trigger_mask_pr.append(pred_base_cs != pred_probe_cs)
+
+                            pred2 = option_ids[int(np.argmax(mean_probs))]
+                            probe2_correct_list_pr.append(pred2 == ideals[i])
+
+                        default_conf_pr = np.asarray(default_conf_pr, dtype=np.float64)
+                        mean_conf_pr = np.asarray(mean_gap_list_pr, dtype=np.float64)
+                        arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
+                        arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
+
                     # ---------- save cyclic/base derived results ----------
                     cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
                     if getattr(args, 'option_id_set', None):
@@ -1475,6 +1879,7 @@ def main():
                     perc_list = _parse_percent_value_list(perc_src)
                     curve_objs_baseline = []
                     baseline_by_p = {}
+                    curve_objs_pride = []
 
                     for perc in perc_list:
                         perc = float(perc)
@@ -1501,6 +1906,30 @@ def main():
                             # aggregate derived policy report over subjects (per p)
                             derived_records_by_p.setdefault(float(perc), []).append(cobj)
 
+                            # PRIDE+OURS (debiased probs) for the same p
+                            if pride_enabled and pride_prior is not None:
+                                cobj_pr = _compute_curves_for_one_percentile(
+                                    subject=subject,
+                                    tag="pride_mix",
+                                    k=k,
+                                    perm_list=perm_list,
+                                    base_correct_list=base_correct_list_pr,
+                                    cyclic_correct_list=cyclic_correct_list_pr,
+                                    full_correct_list=full_correct_list_pr if full_enabled else [],
+                                    default_conf=default_conf_pr,
+                                    mean_conf=mean_conf_pr,
+                                    flip_trigger=arr_flip_trigger_pr,
+                                    probe2_correct=arr_probe2_correct_pr,
+                                    perc_value=perc,
+                                    full_enabled=bool(full_enabled),
+                                    forced_cyclic_ids=prefix_ids_set,
+                                )
+                                if cobj_pr:
+                                    curve_objs_pride.append(cobj_pr)
+                                    _log_named_report("PRIDE+OURS", cobj_pr)
+                                    derived_records_pride_by_p.setdefault(float(perc), []).append(cobj_pr)
+                                    # NOTE: heuristic_points for PRIDE+OURS are filled below (after baseline_points helpers are defined)
+
                             # [ADD] Baseline Point Plot with 3 Rules
                             ptag = f"p{int(round(perc))}"
                             out_pts = os.path.join(curve_save_path, f"{subject}_{ptag}_baseline_points.png")
@@ -1520,6 +1949,21 @@ def main():
                                     k=k,
                                     th1_percent=float(th1_p),
                                     th2_rule_from_th1_value=rule_func,
+                                )
+                                return {'cost': c, 'acc': a, 'th2_p': float(th2p), 'label': label, 'marker': marker, 'color': color}
+
+                            # Helper for PRIDE+OURS heuristic points (same rules, but debiased stats + prefix overhead)
+                            def _get_static_pt_pride(th1_p, rule_func, label, marker, color):
+                                c, a, th2p = _run_online_th1_quantile_th2_from_th1_rule(
+                                    default_conf=default_conf_pr,
+                                    mean_conf=mean_conf_pr,
+                                    base_correct=base_correct_list_pr,
+                                    cyclic_correct=cyclic_correct_list_pr,
+                                    probe2_correct=arr_probe2_correct_pr,
+                                    k=k,
+                                    th1_percent=float(th1_p),
+                                    th2_rule_from_th1_value=rule_func,
+                                    forced_cyclic_ids=prefix_ids_set,
                                 )
                                 return {'cost': c, 'acc': a, 'th2_p': float(th2p), 'label': label, 'marker': marker, 'color': color}
 
@@ -1554,6 +1998,53 @@ def main():
                                 ]
                             except Exception:
                                 pass
+
+                            # PRIDE+OURS: attach heuristic points + overlay plot
+                            if pride_enabled and pride_prior is not None and 'cobj_pr' in locals() and cobj_pr:
+                                extra_pts_pr = []
+                                extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x: x / 2.0, 'th1/2', '*', 'gray'))
+                                extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x, kk=k: x / math.sqrt(float(kk)), 'th1/sqrt(k)', 'P', 'gray'))
+                                extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x: x ** 2, 'th1^2', 's', 'gray'))
+                                extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x: x ** 1.5, 'th1^1.5', '^', 'gray'))
+
+                                c_sqrt_pr, a_sqrt_pr, p_sqrt_pr = _run_online_sqrt_policy(
+                                    default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr, arr_probe2_correct_pr,
+                                    k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set
+                                )
+                                extra_pts_pr.append({'cost': c_sqrt_pr, 'acc': a_sqrt_pr, 'th2_p': float(p_sqrt_pr), 'label': 'Online Sqrt (All)', 'marker': 'D', 'color': 'orange'})
+
+                                c_sqrt_lc_pr, a_sqrt_lc_pr, p_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update(
+                                    default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr, arr_probe2_correct_pr,
+                                    k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set
+                                )
+                                extra_pts_pr.append({'cost': c_sqrt_lc_pr, 'acc': a_sqrt_lc_pr, 'th2_p': float(p_sqrt_lc_pr), 'label': 'Online Sqrt (LowConf-only)', 'marker': 'X', 'color': 'orange'})
+
+                                try:
+                                    cobj_pr["heuristic_points"] = [
+                                        {
+                                            "label": str(hp.get("label")),
+                                            "cost": float(hp.get("cost")),
+                                            "acc": float(hp.get("acc")),
+                                            "th2_p": float(hp.get("th2_p", float("nan"))),
+                                        }
+                                        for hp in (extra_pts_pr or [])
+                                    ]
+                                except Exception:
+                                    pass
+
+                                out_cmp = os.path.join(curve_save_path, f"{subject}_{ptag}_baseline_vs_pride_points.png")
+                                _plot_baseline_vs_pride_points_scatter(
+                                    baseline_obj=cobj,
+                                    pride_obj=cobj_pr,
+                                    out_path=out_cmp,
+                                    title=f"{args.task} {subject} — Baseline vs PRIDE+OURS (REAL-WORLD online, {ptag})",
+                                )
+                                if wandb_ok and wandb_run is not None:
+                                    try:
+                                        import wandb
+                                        wandb_run.log({f"plots/{subject}/{ptag}/baseline_vs_pride_points": wandb.Image(out_cmp)})
+                                    except Exception:
+                                        pass
 
                             # [ADD] log heuristic point performances (no plot annotation)
                             try:
@@ -1602,6 +2093,8 @@ def main():
                             pass
 
                     save_results(f'{curve_save_path}/{subject}_curve.jsonl', curve_objs_baseline, metrics=None)
+                    if pride_enabled and len(curve_objs_pride) > 0:
+                        save_results(f'{curve_save_path}/{subject}_pride_curve.jsonl', curve_objs_pride, metrics=None)
 
                     # =========================================================
                     # th2 trade-off plot: th1 (5, 10, 20, 30)에 대해 각각 th2 (5, 10, 20, 30) curve
@@ -1713,6 +2206,130 @@ def main():
                         wsum = float(np.sum(ws_f))
                         acc_micro = float(np.sum([a * w for a, w in zip(accs_f, ws_f)]) / wsum) if wsum > 0 else float("nan")
                         logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+
+        # Aggregate PRIDE+OURS derived-policy summary (if enabled)
+        if len(derived_records_pride_by_p) > 0:
+            # For plotting: delta cost per p (policies + heuristics)
+            delta_cost_policies_by_p: Dict[float, Dict[str, float]] = {}
+            delta_cost_heur_by_p: Dict[float, Dict[str, float]] = {}
+
+            for p, cobjs in sorted(derived_records_pride_by_p.items(), key=lambda t: t[0]):
+                keys = ["default", "cyclic", "full", "switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
+                logger.info(_purple(f"==== AGGREGATE PRIDE+OURS Derived policy report (REAL-WORLD online, p={p}) ===="))
+                for key in keys:
+                    accs = []
+                    costs = []
+                    ws = []
+                    for cobj in cobjs:
+                        n = int(cobj.get("n_samples", 0)) or 0
+                        if key in ["default", "cyclic", "full"]:
+                            always = cobj.get("always", {}) or {}
+                            if key not in always:
+                                continue
+                            costs.append(float(always[key]["cost"]))
+                            accs.append(float(always[key]["acc"]))
+                        else:
+                            if key not in cobj:
+                                continue
+                            costs.append(float(cobj[key]["costs"][0]))
+                            accs.append(float(cobj[key]["accuracies"][0]))
+                        ws.append(n if n > 0 else 1)
+
+                    if len(accs) == 0:
+                        continue
+                    cost_macro = float(np.mean(costs))
+                    acc_macro = float(np.mean(accs))
+                    wsum = float(np.sum(ws))
+                    acc_micro = float(np.sum([a * w for a, w in zip(accs, ws)]) / wsum) if wsum > 0 else float("nan")
+                    logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+
+                # cost overhead vs BASELINE (macro)
+                if float(p) in derived_records_by_p:
+                    try:
+                        base_cobjs = derived_records_by_p[float(p)]
+                        logger.info(_purple(f"---- Prefix overhead Δcost (PRIDE+OURS - BASELINE), p={p} ----"))
+                        for key in keys:
+                            base_costs = []
+                            pride_costs = []
+                            for b, pr in zip(base_cobjs, cobjs):
+                                if key in ["default", "cyclic", "full"]:
+                                    if key in (b.get("always", {}) or {}) and key in (pr.get("always", {}) or {}):
+                                        base_costs.append(float(b["always"][key]["cost"]))
+                                        pride_costs.append(float(pr["always"][key]["cost"]))
+                                else:
+                                    if key in b and key in pr:
+                                        base_costs.append(float(b[key]["costs"][0]))
+                                        pride_costs.append(float(pr[key]["costs"][0]))
+                            if len(base_costs) == 0 or len(pride_costs) == 0:
+                                continue
+                            d = float(np.mean(np.asarray(pride_costs, dtype=np.float64) - np.asarray(base_costs, dtype=np.float64)))
+                            logger.info(f"{key:<14}: Δcost≈{d:+.3f}")
+                            delta_cost_policies_by_p.setdefault(float(p), {})[str(key)] = float(d)
+
+                        # Heuristic delta-costs (if present on both)
+                        heur_labels = set()
+                        for b, pr in zip(base_cobjs, cobjs):
+                            for hp in (b.get("heuristic_points", []) or []):
+                                if isinstance(hp, dict) and hp.get("label") is not None:
+                                    heur_labels.add(str(hp.get("label")))
+                        for lab in sorted(list(heur_labels)):
+                            bcosts = []
+                            pcosts = []
+                            for b, pr in zip(base_cobjs, cobjs):
+                                bmap = {str(h.get("label")): h for h in (b.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                                pmap = {str(h.get("label")): h for h in (pr.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                                if lab not in bmap or lab not in pmap:
+                                    continue
+                                bcosts.append(float(bmap[lab].get("cost", float("nan"))))
+                                pcosts.append(float(pmap[lab].get("cost", float("nan"))))
+                            filt = [(bb, pp) for bb, pp in zip(bcosts, pcosts) if np.isfinite(bb) and np.isfinite(pp)]
+                            if len(filt) == 0:
+                                continue
+                            bb = np.asarray([t[0] for t in filt], dtype=np.float64)
+                            pp = np.asarray([t[1] for t in filt], dtype=np.float64)
+                            d2 = float(np.mean(pp - bb))
+                            delta_cost_heur_by_p.setdefault(float(p), {})[str(lab)] = float(d2)
+                    except Exception:
+                        pass
+
+            # ---- Save Δcost bar plots (policies + heuristics) ----
+            try:
+                out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
+                if getattr(args, 'option_id_set', None):
+                    out_dir += f"_id-{args.option_id_set}"
+                os.makedirs(out_dir, exist_ok=True)
+
+                if len(delta_cost_policies_by_p) > 0:
+                    out_png = os.path.join(out_dir, f"{args.task}_aggregate_pride_prefix_delta_cost_POLICIES.png")
+                    _plot_delta_cost_bars_by_p(
+                        delta_cost_by_p=delta_cost_policies_by_p,
+                        out_path=out_png,
+                        title=f"{args.task} — Prefix overhead ΔCost by p (Policies)",
+                    )
+                    logger.info(_purple(f"Saved Δcost bar plot (policies): {out_png}"))
+                    if wandb_ok and wandb_run is not None:
+                        try:
+                            import wandb
+                            wandb_run.log({f"plots/{args.task}/aggregate/prefix_delta_cost_policies": wandb.Image(out_png)})
+                        except Exception:
+                            pass
+
+                if len(delta_cost_heur_by_p) > 0:
+                    out_png = os.path.join(out_dir, f"{args.task}_aggregate_pride_prefix_delta_cost_HEURISTICS.png")
+                    _plot_delta_cost_bars_by_p(
+                        delta_cost_by_p=delta_cost_heur_by_p,
+                        out_path=out_png,
+                        title=f"{args.task} — Prefix overhead ΔCost by p (Heuristics)",
+                    )
+                    logger.info(_purple(f"Saved Δcost bar plot (heuristics): {out_png}"))
+                    if wandb_ok and wandb_run is not None:
+                        try:
+                            import wandb
+                            wandb_run.log({f"plots/{args.task}/aggregate/prefix_delta_cost_heuristics": wandb.Image(out_png)})
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
     # -------- finalize W&B --------
     try:

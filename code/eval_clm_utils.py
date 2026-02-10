@@ -79,6 +79,16 @@ def parse_arguments():
                         help="If (top1 - top2) / top1 <= this, treat as 'very ambiguous' and send directly to cyclic (use 0.0 to disable).")
 
     # =========================================================
+    # [ADD] Simple PRIDE (PriDe) mixing knobs (online-friendly)
+    # =========================================================
+    parser.add_argument("--pride_mix", action="store_true",
+                        help="Enable PRIDE debiasing then run OUR online policies on debiased probs (for comparison).")
+    parser.add_argument("--pride_prefix_ratio", type=float, default=0.02,
+                        help="Random prefix ratio used to estimate PRIDE prior (default=0.02).")
+    parser.add_argument("--pride_seed", type=int, default=0,
+                        help="Seed for PRIDE random prefix sampling (default=0).")
+
+    # =========================================================
     # [ADD] AvgGap(PSEUDO, ONLINE) knobs (eval_clm.py에서 getattr로 쓰는 것들)
     # =========================================================
     # debug: allow usage like --ours_debug_mad 1
