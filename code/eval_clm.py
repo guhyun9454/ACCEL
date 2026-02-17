@@ -2742,7 +2742,7 @@ def main():
                     arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
 
                     # ---------- optional: PRIDE debiasing then run OUR policies on debiased probs ----------
-                    pride_enabled = bool(getattr(args, "pride_mix", False)) or bool(getattr(args, "pride_only", False))
+                    pride_enabled = bool(getattr(args, "pride_mix", False))
                     pride_prior = None
                     pride_meta = None
                     if pride_enabled:
@@ -2756,8 +2756,6 @@ def main():
                             seed=seed,
                         )
                         prefix_ids_set = set(int(x) for x in (pride_meta.get("prefix_ids") or []))
-                        N_pride = len(per_sample_probs)
-                        pride_forced_ids = set(range(N_pride)) if getattr(args, "pride_only", False) else prefix_ids_set
                         logger.info(_purple(f"==== PRIDE prior estimated (random prefix {pride_meta.get('m')}/{pride_meta.get('N')}) ===="))
                         logger.info(f"prior: {[float(x) for x in np.asarray(pride_prior, dtype=np.float64).tolist()]}")
 
@@ -2914,12 +2912,10 @@ def main():
                             derived_records_by_p.setdefault(float(perc), []).append(cobj)
 
                             # PRIDE+OURS (debiased probs) for the same p
-                            # pride_only: 모든 샘플 cyclic (forced_cyclic_ids=전체). pride_mix: prefix만 cyclic.
                             if pride_enabled and pride_prior is not None:
-                                pride_tag = "pride_only" if getattr(args, "pride_only", False) else "pride_mix"
                                 cobj_pr = _compute_curves_for_one_percentile(
                                     subject=subject,
-                                    tag=pride_tag,
+                                    tag="pride_mix",
                                     k=k,
                                     perm_list=perm_list,
                                     base_correct_list=base_correct_list_pr,
@@ -2931,7 +2927,7 @@ def main():
                                     probe2_correct=arr_probe2_correct_pr,
                                     perc_value=perc,
                                     full_enabled=bool(full_enabled),
-                                    forced_cyclic_ids=pride_forced_ids,
+                                    forced_cyclic_ids=prefix_ids_set,
                                 )
                                 if cobj_pr:
                                     curve_objs_pride.append(cobj_pr)
@@ -2951,7 +2947,7 @@ def main():
                                                 cobj_pr["full"] = dict(cobj["full"])
                                     except Exception:
                                         pass
-                                    _log_named_report("PRIDE+OURS" if not getattr(args, "pride_only", False) else "PRIDE only (cyclic)", cobj_pr)
+                                    _log_named_report("PRIDE+OURS", cobj_pr)
                                     derived_records_pride_by_p.setdefault(float(perc), []).append(cobj_pr)
                                     # NOTE: heuristic_points for PRIDE+OURS are filled below (after baseline_points helpers are defined)
 
@@ -3094,7 +3090,7 @@ def main():
                                         "rstd": float(_recall_std(labels_idx, cyclic_pred_idx_list_pr, k=k))
                                     })
 
-                                    # PRIDE: switch_cyclic (pride_only시 모두 cyclic)
+                                    # PRIDE: switch_cyclic
                                     _, _, preds_sc_pr = _run_online_switch_cyclic_with_preds(
                                         default_conf=default_conf_pr,
                                         base_pred_idx=base_pred_idx_list_pr,
@@ -3103,9 +3099,9 @@ def main():
                                         k=k,
                                         th1_percent=float(perc),
                                         offline_prefix_n=0,
-                                        forced_cyclic_ids=pride_forced_ids,
+                                        forced_cyclic_ids=prefix_ids_set,
                                     )
-                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "switch_cyclic", "kind": "PRIDE+OURS" if not getattr(args, "pride_only", False) else "PRIDE only", "rstd": float(_recall_std(labels_idx, preds_sc_pr, k=k))})
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "switch_cyclic", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_sc_pr, k=k))})
 
                                     _, _, preds_avg_pr = _run_online_avggap_policy_with_preds(
                                         default_conf=default_conf_pr,
@@ -3118,11 +3114,11 @@ def main():
                                         th1_percent=float(perc),
                                         th2_percent=float(perc),
                                         offline_prefix_n=0,
-                                        forced_cyclic_ids=pride_forced_ids,
+                                        forced_cyclic_ids=prefix_ids_set,
                                     )
-                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "ours_avggap", "kind": "PRIDE+OURS" if not getattr(args, "pride_only", False) else "PRIDE only", "rstd": float(_recall_std(labels_idx, preds_avg_pr, k=k))})
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "ours_avggap", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_avg_pr, k=k))})
 
-                                    # PRIDE: heuristic points (pride_only시 모두 cyclic)
+                                    # PRIDE: heuristic points
                                     _, _, _, preds_h1_pr = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
                                         default_conf=default_conf_pr,
                                         mean_conf=mean_conf_pr,
@@ -3133,9 +3129,9 @@ def main():
                                         k=k,
                                         th1_percent=float(perc),
                                         th2_rule_from_th1_value=lambda x: x / 2.0,
-                                        forced_cyclic_ids=pride_forced_ids,
+                                        forced_cyclic_ids=prefix_ids_set,
                                     )
-                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1/2", "kind": "PRIDE+OURS" if not getattr(args, "pride_only", False) else "PRIDE only", "rstd": float(_recall_std(labels_idx, preds_h1_pr, k=k))})
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1/2", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_h1_pr, k=k))})
 
                                     _, _, _, preds_hk_pr = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
                                         default_conf=default_conf_pr,
@@ -3147,9 +3143,9 @@ def main():
                                         k=k,
                                         th1_percent=float(perc),
                                         th2_rule_from_th1_value=lambda x, kk=k: x / math.sqrt(float(kk)),
-                                        forced_cyclic_ids=pride_forced_ids,
+                                        forced_cyclic_ids=prefix_ids_set,
                                     )
-                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1/sqrt(k)", "kind": "PRIDE+OURS" if not getattr(args, "pride_only", False) else "PRIDE only", "rstd": float(_recall_std(labels_idx, preds_hk_pr, k=k))})
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1/sqrt(k)", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_hk_pr, k=k))})
 
                                     _, _, _, preds_sq_pr = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
                                         default_conf=default_conf_pr,
@@ -3161,9 +3157,9 @@ def main():
                                         k=k,
                                         th1_percent=float(perc),
                                         th2_rule_from_th1_value=lambda x: x ** 2,
-                                        forced_cyclic_ids=pride_forced_ids,
+                                        forced_cyclic_ids=prefix_ids_set,
                                     )
-                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1^2", "kind": "PRIDE+OURS" if not getattr(args, "pride_only", False) else "PRIDE only", "rstd": float(_recall_std(labels_idx, preds_sq_pr, k=k))})
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1^2", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_sq_pr, k=k))})
 
                                     _, _, _, preds_pow_pr = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
                                         default_conf=default_conf_pr,
@@ -3175,9 +3171,9 @@ def main():
                                         k=k,
                                         th1_percent=float(perc),
                                         th2_rule_from_th1_value=lambda x: x ** 1.5,
-                                        forced_cyclic_ids=pride_forced_ids,
+                                        forced_cyclic_ids=prefix_ids_set,
                                     )
-                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1^1.5", "kind": "PRIDE+OURS" if not getattr(args, "pride_only", False) else "PRIDE only", "rstd": float(_recall_std(labels_idx, preds_pow_pr, k=k))})
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "th1^1.5", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_pow_pr, k=k))})
 
                                     _, _, preds_sqrt_pr = _run_online_sqrt_policy_with_preds(
                                         default_conf=default_conf_pr,
@@ -3188,9 +3184,9 @@ def main():
                                         labels_idx=labels_idx,
                                         k=k,
                                         th1_percent=float(perc),
-                                        forced_cyclic_ids=pride_forced_ids,
+                                        forced_cyclic_ids=prefix_ids_set,
                                     )
-                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "Online Sqrt (All)", "kind": "PRIDE+OURS" if not getattr(args, "pride_only", False) else "PRIDE only", "rstd": float(_recall_std(labels_idx, preds_sqrt_pr, k=k))})
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "Online Sqrt (All)", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_sqrt_pr, k=k))})
 
                                     _, _, preds_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update_with_preds(
                                         default_conf=default_conf_pr,
@@ -3201,9 +3197,9 @@ def main():
                                         labels_idx=labels_idx,
                                         k=k,
                                         th1_percent=float(perc),
-                                        forced_cyclic_ids=pride_forced_ids,
+                                        forced_cyclic_ids=prefix_ids_set,
                                     )
-                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "Online Sqrt (LowConf-only)", "kind": "PRIDE+OURS" if not getattr(args, "pride_only", False) else "PRIDE only", "rstd": float(_recall_std(labels_idx, preds_sqrt_lc_pr, k=k))})
+                                    recall_std_vs_p_records.append({"subject": str(subject), "p": float(perc), "method": "Online Sqrt (LowConf-only)", "kind": "PRIDE+OURS", "rstd": float(_recall_std(labels_idx, preds_sqrt_lc_pr, k=k))})
                             except Exception:
                                 pass
 
@@ -3240,7 +3236,7 @@ def main():
                                     k=k,
                                     th1_percent=float(th1_p),
                                     th2_rule_from_th1_value=rule_func,
-                                    forced_cyclic_ids=pride_forced_ids,
+                                    forced_cyclic_ids=prefix_ids_set,
                                 )
                                 return {'cost': c, 'acc': a, 'th2_p': float(th2p), 'label': label, 'marker': marker, 'color': color}
 
@@ -3288,13 +3284,13 @@ def main():
 
                                 c_sqrt_pr, a_sqrt_pr, p_sqrt_pr = _run_online_sqrt_policy(
                                     default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr, arr_probe2_correct_pr,
-                                    k, th1_percent=perc, forced_cyclic_ids=pride_forced_ids
+                                    k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set
                                 )
                                 extra_pts_pr.append({'cost': c_sqrt_pr, 'acc': a_sqrt_pr, 'th2_p': float(p_sqrt_pr), 'label': 'Online Sqrt (All)', 'marker': 'D', 'color': 'orange'})
 
                                 c_sqrt_lc_pr, a_sqrt_lc_pr, p_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update(
                                     default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr, arr_probe2_correct_pr,
-                                    k, th1_percent=perc, forced_cyclic_ids=pride_forced_ids
+                                    k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set
                                 )
                                 extra_pts_pr.append({'cost': c_sqrt_lc_pr, 'acc': a_sqrt_lc_pr, 'th2_p': float(p_sqrt_lc_pr), 'label': 'Online Sqrt (LowConf-only)', 'marker': 'X', 'color': 'orange'})
 
@@ -3477,9 +3473,9 @@ def main():
                                 args=args,
                                 wandb_ok=wandb_ok,
                                 wandb_run=wandb_run,
-                                plot_tag="PRIDE+OURS (debiased)" if not getattr(args, "pride_only", False) else "PRIDE only (cyclic)",
+                                plot_tag="PRIDE+OURS (debiased)",
                                 fname_tag="PRIDE",
-                                forced_cyclic_ids=pride_forced_ids,
+                                forced_cyclic_ids=prefix_ids_set,
                             )
                             _plot_th2_tradeoff_curve_compare(
                                 subject=subject,
@@ -3499,7 +3495,7 @@ def main():
                                 args=args,
                                 wandb_ok=wandb_ok,
                                 wandb_run=wandb_run,
-                                forced_cyclic_ids_pr=pride_forced_ids,
+                                forced_cyclic_ids_pr=prefix_ids_set,
                             )
 
                 except Exception as e:
