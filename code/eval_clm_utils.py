@@ -83,6 +83,8 @@ def parse_arguments():
     # =========================================================
     parser.add_argument("--pride_mix", action="store_true",
                         help="Enable PRIDE debiasing then run OUR online policies on debiased probs (for comparison).")
+    parser.add_argument("--pride_only", action="store_true",
+                        help="PRIDE debiasing only: apply prior correction, then use cyclic for ALL samples (prefix+postfix). No switch/ours policies.")
     parser.add_argument("--pride_prefix_ratio", type=float, default=0.02,
                         help="Random prefix ratio used to estimate PRIDE prior (default=0.02).")
     parser.add_argument("--pride_seed", type=int, default=0,
