@@ -4089,6 +4089,7 @@ def main():
                         costs = []
                         accs = []
                         ws = []
+                        n_bases, n_probe2s, n_cyclics, rstds = [], [], [], []
                         for cobj in cobjs:
                             n = int(cobj.get("n_samples", 0)) or 0
                             hp_map = {str(h.get("label")): h for h in (cobj.get("heuristic_points", []) or []) if isinstance(h, dict)}
@@ -4098,6 +4099,14 @@ def main():
                             costs.append(float(h.get("cost", float("nan"))))
                             accs.append(float(h.get("acc", float("nan"))))
                             ws.append(n if n > 0 else 1)
+                            if "n_base" in h and h["n_base"] is not None:
+                                n_bases.append(int(h["n_base"]))
+                            if "n_probe2" in h and h["n_probe2"] is not None:
+                                n_probe2s.append(int(h["n_probe2"]))
+                            if "n_cyclic" in h and h["n_cyclic"] is not None:
+                                n_cyclics.append(int(h["n_cyclic"]))
+                            if "recall_std" in h and isinstance(h.get("recall_std"), (int, float)):
+                                rstds.append(float(h["recall_std"]))
                         # filter out nans
                         filt = [(c, a, w) for c, a, w in zip(costs, accs, ws) if (not np.isnan(c)) and (not np.isnan(a))]
                         if len(filt) == 0:
@@ -4112,6 +4121,10 @@ def main():
                         line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
                         if not single_subject:
                             line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}"
+                        if len(n_bases) == len(costs_f) and len(n_probe2s) == len(costs_f) and len(n_cyclics) == len(costs_f):
+                            line += f", n_base≈{int(np.mean(n_bases)):.0f}, n_probe2≈{int(np.mean(n_probe2s)):.0f}, n_cyclic≈{int(np.mean(n_cyclics)):.0f}"
+                        if len(rstds) > 0:
+                            line += f", recall_std={float(np.mean(rstds)):.4f}"
                         logger.info(line)
 
         # Main figure: Cost vs Accuracy (SLM improvement)
@@ -4182,6 +4195,7 @@ def main():
                         costs = []
                         accs = []
                         ws = []
+                        n_bases, n_probe2s, n_cyclics, rstds = [], [], [], []
                         for cobj in cobjs:
                             n = int(cobj.get("n_samples", 0)) or 0
                             hp_map = {str(h.get("label")): h for h in (cobj.get("heuristic_points", []) or []) if isinstance(h, dict)}
@@ -4191,6 +4205,14 @@ def main():
                             costs.append(float(h.get("cost", float("nan"))))
                             accs.append(float(h.get("acc", float("nan"))))
                             ws.append(n if n > 0 else 1)
+                            if "n_base" in h and h["n_base"] is not None:
+                                n_bases.append(int(h["n_base"]))
+                            if "n_probe2" in h and h["n_probe2"] is not None:
+                                n_probe2s.append(int(h["n_probe2"]))
+                            if "n_cyclic" in h and h["n_cyclic"] is not None:
+                                n_cyclics.append(int(h["n_cyclic"]))
+                            if "recall_std" in h and isinstance(h.get("recall_std"), (int, float)):
+                                rstds.append(float(h["recall_std"]))
                         filt = [(c, a, w) for c, a, w in zip(costs, accs, ws) if (not np.isnan(c)) and (not np.isnan(a))]
                         if len(filt) == 0:
                             continue
@@ -4201,16 +4223,21 @@ def main():
                         acc_macro = float(np.mean(accs_f))
                         wsum = float(np.sum(ws_f))
                         acc_micro = float(np.sum([a * w for a, w in zip(accs_f, ws_f)]) / wsum) if wsum > 0 else float("nan")
-                        if single_subject:
-                            logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}")
-                        else:
-                            logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+                        line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
+                        if not single_subject:
+                            line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}"
+                        if len(n_bases) == len(costs_f) and len(n_probe2s) == len(costs_f) and len(n_cyclics) == len(costs_f):
+                            line += f", n_base≈{int(np.mean(n_bases)):.0f}, n_probe2≈{int(np.mean(n_probe2s)):.0f}, n_cyclic≈{int(np.mean(n_cyclics)):.0f}"
+                        if len(rstds) > 0:
+                            line += f", recall_std={float(np.mean(rstds)):.4f}"
+                        logger.info(line)
 
-                # cost/acc overhead vs BASELINE (verbose only; can be long)
-                if bool(getattr(args, "verbose", False)) and float(p) in derived_records_by_p:
+                # cost/acc overhead vs BASELINE (Δ data always for plots; extra log when verbose)
+                if float(p) in derived_records_by_p:
                     try:
                         base_cobjs = derived_records_by_p[float(p)]
-                        logger.info(_purple(f"---- Prefix overhead Δcost (PRIDE+OURS - BASELINE), p={p} ----"))
+                        if bool(getattr(args, "verbose", False)):
+                            logger.info(_purple(f"---- Prefix overhead Δcost (PRIDE+OURS - BASELINE), p={p} ----"))
                         for key in keys:
                             base_costs = []
                             pride_costs = []
@@ -4226,7 +4253,8 @@ def main():
                             if len(base_costs) == 0 or len(pride_costs) == 0:
                                 continue
                             d = float(np.mean(np.asarray(pride_costs, dtype=np.float64) - np.asarray(base_costs, dtype=np.float64)))
-                            logger.info(f"{key:<14}: Δcost≈{d:+.3f}")
+                            if bool(getattr(args, "verbose", False)):
+                                logger.info(f"{key:<14}: Δcost≈{d:+.3f}")
                             delta_cost_policies_by_p.setdefault(float(p), {})[str(key)] = float(d)
 
                             # Δacc (macro over subjects)
