@@ -273,6 +273,47 @@ def _run_online_switch_cyclic_with_preds(
     return total_cost / float(N), corrects / float(N), preds
 
 
+def _run_online_switch_cyclic_with_stats(
+    default_conf: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, Dict[str, int]]:
+    """Returns (cost, acc, {n_base, n_cyclic})."""
+    N = len(base_correct)
+    if N == 0:
+        return float("nan"), float("nan"), {"n_base": 0, "n_cyclic": 0}
+    dc = np.asarray(default_conf, dtype=np.float64)
+    q1 = float(th1_percent) / 100.0
+    total_cost, corrects = 0.0, 0
+    n_base, n_cyclic = 0, 0
+    past_dc: List[float] = []
+    for i in range(N):
+        gap_i = float(dc[i])
+        if i < int(offline_prefix_n):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+            past_dc.append(gap_i)
+            continue
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q1)) if len(past_dc) > 0 else 0.0
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+        if is_forced or gap_i < th1_val:
+            c_step = float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+            n_cyclic += 1
+        else:
+            c_step = 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+        total_cost += float(c_step)
+        past_dc.append(gap_i)
+    return total_cost / float(N), corrects / float(N), {"n_base": int(n_base), "n_cyclic": int(n_cyclic)}
+
+
 def _run_online_sqrt_policy_with_preds(
     default_conf: np.ndarray,
     mean_conf: np.ndarray,
@@ -716,6 +757,50 @@ def _plot_baseline_vs_pride_points_scatter(
     plt.tight_layout()
     plt.savefig(out_path)
     plt.close()
+
+
+def _plot_main_figure_cost_vs_acc(
+    derived_records_by_p: Dict[float, List[dict]],
+    out_path: str,
+    task: str,
+):
+    """
+    Main figure: Cost vs Accuracy trade-off — SLM improvement via cascading policy.
+    Shows default (cost≈1), cyclic (cost=k), and our policies achieving Pareto improvement.
+    """
+    if not derived_records_by_p or len(derived_records_by_p) == 0:
+        return
+    fig, ax = plt.subplots(figsize=(10, 6.5), dpi=180)
+    keys = ["default", "cyclic", "switch_cyclic", "ours_top2flip", "ours_avggap"]
+    colors = {"default": "#2ca02c", "cyclic": "#1f77b4", "switch_cyclic": "#ff7f0e", "ours_top2flip": "#d62728", "ours_avggap": "#9467bd"}
+    markers = {"default": "o", "cyclic": "s", "switch_cyclic": "^", "ours_top2flip": "v", "ours_avggap": "D"}
+    for key in keys:
+        costs_all, accs_all = [], []
+        for p, cobjs in sorted(derived_records_by_p.items(), key=lambda t: t[0]):
+            for cobj in cobjs:
+                n = int(cobj.get("n_samples", 0)) or 1
+                if key in ["default", "cyclic"]:
+                    always = cobj.get("always", {}) or {}
+                    if key not in always:
+                        continue
+                    costs_all.append(float(always[key]["cost"]))
+                    accs_all.append(float(always[key]["acc"]) * 100.0)
+                elif key in cobj:
+                    costs_all.append(float(cobj[key]["costs"][0]))
+                    accs_all.append(float(cobj[key]["accuracies"][0]) * 100.0)
+        if len(costs_all) > 0 and len(accs_all) > 0:
+            c_mean = float(np.mean(costs_all))
+            a_mean = float(np.mean(accs_all))
+            ax.scatter(c_mean, a_mean, marker=markers.get(key, "o"), s=120, c=colors.get(key, "gray"),
+                       label=key, zorder=5, edgecolors="black", linewidths=0.8)
+    ax.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
+    ax.set_ylabel("Accuracy (%)", fontsize=11)
+    ax.set_title(f"{task} — Cost vs Accuracy (SLM cascading policy)", fontsize=12)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend(loc="lower right", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _plot_delta_cost_bars_by_p(
@@ -1575,6 +1660,55 @@ def _run_online_th1_quantile_th2_from_th1_rule_with_stats(
     return total_cost / float(N), corrects / float(N), float(final_th2_perc), {"n_base": int(n_base), "n_probe2": int(n_probe2), "n_cyclic": int(n_cyclic)}
 
 
+def _run_online_top2flip_policy_with_preds(
+    default_conf: np.ndarray,
+    flip_trigger: np.ndarray,
+    base_pred_idx: List[int],
+    cyclic_pred_idx: List[int],
+    probe2_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, List[int]]:
+    """Returns (cost, acc, preds)."""
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), []
+    dc = np.asarray(default_conf, dtype=np.float64)
+    flip = np.asarray(flip_trigger, dtype=bool)
+    q = float(th1_percent) / 100.0
+    total_cost, corrects = 0.0, 0
+    preds: List[int] = []
+    past_dc: List[float] = []
+    for i in range(N):
+        gap_i = float(dc[i])
+        if i < int(offline_prefix_n):
+            pred_i = int(base_pred_idx[i])
+            preds.append(pred_i)
+            total_cost += 1.0
+            corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+            past_dc.append(gap_i)
+            continue
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+        if is_forced:
+            pred_i = int(cyclic_pred_idx[i])
+        elif gap_i >= th1_val:
+            pred_i = int(base_pred_idx[i])
+        elif bool(flip[i]):
+            pred_i = int(cyclic_pred_idx[i])
+        else:
+            pred_i = int(probe2_pred_idx[i])
+        preds.append(pred_i)
+        c_step = float(k) if (is_forced or (gap_i < th1_val and bool(flip[i]))) else (1.0 if gap_i >= th1_val else 2.0)
+        total_cost += c_step
+        corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+        past_dc.append(gap_i)
+    return total_cost / float(N), corrects / float(N), preds
+
+
 def _run_online_top2flip_policy(
     default_conf: np.ndarray,
     flip_trigger: np.ndarray,
@@ -1638,6 +1772,57 @@ def _run_online_top2flip_policy(
         past_gaps.append(gap_i)
 
     return total_cost / float(N), corrects / float(N)
+
+
+def _run_online_top2flip_policy_with_stats(
+    default_conf: np.ndarray,
+    flip_trigger: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, Dict[str, int]]:
+    """Returns (cost, acc, {n_base, n_cyclic, n_probe2}). th1 pass->base; th1 fail & flip->cyclic; th1 fail & no flip->probe2."""
+    N = len(base_correct)
+    if N == 0:
+        return float("nan"), float("nan"), {"n_base": 0, "n_cyclic": 0, "n_probe2": 0}
+    dc = np.asarray(default_conf, dtype=np.float64)
+    flip = np.asarray(flip_trigger, dtype=bool)
+    q = float(th1_percent) / 100.0
+    total_cost, corrects = 0.0, 0
+    n_base, n_cyclic, n_probe2 = 0, 0, 0
+    past_dc: List[float] = []
+    for i in range(N):
+        gap_i = float(dc[i])
+        if i < int(offline_prefix_n):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+            past_dc.append(gap_i)
+            continue
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+        if is_forced:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+            n_cyclic += 1
+        elif gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+        elif bool(flip[i]):
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+            n_cyclic += 1
+        else:
+            total_cost += 2.0
+            corrects += 1 if bool(probe2_correct[i]) else 0
+            n_probe2 += 1
+        past_dc.append(gap_i)
+    return total_cost / float(N), corrects / float(N), {"n_base": int(n_base), "n_cyclic": int(n_cyclic), "n_probe2": int(n_probe2)}
 
 
 def _run_online_avggap_policy(
@@ -2198,6 +2383,10 @@ def _compute_curves_for_one_percentile(
     perc_value: float,
     full_enabled: bool = True,
     forced_cyclic_ids: Optional[set] = None,
+    labels_idx: Optional[List[int]] = None,
+    base_pred_idx: Optional[List[int]] = None,
+    cyclic_pred_idx: Optional[List[int]] = None,
+    probe2_pred_idx: Optional[List[int]] = None,
 ) -> dict:
     """
     REAL-WORLD online evaluation (no beta / no offline prefix).
@@ -2284,13 +2473,33 @@ def _compute_curves_for_one_percentile(
     switch_full_cost = (total_cost_sf / float(N)) if (full_enabled and len(full_correct_list) == N) else float("nan")
     switch_full_acc = (corrects_sf / float(N)) if (full_enabled and len(full_correct_list) == N) else float("nan")
 
-    # 2) ours_top2flip / ours_avggap (REAL-WORLD online)
+    # 2) ours_top2flip / ours_avggap (REAL-WORLD online) + stats
+    _, _, top2_stats = _run_online_top2flip_policy_with_stats(
+        default_conf=default_conf,
+        flip_trigger=flip_trigger,
+        base_correct=base_correct_list,
+        cyclic_correct=cyclic_correct_list,
+        probe2_correct=probe2_correct,
+        k=k,
+        th1_percent=perc_value,
+        offline_prefix_n=0,
+        forced_cyclic_ids=forced_cyclic_ids,
+    )
     c_top2, a_top2 = _run_online_top2flip_policy(
         default_conf=default_conf,
         flip_trigger=flip_trigger,
         base_correct=base_correct_list,
         cyclic_correct=cyclic_correct_list,
         probe2_correct=probe2_correct,
+        k=k,
+        th1_percent=perc_value,
+        offline_prefix_n=0,
+        forced_cyclic_ids=forced_cyclic_ids,
+    )
+    _, _, sc_stats = _run_online_switch_cyclic_with_stats(
+        default_conf=default_conf,
+        base_correct=base_correct_list,
+        cyclic_correct=cyclic_correct_list,
         k=k,
         th1_percent=perc_value,
         offline_prefix_n=0,
@@ -2331,11 +2540,30 @@ def _compute_curves_for_one_percentile(
         },
 
         "cyclic": {"costs": [float(C_cyc)], "accuracies": [float(cyclic_acc_always)]},
-        "switch_cyclic": {"costs": [float(switch_cyclic_cost)], "accuracies": [float(switch_cyclic_acc)]},
-        "ours_top2flip": {"costs": [float(c_top2)], "accuracies": [float(a_top2)]},
+        "switch_cyclic": {"costs": [float(switch_cyclic_cost)], "accuracies": [float(switch_cyclic_acc)], "stats": dict(sc_stats)},
+        "ours_top2flip": {"costs": [float(c_top2)], "accuracies": [float(a_top2)], "stats": dict(top2_stats)},
         "ours_avggap": {"costs": [float(c_avg)], "accuracies": [float(a_avg)]},
         "ours_avggap_stats": dict(avg_stats),
     }
+    # Optional: add recall_std when labels_idx and preds available
+    if labels_idx is not None and base_pred_idx is not None and cyclic_pred_idx is not None and probe2_pred_idx is not None:
+        try:
+            _, _, preds_sc = _run_online_switch_cyclic_with_preds(
+                default_conf, base_pred_idx, cyclic_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids
+            )
+            _, _, preds_top2 = _run_online_top2flip_policy_with_preds(
+                default_conf, flip_trigger, base_pred_idx, cyclic_pred_idx, probe2_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids
+            )
+            _, _, preds_avg = _run_online_avggap_policy_with_preds(
+                default_conf, mean_conf, base_pred_idx, cyclic_pred_idx, probe2_pred_idx, labels_idx, k, perc_value, perc_value, 0, forced_cyclic_ids
+            )
+            curve_obj["switch_cyclic_recall_std"] = float(_recall_std(labels_idx, preds_sc, k))
+            curve_obj["ours_top2flip_recall_std"] = float(_recall_std(labels_idx, preds_top2, k))
+            curve_obj["ours_avggap_recall_std"] = float(_recall_std(labels_idx, preds_avg, k))
+            curve_obj["default_recall_std"] = float(_recall_std(labels_idx, base_pred_idx, k))
+            curve_obj["cyclic_recall_std"] = float(_recall_std(labels_idx, cyclic_pred_idx, k))
+        except Exception:
+            pass
     if full_enabled:
         curve_obj["always"]["full"] = {"cost": float(C_full), "acc": float(full_acc_always)}
         curve_obj["full"] = {"costs": [float(C_full)], "accuracies": [float(full_acc_always)]}
@@ -2353,8 +2581,10 @@ def _log_baseline_report(curve_obj: dict):
     logger.info(_purple(f"==== BASELINE Derived policy report (REAL-WORLD online, p={p}) ===="))
 
     always = curve_obj.get("always", {})
-    logger.info(f"BASELINE default(ensemble) : cost={always['default']['cost']:.3f}, acc={always['default']['acc']:.4f}")
-    logger.info(f"BASELINE cyclic(ensemble)  : cost={always['cyclic']['cost']:.3f}, acc={always['cyclic']['acc']:.4f}")
+    def _recall_str(obj):
+        return f", recall_std={obj:.4f}" if isinstance(obj, (int, float)) else ""
+    logger.info(f"BASELINE default(ensemble) : cost={always['default']['cost']:.3f}, acc={always['default']['acc']:.4f}{_recall_str(curve_obj.get('default_recall_std'))}")
+    logger.info(f"BASELINE cyclic(ensemble)  : cost={always['cyclic']['cost']:.3f}, acc={always['cyclic']['acc']:.4f}{_recall_str(curve_obj.get('cyclic_recall_std'))}")
     if "full" in always:
         logger.info(f"BASELINE full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}")
     else:
@@ -2364,11 +2594,17 @@ def _log_baseline_report(curve_obj: dict):
         if key in curve_obj:
             c0 = float(curve_obj[key]["costs"][0])
             a0 = float(curve_obj[key]["accuracies"][0])
-            extra = ""
-            if key == "ours_avggap":
-                st = curve_obj.get("ours_avggap_stats")
-                if isinstance(st, dict):
-                    extra = f", n_probe2={int(st.get('n_probe2', 0))}, n_cyclic={int(st.get('n_cyclic', 0))}"
+            st = curve_obj.get("ours_avggap_stats", {}) if key == "ours_avggap" else curve_obj[key].get("stats", {})
+            if not isinstance(st, dict):
+                st = {}
+            nb = int(st.get("n_base", 0))
+            np2 = int(st.get("n_probe2", 0))
+            nc = int(st.get("n_cyclic", 0))
+            extra = f", n_base={nb}, n_probe2={np2}, n_cyclic={nc}"
+            recall_key = f"{key}_recall_std"
+            rstd = curve_obj.get(recall_key)
+            if isinstance(rstd, (int, float)):
+                extra += f", recall_std={rstd:.4f}"
             logger.info(f"BASELINE {key:<12} : cost={c0:.3f}, acc={a0:.4f}{extra}")
 
 
@@ -2378,10 +2614,12 @@ def _log_named_report(name: str, curve_obj: dict):
     logger.info(_purple(f"==== {name} Derived policy report (REAL-WORLD online, p={p}) ===="))
 
     always = curve_obj.get("always", {})
+    def _recall_str(obj):
+        return f", recall_std={obj:.4f}" if isinstance(obj, (int, float)) else ""
     if "default" in always:
-        logger.info(f"{name} default(ensemble) : cost={always['default']['cost']:.3f}, acc={always['default']['acc']:.4f}")
+        logger.info(f"{name} default(ensemble) : cost={always['default']['cost']:.3f}, acc={always['default']['acc']:.4f}{_recall_str(curve_obj.get('default_recall_std'))}")
     if "cyclic" in always:
-        logger.info(f"{name} cyclic(ensemble)  : cost={always['cyclic']['cost']:.3f}, acc={always['cyclic']['acc']:.4f}")
+        logger.info(f"{name} cyclic(ensemble)  : cost={always['cyclic']['cost']:.3f}, acc={always['cyclic']['acc']:.4f}{_recall_str(curve_obj.get('cyclic_recall_std'))}")
     if "full" in always:
         logger.info(f"{name} full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}")
 
@@ -2389,11 +2627,14 @@ def _log_named_report(name: str, curve_obj: dict):
         if key in curve_obj:
             c0 = float(curve_obj[key]["costs"][0])
             a0 = float(curve_obj[key]["accuracies"][0])
-            extra = ""
-            if key == "ours_avggap":
-                st = curve_obj.get("ours_avggap_stats")
-                if isinstance(st, dict):
-                    extra = f", n_probe2={int(st.get('n_probe2', 0))}, n_cyclic={int(st.get('n_cyclic', 0))}"
+            st = curve_obj.get("ours_avggap_stats", {}) if key == "ours_avggap" else curve_obj[key].get("stats", {})
+            if not isinstance(st, dict):
+                st = {}
+            nb, np2, nc = int(st.get("n_base", 0)), int(st.get("n_probe2", 0)), int(st.get("n_cyclic", 0))
+            extra = f", n_base={nb}, n_probe2={np2}, n_cyclic={nc}"
+            rstd = curve_obj.get(f"{key}_recall_std")
+            if isinstance(rstd, (int, float)):
+                extra += f", recall_std={rstd:.4f}"
             logger.info(f"{name} {key:<12} : cost={c0:.3f}, acc={a0:.4f}{extra}")
 
 
@@ -2888,6 +3129,7 @@ def main():
 
                     for perc in perc_list:
                         perc = float(perc)
+                        labels_idx_for_curves = [option_ids.index(str(x)) for x in ideals]
                         cobj = _compute_curves_for_one_percentile(
                             subject=subject,
                             tag="baseline",
@@ -2902,6 +3144,10 @@ def main():
                             probe2_correct=arr_probe2_correct,
                             perc_value=perc,
                             full_enabled=bool(full_enabled),
+                            labels_idx=labels_idx_for_curves,
+                            base_pred_idx=base_pred_idx_list,
+                            cyclic_pred_idx=cyclic_pred_idx_list,
+                            probe2_pred_idx=probe2_pred_idx_list,
                         )
                         if cobj:
                             curve_objs_baseline.append(cobj)
@@ -2928,6 +3174,10 @@ def main():
                                     perc_value=perc,
                                     full_enabled=bool(full_enabled),
                                     forced_cyclic_ids=prefix_ids_set,
+                                    labels_idx=labels_idx_for_curves,
+                                    base_pred_idx=base_pred_idx_list_pr,
+                                    cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                    probe2_pred_idx=probe2_pred_idx_list_pr,
                                 )
                                 if cobj_pr:
                                     curve_objs_pride.append(cobj_pr)
@@ -3211,9 +3461,9 @@ def main():
                             th1p = float(perc)
                             extra_pts = []
                             
-                            # Helper to calc static rule points for baseline plot
+                            # Helper to calc static rule points for baseline plot (cost, acc, stats, recall)
                             def _get_static_pt(th1_p, rule_func, label, marker, color):
-                                c, a, th2p = _run_online_th1_quantile_th2_from_th1_rule(
+                                c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
                                     default_conf=default_conf,
                                     mean_conf=mean_conf,
                                     base_correct=base_correct_list,
@@ -3223,11 +3473,21 @@ def main():
                                     th1_percent=float(th1_p),
                                     th2_rule_from_th1_value=rule_func,
                                 )
-                                return {'cost': c, 'acc': a, 'th2_p': float(th2p), 'label': label, 'marker': marker, 'color': color}
+                                out = {'cost': c, 'acc': a, 'th2_p': float(th2p), 'label': label, 'marker': marker, 'color': color,
+                                       'n_base': int(st.get('n_base', 0)), 'n_probe2': int(st.get('n_probe2', 0)), 'n_cyclic': int(st.get('n_cyclic', 0))}
+                                try:
+                                    _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                        default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
+                                        labels_idx, k, float(th1_p), rule_func, None
+                                    )
+                                    out['recall_std'] = float(_recall_std(labels_idx, preds, k))
+                                except Exception:
+                                    pass
+                                return out
 
                             # Helper for PRIDE+OURS heuristic points (same rules, but debiased stats + prefix overhead)
                             def _get_static_pt_pride(th1_p, rule_func, label, marker, color):
-                                c, a, th2p = _run_online_th1_quantile_th2_from_th1_rule(
+                                c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
                                     default_conf=default_conf_pr,
                                     mean_conf=mean_conf_pr,
                                     base_correct=base_correct_list_pr,
@@ -3238,7 +3498,17 @@ def main():
                                     th2_rule_from_th1_value=rule_func,
                                     forced_cyclic_ids=prefix_ids_set,
                                 )
-                                return {'cost': c, 'acc': a, 'th2_p': float(th2p), 'label': label, 'marker': marker, 'color': color}
+                                out = {'cost': c, 'acc': a, 'th2_p': float(th2p), 'label': label, 'marker': marker, 'color': color,
+                                       'n_base': int(st.get('n_base', 0)), 'n_probe2': int(st.get('n_probe2', 0)), 'n_cyclic': int(st.get('n_cyclic', 0))}
+                                try:
+                                    _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr, probe2_pred_idx_list_pr,
+                                        labels_idx, k, float(th1_p), rule_func, prefix_ids_set
+                                    )
+                                    out['recall_std'] = float(_recall_std(labels_idx, preds, k))
+                                except Exception:
+                                    pass
+                                return out
 
                             # 1. Static Heuristics (division heuristic scaled by #choices)
                             # th2 = th1 / sqrt(k)  (k=4 -> th1/2, k=5 -> th1/sqrt(5), ...)
@@ -3258,19 +3528,16 @@ def main():
                             )
                             extra_pts.append({'cost': c_sqrt_lc, 'acc': a_sqrt_lc, 'th2_p': float(p_sqrt_lc), 'label': 'Online Sqrt (LowConf-only)', 'marker': 'X', 'color': 'orange'})
 
-                            # Save heuristic points into curve_obj for aggregate reporting
+                            # Save heuristic points into curve_obj for aggregate reporting (incl. n_base, n_probe2, n_cyclic, recall_std)
                             try:
-                                cobj["heuristic_points"] = [
-                                    {
-                                        "label": str(hp.get("label")),
-                                        "cost": float(hp.get("cost")),
-                                        "acc": float(hp.get("acc")),
-                                        "th2_p": float(hp.get("th2_p", float("nan"))),
-                                        "marker": str(hp.get("marker", "o")),
-                                        "color": str(hp.get("color", "black")),
-                                    }
-                                    for hp in (extra_pts or [])
-                                ]
+                                def _hp_entry(hp):
+                                    e = {"label": str(hp.get("label")), "cost": float(hp.get("cost")), "acc": float(hp.get("acc")),
+                                         "th2_p": float(hp.get("th2_p", float("nan"))), "marker": str(hp.get("marker", "o")), "color": str(hp.get("color", "black"))}
+                                    for k in ["n_base", "n_probe2", "n_cyclic", "recall_std"]:
+                                        if k in hp and hp[k] is not None:
+                                            e[k] = int(hp[k]) if k.startswith("n_") else float(hp[k])
+                                    return e
+                                cobj["heuristic_points"] = [_hp_entry(hp) for hp in (extra_pts or [])]
                             except Exception:
                                 pass
 
@@ -3295,17 +3562,7 @@ def main():
                                 extra_pts_pr.append({'cost': c_sqrt_lc_pr, 'acc': a_sqrt_lc_pr, 'th2_p': float(p_sqrt_lc_pr), 'label': 'Online Sqrt (LowConf-only)', 'marker': 'X', 'color': 'orange'})
 
                                 try:
-                                    cobj_pr["heuristic_points"] = [
-                                        {
-                                            "label": str(hp.get("label")),
-                                            "cost": float(hp.get("cost")),
-                                            "acc": float(hp.get("acc")),
-                                            "th2_p": float(hp.get("th2_p", float("nan"))),
-                                            "marker": str(hp.get("marker", "o")),
-                                            "color": str(hp.get("color", "black")),
-                                        }
-                                        for hp in (extra_pts_pr or [])
-                                    ]
+                                    cobj_pr["heuristic_points"] = [_hp_entry(hp) for hp in (extra_pts_pr or [])]
                                 except Exception:
                                     pass
 
@@ -3323,15 +3580,25 @@ def main():
                                     except Exception:
                                         pass
 
-                            # [ADD] log heuristic point performances (no plot annotation)
+                            # [ADD] log heuristic point performances (cost, acc, n_base, n_probe2, n_cyclic, recall_std)
+                            def _hp_log_line(hp):
+                                acc = float(hp.get("acc", float("nan")))
+                                cost = float(hp.get("cost", float("nan")))
+                                line = f"cost={cost:.3f}, acc={acc:.4f}"
+                                nb, np2, nc = hp.get("n_base"), hp.get("n_probe2"), hp.get("n_cyclic")
+                                if nb is not None and np2 is not None and nc is not None:
+                                    line += f", n_base={int(nb)}, n_probe2={int(np2)}, n_cyclic={int(nc)}"
+                                rstd = hp.get("recall_std")
+                                if isinstance(rstd, (int, float)):
+                                    line += f", recall_std={rstd:.4f}"
+                                return line
+
                             try:
                                 base_acc0 = float(np.mean(np.asarray(base_correct_list, dtype=np.float64))) if len(base_correct_list) else float("nan")
                                 logger.info(_purple(f"==== HEURISTIC Point report (p={int(round(perc))}) ===="))
                                 logger.info(f"{'default':<18}: cost=1.000, acc={base_acc0:.4f}")
                                 for hp in extra_pts:
-                                    acc = float(hp.get("acc", float("nan")))
-                                    cost = float(hp.get("cost", float("nan")))
-                                    logger.info(f"{hp.get('label','?'):<18}: cost={cost:.3f}, acc={acc:.4f}")
+                                    logger.info(f"{hp.get('label','?'):<18}: {_hp_log_line(hp)}")
                             except Exception:
                                 pass
 
@@ -3340,9 +3607,7 @@ def main():
                                 try:
                                     logger.info(_purple(f"==== PRIDE+OURS HEURISTIC Point report (p={int(round(perc))}) ===="))
                                     for hp in (cobj_pr.get("heuristic_points", []) or []):
-                                        acc = float(hp.get("acc", float("nan")))
-                                        cost = float(hp.get("cost", float("nan")))
-                                        logger.info(f"{hp.get('label','?'):<18}: cost={cost:.3f}, acc={acc:.4f}")
+                                        logger.info(f"{hp.get('label','?'):<18}: {_hp_log_line(hp)}")
                                 except Exception:
                                     pass
 
@@ -3699,10 +3964,23 @@ def main():
                         acc_macro = float(np.mean(accs_f))
                         wsum = float(np.sum(ws_f))
                         acc_micro = float(np.sum([a * w for a, w in zip(accs_f, ws_f)]) / wsum) if wsum > 0 else float("nan")
-                        if single_subject:
-                            logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}")
-                        else:
-                            logger.info(f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+                        line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
+                        if not single_subject:
+                            line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}"
+                        logger.info(line)
+
+        # Main figure: Cost vs Accuracy (SLM improvement)
+        if len(derived_records_by_p) > 0:
+            try:
+                out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
+                if getattr(args, 'option_id_set', None):
+                    out_dir += f"_id-{args.option_id_set}"
+                os.makedirs(out_dir, exist_ok=True)
+                main_fig_path = os.path.join(out_dir, f"{args.task}_main_figure_cost_vs_acc.png")
+                _plot_main_figure_cost_vs_acc(derived_records_by_p, main_fig_path, args.task)
+                logger.info(_purple(f"Saved main figure (cost vs acc): {main_fig_path}"))
+            except Exception as ex:
+                logger.warning(f"Main figure plot failed: {ex}")
 
         # Aggregate PRIDE+OURS derived-policy summary (if enabled)
         if len(derived_records_pride_by_p) > 0:

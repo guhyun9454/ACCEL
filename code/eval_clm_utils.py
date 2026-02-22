@@ -19,6 +19,7 @@ import math
 
 from utils import (
     _norm,
+    _purple,
     shuffle_options_with_ids,
     move_answer,
     cycle_options,
@@ -85,6 +86,8 @@ def parse_arguments():
                         help="Enable PRIDE debiasing then run OUR online policies on debiased probs (for comparison).")
     parser.add_argument("--pride_prefix_ratio", type=float, default=0.02,
                         help="Random prefix ratio used to estimate PRIDE prior (default=0.02).")
+    parser.add_argument("--skip_full", action="store_true",
+                        help="Use cyclic instead of full permutations when setting=full (e.g., MMLU 4-choice: 4x instead of 24x).")
     parser.add_argument("--pride_seed", type=int, default=0,
                         help="Seed for PRIDE random prefix sampling (default=0).")
 
@@ -234,6 +237,10 @@ def prepare_eval(args, eval_name):
             , axis=1).to_list()
         return few_shot_samples
 
+    if getattr(args, 'skip_full', False) and setting == 'full':
+        k_opts = len(option_ids_header)
+        logger.info(_purple(f"[skip_full] Using cyclic instead of full permutations (k={k_opts} → {k_opts}x inferences)"))
+
     # prepare_eval_samples
     def prepare_eval_samples(subject):
         df = pd.read_csv(open(f'{data_path}/test/{subject}_test.csv'), names=("Question", *option_ids_header, "Answer"), dtype=str)
@@ -242,8 +249,9 @@ def prepare_eval(args, eval_name):
             df = df.apply(lambda x: move_answer(x, moved_answer), axis=1)
 
         # NOTE: full permutation은 k!로 급증하므로, k>=5에서는 full이라도 cyclic만 생성(자동 다운그레이드)
+        # --skip_full: full이어도 cyclic만 사용 (MMLU 등 오래 걸릴 때)
         k_opts = len(option_ids_header)
-        full_permutation_disabled = (setting == 'full' and k_opts >= 5)
+        full_permutation_disabled = (setting == 'full' and k_opts >= 5) or bool(getattr(args, 'skip_full', False))
 
         if setting in ['perm'] or (setting == 'full' and not full_permutation_disabled):
             inputs = df.apply(lambda x: [
