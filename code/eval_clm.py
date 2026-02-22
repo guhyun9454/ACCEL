@@ -1430,6 +1430,58 @@ def _run_online_sqrt_policy(
     return total_cost / float(N), corrects / float(N), final_th2_perc
 
 
+def _run_online_sqrt_policy_with_stats(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, float, Dict[str, int]]:
+    """Returns (cost, acc, final_th2_perc, {n_base, n_probe2, n_cyclic})."""
+    N = len(base_correct)
+    if N == 0:
+        return 0.0, 0.0, 0.0, {"n_base": 0, "n_probe2": 0, "n_cyclic": 0}
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+    total_cost, corrects = 0.0, 0
+    n_base, n_probe2, n_cyclic = 0, 0, 0
+    running_gap_sum, running_cnt = 0.0, 0
+    past_gaps: List[float] = []
+    final_th2_val = 0.0
+    for i in range(N):
+        gap_i = float(dc[i])
+        th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), float(th1_percent) / 100.0)) if len(past_gaps) > 0 else 0.0
+        current_avg_gap = (running_gap_sum / running_cnt) if running_cnt > 0 else 0.0
+        safe_avg = min(1.0, max(0.0, current_avg_gap))
+        current_th2_val = th1_val * np.sqrt(1.0 - safe_avg)
+        final_th2_val = current_th2_val
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+        if is_forced:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+            n_cyclic += 1
+        elif gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+        elif float(mc[i]) < current_th2_val:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+            n_cyclic += 1
+        else:
+            total_cost += 2.0
+            corrects += 1 if bool(probe2_correct[i]) else 0
+            n_probe2 += 1
+        running_gap_sum += gap_i
+        running_cnt += 1
+        past_gaps.append(gap_i)
+    final_th2_perc = (np.sum(mc < final_th2_val) / len(mc)) * 100.0 if len(mc) > 0 else 0.0
+    return total_cost / float(N), corrects / float(N), float(final_th2_perc), {"n_base": int(n_base), "n_probe2": int(n_probe2), "n_cyclic": int(n_cyclic)}
+
+
 def _run_online_sqrt_policy_lowconf_update(
     default_conf: np.ndarray,
     mean_conf: np.ndarray,
@@ -1512,6 +1564,59 @@ def _run_online_sqrt_policy_lowconf_update(
         final_th2_perc = 0.0
 
     return total_cost / float(N), corrects / float(N), final_th2_perc
+
+
+def _run_online_sqrt_policy_lowconf_update_with_stats(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, float, Dict[str, int]]:
+    """Returns (cost, acc, final_th2_perc, {n_base, n_probe2, n_cyclic})."""
+    N = len(base_correct)
+    if N == 0:
+        return 0.0, 0.0, 0.0, {"n_base": 0, "n_probe2": 0, "n_cyclic": 0}
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+    total_cost, corrects = 0.0, 0
+    n_base, n_probe2, n_cyclic = 0, 0, 0
+    low_sum, low_cnt = 0.0, 0
+    past_gaps: List[float] = []
+    final_th2_val = 0.0
+    for i in range(N):
+        gap_i = float(dc[i])
+        th1_val = float(np.quantile(np.asarray(past_gaps, dtype=np.float64), float(th1_percent) / 100.0)) if len(past_gaps) > 0 else 0.0
+        current_avg_gap = (low_sum / low_cnt) if low_cnt > 0 else 0.0
+        safe_avg = min(1.0, max(0.0, current_avg_gap))
+        current_th2_val = th1_val * np.sqrt(1.0 - safe_avg)
+        final_th2_val = current_th2_val
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+        if is_forced:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+            n_cyclic += 1
+        elif gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+        elif float(mc[i]) < current_th2_val:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+            n_cyclic += 1
+        else:
+            total_cost += 2.0
+            corrects += 1 if bool(probe2_correct[i]) else 0
+            n_probe2 += 1
+        if gap_i < th1_val:
+            low_sum += gap_i
+            low_cnt += 1
+        past_gaps.append(gap_i)
+    final_th2_perc = (np.sum(mc < final_th2_val) / len(mc)) * 100.0 if len(mc) > 0 else 0.0
+    return total_cost / float(N), corrects / float(N), float(final_th2_perc), {"n_base": int(n_base), "n_probe2": int(n_probe2), "n_cyclic": int(n_cyclic)}
 
 
 def _run_online_th1_quantile_th2_from_th1_rule(
@@ -3517,16 +3622,38 @@ def main():
                             extra_pts.append(_get_static_pt(th1p, lambda x: x ** 2, 'th1^2', 's', 'gray'))
                             extra_pts.append(_get_static_pt(th1p, lambda x: x ** 1.5, 'th1^1.5', '^', 'gray'))
 
-                            # 2. [ONLINE Sqrt]
-                            c_sqrt, a_sqrt, p_sqrt = _run_online_sqrt_policy(
+                            # 2. [ONLINE Sqrt] (with n_base, n_probe2, n_cyclic, recall_std)
+                            def _sqrt_pt(c_sqrt, a_sqrt, p_sqrt, st, label, marker):
+                                out = {'cost': c_sqrt, 'acc': a_sqrt, 'th2_p': float(p_sqrt), 'label': label, 'marker': marker, 'color': 'orange',
+                                       'n_base': int(st.get('n_base', 0)), 'n_probe2': int(st.get('n_probe2', 0)), 'n_cyclic': int(st.get('n_cyclic', 0))}
+                                return out
+                            c_sqrt, a_sqrt, p_sqrt, st_sqrt = _run_online_sqrt_policy_with_stats(
                                 default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1_percent=perc
                             )
-                            extra_pts.append({'cost': c_sqrt, 'acc': a_sqrt, 'th2_p': float(p_sqrt), 'label': 'Online Sqrt (All)', 'marker': 'D', 'color': 'orange'})
+                            sq_pt = _sqrt_pt(c_sqrt, a_sqrt, p_sqrt, st_sqrt, 'Online Sqrt (All)', 'D')
+                            try:
+                                _, _, preds_sqrt = _run_online_sqrt_policy_with_preds(
+                                    default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
+                                    labels_idx, k, perc, None
+                                )
+                                sq_pt['recall_std'] = float(_recall_std(labels_idx, preds_sqrt, k))
+                            except Exception:
+                                pass
+                            extra_pts.append(sq_pt)
 
-                            c_sqrt_lc, a_sqrt_lc, p_sqrt_lc = _run_online_sqrt_policy_lowconf_update(
+                            c_sqrt_lc, a_sqrt_lc, p_sqrt_lc, st_sqrt_lc = _run_online_sqrt_policy_lowconf_update_with_stats(
                                 default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1_percent=perc
                             )
-                            extra_pts.append({'cost': c_sqrt_lc, 'acc': a_sqrt_lc, 'th2_p': float(p_sqrt_lc), 'label': 'Online Sqrt (LowConf-only)', 'marker': 'X', 'color': 'orange'})
+                            sq_lc_pt = _sqrt_pt(c_sqrt_lc, a_sqrt_lc, p_sqrt_lc, st_sqrt_lc, 'Online Sqrt (LowConf-only)', 'X')
+                            try:
+                                _, _, preds_sqrt_lc = _run_online_sqrt_policy_lowconf_update_with_preds(
+                                    default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
+                                    labels_idx, k, perc, None
+                                )
+                                sq_lc_pt['recall_std'] = float(_recall_std(labels_idx, preds_sqrt_lc, k))
+                            except Exception:
+                                pass
+                            extra_pts.append(sq_lc_pt)
 
                             # Save heuristic points into curve_obj for aggregate reporting (incl. n_base, n_probe2, n_cyclic, recall_std)
                             try:
@@ -3549,17 +3676,35 @@ def main():
                                 extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x: x ** 2, 'th1^2', 's', 'gray'))
                                 extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x: x ** 1.5, 'th1^1.5', '^', 'gray'))
 
-                                c_sqrt_pr, a_sqrt_pr, p_sqrt_pr = _run_online_sqrt_policy(
+                                c_sqrt_pr, a_sqrt_pr, p_sqrt_pr, st_sqrt_pr = _run_online_sqrt_policy_with_stats(
                                     default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr, arr_probe2_correct_pr,
                                     k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set
                                 )
-                                extra_pts_pr.append({'cost': c_sqrt_pr, 'acc': a_sqrt_pr, 'th2_p': float(p_sqrt_pr), 'label': 'Online Sqrt (All)', 'marker': 'D', 'color': 'orange'})
+                                sq_pr_pt = _sqrt_pt(c_sqrt_pr, a_sqrt_pr, p_sqrt_pr, st_sqrt_pr, 'Online Sqrt (All)', 'D')
+                                try:
+                                    _, _, preds_sqrt_pr = _run_online_sqrt_policy_with_preds(
+                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr, probe2_pred_idx_list_pr,
+                                        labels_idx, k, perc, prefix_ids_set
+                                    )
+                                    sq_pr_pt['recall_std'] = float(_recall_std(labels_idx, preds_sqrt_pr, k))
+                                except Exception:
+                                    pass
+                                extra_pts_pr.append(sq_pr_pt)
 
-                                c_sqrt_lc_pr, a_sqrt_lc_pr, p_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update(
+                                c_sqrt_lc_pr, a_sqrt_lc_pr, p_sqrt_lc_pr, st_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update_with_stats(
                                     default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr, arr_probe2_correct_pr,
                                     k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set
                                 )
-                                extra_pts_pr.append({'cost': c_sqrt_lc_pr, 'acc': a_sqrt_lc_pr, 'th2_p': float(p_sqrt_lc_pr), 'label': 'Online Sqrt (LowConf-only)', 'marker': 'X', 'color': 'orange'})
+                                sq_lc_pr_pt = _sqrt_pt(c_sqrt_lc_pr, a_sqrt_lc_pr, p_sqrt_lc_pr, st_sqrt_lc_pr, 'Online Sqrt (LowConf-only)', 'X')
+                                try:
+                                    _, _, preds_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update_with_preds(
+                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr, probe2_pred_idx_list_pr,
+                                        labels_idx, k, perc, prefix_ids_set
+                                    )
+                                    sq_lc_pr_pt['recall_std'] = float(_recall_std(labels_idx, preds_sqrt_lc_pr, k))
+                                except Exception:
+                                    pass
+                                extra_pts_pr.append(sq_lc_pr_pt)
 
                                 try:
                                     cobj_pr["heuristic_points"] = [_hp_entry(hp) for hp in (extra_pts_pr or [])]
