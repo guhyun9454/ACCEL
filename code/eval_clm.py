@@ -2808,7 +2808,6 @@ def main():
         pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
         recall_std_vs_p_records: List[dict] = []  # [{'subject':str,'p':float,'method':str,'kind':str,'rstd':float}]
 
-        os.makedirs(args.save_path, exist_ok=True)
         for subject in subjects[::1]:
             cached_path = f'{args.save_path}/{subject}.jsonl'
             use_cached = (not bool(getattr(args, 'force', False))) and os.path.exists(cached_path)
@@ -4427,6 +4426,17 @@ def main():
                             wandb_run.log({f"plots/{args.task}/aggregate/delta_acc_pride_vs_default_heuristics": wandb.Image(out_acc_pvd_heur)})
                         except Exception:
                             pass
+
+                # Cyclic random PRIDE vs BASELINE curves (5/10/20/30)
+                try:
+                    _plot_cyclic_random_pride_vs_baseline_curves(
+                        derived_records_by_p,
+                        derived_records_pride_by_p,
+                        out_dir,
+                        args.task,
+                    )
+                except Exception as ex:
+                    logger.warning(f"Cyclic random PRIDE vs BASELINE plot failed: {ex}")
             except Exception:
                 pass
 
