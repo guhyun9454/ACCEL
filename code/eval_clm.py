@@ -1163,49 +1163,6 @@ def _plot_th2_tradeoff_curve_compare(
     fig2.savefig(out_da, bbox_inches="tight")
     plt.close(fig2)
 
-    # Plot B2: Absolute ΔAcc(PRIDE - BASELINE) vs th2  (same reference; explains heuristic delta)
-    fig2b, ax2b = plt.subplots(figsize=(9.0, 6.0), dpi=160)
-    for idx, th1p in enumerate(th1_list):
-        th1p = float(th1p)
-        color = colors[idx % len(colors)]
-        dabs = []
-        for th2p in dense_th2_list:
-            _, ab = _run_online_avggap_policy(
-                default_conf=default_conf_base,
-                mean_conf=mean_conf_base,
-                base_correct=base_correct_base,
-                cyclic_correct=cyclic_correct_base,
-                probe2_correct=probe2_correct_base,
-                k=k,
-                th1_percent=th1p,
-                th2_percent=float(th2p),
-                offline_prefix_n=0,
-            )
-            _, ap = _run_online_avggap_policy(
-                default_conf=default_conf_pr,
-                mean_conf=mean_conf_pr,
-                base_correct=base_correct_pr,
-                cyclic_correct=cyclic_correct_pr,
-                probe2_correct=probe2_correct_pr,
-                k=k,
-                th1_percent=th1p,
-                th2_percent=float(th2p),
-                offline_prefix_n=0,
-                forced_cyclic_ids=forced_cyclic_ids_pr,
-            )
-            dabs.append((float(ap) - float(ab)) * 100.0)
-        ax2b.plot(dense_th2_list, dabs, color=color, linewidth=1.8, alpha=0.85, label=f"th1={int(th1p)}")
-    ax2b.axhline(0.0, color="gray", linestyle=":", linewidth=1.0, alpha=0.6)
-    ax2b.set_xlabel("th2 (percentile, avg gap)")
-    ax2b.set_ylabel("Δ Accuracy (PRIDE - BASELINE, %)")
-    ax2b.set_title(f"{getattr(args,'task','task')} {subject} — ΔAcc(PRIDE - BASELINE) vs th2")
-    ax2b.grid(True, linestyle="--", alpha=0.35)
-    ax2b.legend(loc="best", fontsize=9, ncol=2)
-    out_da2 = os.path.join(curve_save_path, f"{subject}_th2_tradeoff_DELTA_ACC_PRIDE_MINUS_BASE{suffix}.png")
-    fig2b.tight_layout()
-    fig2b.savefig(out_da2, bbox_inches="tight")
-    plt.close(fig2b)
-
     # Plot C: Cost vs ΔAcc (trade-off; reference = BASELINE default)
     fig3, ax3 = plt.subplots(figsize=(9.0, 6.0), dpi=160)
     for idx, th1p in enumerate(th1_list):
@@ -1342,7 +1299,6 @@ def _plot_th2_tradeoff_curve_compare(
             wandb_run.log({
                 f"plots/{subject}/th2_tradeoff_COST_compare{suffix}": wandb.Image(out_cost),
                 f"plots/{subject}/th2_tradeoff_DELTA_ACC_compare{suffix}": wandb.Image(out_da),
-                f"plots/{subject}/th2_tradeoff_DELTA_ACC_PRIDE_MINUS_BASE{suffix}": wandb.Image(out_da2),
                 f"plots/{subject}/th2_tradeoff_COST_vs_DELTA_compare{suffix}": wandb.Image(out_tr),
             })
         except Exception:
@@ -3839,21 +3795,6 @@ def main():
                                 except Exception:
                                     pass
 
-                    # [ADD] Confidence Distribution Plot (th1/th2 thresholds for p=10,20,30)
-                    out_dist = os.path.join(curve_save_path, f"{subject}_confidence_distribution.png")
-                    _plot_confidence_distribution(
-                        default_conf=default_conf,
-                        mean_conf=mean_conf,
-                        out_path=out_dist,
-                        title=f"{args.task} {subject} — Confidence Gap Distribution"
-                    )
-                    if wandb_ok and wandb_run is not None:
-                        try:
-                            import wandb
-                            wandb_run.log({f"plots/{subject}/confidence_distribution": wandb.Image(out_dist)})
-                        except Exception:
-                            pass
-
                     save_results(f'{curve_save_path}/{subject}_curve.jsonl', curve_objs_baseline, metrics=None)
                     if pride_enabled and len(curve_objs_pride) > 0:
                         save_results(f'{curve_save_path}/{subject}_pride_curve.jsonl', curve_objs_pride, metrics=None)
@@ -4214,6 +4155,74 @@ def main():
                             line += f", recall_std={float(np.mean(rstds)):.4f}"
                         logger.info(line)
 
+        # Δacc (OURS without PRIDE - default) bar plot — from BASELINE derived_records
+        if len(derived_records_by_p) > 0:
+            try:
+                out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
+                if getattr(args, 'option_id_set', None):
+                    out_dir += f"_id-{args.option_id_set}"
+                os.makedirs(out_dir, exist_ok=True)
+                policy_keys_baseline = ["cyclic", "full", "switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
+                delta_acc_from_default_pol: Dict[float, Dict[str, float]] = {}
+                delta_acc_from_default_heur: Dict[float, Dict[str, float]] = {}
+                for p, cobjs in sorted(derived_records_by_p.items(), key=lambda t: t[0]):
+                    acc_defaults = []
+                    for cobj in cobjs:
+                        always = cobj.get("always", {}) or {}
+                        if "default" in always:
+                            acc_defaults.append(float(always["default"]["acc"]))
+                    default_acc_mean = float(np.mean(acc_defaults)) if len(acc_defaults) > 0 else float("nan")
+                    if not np.isfinite(default_acc_mean):
+                        continue
+                    delta_acc_from_default_pol[float(p)] = {}
+                    for key in policy_keys_baseline:
+                        accs = []
+                        for cobj in cobjs:
+                            if key in ["cyclic", "full"]:
+                                always = cobj.get("always", {}) or {}
+                                if key in always:
+                                    accs.append(float(always[key]["acc"]))
+                            elif key in cobj:
+                                accs.append(float(cobj[key]["accuracies"][0]))
+                        if len(accs) > 0:
+                            delta_acc_from_default_pol[float(p)][key] = float(np.mean(accs) - default_acc_mean)
+                    heur_labels = set()
+                    for cobj in cobjs:
+                        for hp in (cobj.get("heuristic_points", []) or []):
+                            if isinstance(hp, dict) and hp.get("label") is not None:
+                                heur_labels.add(str(hp.get("label")))
+                    delta_acc_from_default_heur[float(p)] = {}
+                    for lab in heur_labels:
+                        accs = []
+                        for cobj in cobjs:
+                            hp_map = {str(h.get("label")): h for h in (cobj.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                            if lab in hp_map and "acc" in hp_map[lab]:
+                                accs.append(float(hp_map[lab]["acc"]))
+                        if len(accs) > 0:
+                            delta_acc_from_default_heur[float(p)][lab] = float(np.mean(accs) - default_acc_mean)
+                if any(len(d) > 0 for d in delta_acc_from_default_pol.values()):
+                    out_acc_pol = os.path.join(out_dir, f"{args.task}_aggregate_delta_acc_from_default_POLICIES.png")
+                    _plot_delta_cost_bars_by_p(delta_acc_from_default_pol, out_acc_pol, f"{args.task} — ΔAcc (OURS - default) (Policies)", ylabel="Δ Accuracy (vs default)")
+                    logger.info(_purple(f"Saved Δacc bar plot (OURS vs default, policies): {out_acc_pol}"))
+                    if wandb_ok and wandb_run is not None:
+                        try:
+                            import wandb
+                            wandb_run.log({f"plots/{args.task}/aggregate/delta_acc_from_default_policies": wandb.Image(out_acc_pol)})
+                        except Exception:
+                            pass
+                if any(len(d) > 0 for d in delta_acc_from_default_heur.values()):
+                    out_acc_heur = os.path.join(out_dir, f"{args.task}_aggregate_delta_acc_from_default_HEURISTICS.png")
+                    _plot_delta_cost_bars_by_p(delta_acc_from_default_heur, out_acc_heur, f"{args.task} — ΔAcc (OURS - default) (Heuristics)", ylabel="Δ Accuracy (vs default)")
+                    logger.info(_purple(f"Saved Δacc bar plot (OURS vs default, heuristics): {out_acc_heur}"))
+                    if wandb_ok and wandb_run is not None:
+                        try:
+                            import wandb
+                            wandb_run.log({f"plots/{args.task}/aggregate/delta_acc_from_default_heuristics": wandb.Image(out_acc_heur)})
+                        except Exception:
+                            pass
+            except Exception as ex:
+                logger.warning(f"Δacc from default plot failed: {ex}")
+
         # Main figure: Cost vs Accuracy (SLM improvement)
         if len(derived_records_by_p) > 0:
             try:
@@ -4419,44 +4428,14 @@ def main():
                     except Exception:
                         pass
 
-            # ---- Save Δcost bar plots (policies + heuristics) ----
+            # ---- Save Δacc bar plots ----
             try:
                 out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
                 if getattr(args, 'option_id_set', None):
                     out_dir += f"_id-{args.option_id_set}"
                 os.makedirs(out_dir, exist_ok=True)
 
-                if len(delta_cost_policies_by_p) > 0:
-                    out_png = os.path.join(out_dir, f"{args.task}_aggregate_pride_prefix_delta_cost_POLICIES.png")
-                    _plot_delta_cost_bars_by_p(
-                        delta_cost_by_p=delta_cost_policies_by_p,
-                        out_path=out_png,
-                        title=f"{args.task} — Prefix overhead ΔCost by p (Policies)",
-                    )
-                    logger.info(_purple(f"Saved Δcost bar plot (policies): {out_png}"))
-                    if wandb_ok and wandb_run is not None:
-                        try:
-                            import wandb
-                            wandb_run.log({f"plots/{args.task}/aggregate/prefix_delta_cost_policies": wandb.Image(out_png)})
-                        except Exception:
-                            pass
-
-                if len(delta_cost_heur_by_p) > 0:
-                    out_png = os.path.join(out_dir, f"{args.task}_aggregate_pride_prefix_delta_cost_HEURISTICS.png")
-                    _plot_delta_cost_bars_by_p(
-                        delta_cost_by_p=delta_cost_heur_by_p,
-                        out_path=out_png,
-                        title=f"{args.task} — Prefix overhead ΔCost by p (Heuristics)",
-                    )
-                    logger.info(_purple(f"Saved Δcost bar plot (heuristics): {out_png}"))
-                    if wandb_ok and wandb_run is not None:
-                        try:
-                            import wandb
-                            wandb_run.log({f"plots/{args.task}/aggregate/prefix_delta_cost_heuristics": wandb.Image(out_png)})
-                        except Exception:
-                            pass
-
-                # Δacc bar plots
+                # Δacc bar plots (PRIDE+OURS - BASELINE)
                 if len(delta_acc_policies_by_p) > 0:
                     out_png = os.path.join(out_dir, f"{args.task}_aggregate_pride_prefix_delta_acc_POLICIES.png")
                     _plot_delta_cost_bars_by_p(
