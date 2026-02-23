@@ -4071,6 +4071,39 @@ def main():
                                 wandb_run.log({f"plots/{args.task}/aggregate/recall_std_delta_heuristics": wandb.Image(out_png_drheur)})
                             except Exception:
                                 pass
+
+                    # Δ recall_std (OURS+PRIDE - default) bar plot
+                    if has_pride:
+                        delta_rstd_pride_vs_default_by_p: Dict[float, Dict[str, float]] = {}
+                        for p in ps:
+                            r_default = _mean_rstd("default", "BASELINE", p)
+                            delta_rstd_pride_vs_default_by_p[float(p)] = {}
+                            for m in methods:
+                                r_p = _mean_rstd(m, "PRIDE+OURS", p)
+                                if np.isfinite(r_p) and np.isfinite(r_default):
+                                    delta_rstd_pride_vs_default_by_p[float(p)][m] = float(r_p - r_default)
+                        drpd_pol = {p: {m: v for m, v in (d or {}).items() if m in set(policy_methods)} for p, d in delta_rstd_pride_vs_default_by_p.items()}
+                        drpd_heur = {p: {m: v for m, v in (d or {}).items() if m in set(heur_methods)} for p, d in delta_rstd_pride_vs_default_by_p.items()}
+                        if any(len(d) > 0 for d in drpd_pol.values()):
+                            out_drpd_pol = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_delta_pride_vs_default_POLICIES.png")
+                            _plot_delta_cost_bars_by_p(drpd_pol, out_drpd_pol, f"{args.task} — Δ recall_std (OURS+PRIDE - default) (Policies)", ylabel="Δ recall_std (vs default)")
+                            logger.info(_purple(f"Saved Δ recall_std bar plot (OURS+PRIDE vs default, policies): {out_drpd_pol}"))
+                            if wandb_ok and wandb_run is not None:
+                                try:
+                                    import wandb
+                                    wandb_run.log({f"plots/{args.task}/aggregate/recall_std_delta_pride_vs_default_policies": wandb.Image(out_drpd_pol)})
+                                except Exception:
+                                    pass
+                        if any(len(d) > 0 for d in drpd_heur.values()):
+                            out_drpd_heur = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_delta_pride_vs_default_HEURISTICS.png")
+                            _plot_delta_cost_bars_by_p(drpd_heur, out_drpd_heur, f"{args.task} — Δ recall_std (OURS+PRIDE - default) (Heuristics)", ylabel="Δ recall_std (vs default)")
+                            logger.info(_purple(f"Saved Δ recall_std bar plot (OURS+PRIDE vs default, heuristics): {out_drpd_heur}"))
+                            if wandb_ok and wandb_run is not None:
+                                try:
+                                    import wandb
+                                    wandb_run.log({f"plots/{args.task}/aggregate/recall_std_delta_pride_vs_default_heuristics": wandb.Image(out_drpd_heur)})
+                                except Exception:
+                                    pass
             except Exception:
                 pass
 
@@ -4465,6 +4498,64 @@ def main():
                         try:
                             import wandb
                             wandb_run.log({f"plots/{args.task}/aggregate/pride_delta_acc_heuristics": wandb.Image(out_png)})
+                        except Exception:
+                            pass
+
+                # Δacc (OURS+PRIDE - default) bar plots
+                delta_acc_pride_vs_default_pol: Dict[float, Dict[str, float]] = {}
+                delta_acc_pride_vs_default_heur: Dict[float, Dict[str, float]] = {}
+                for p, cobjs in sorted(derived_records_pride_by_p.items(), key=lambda t: t[0]):
+                    if float(p) not in derived_records_by_p:
+                        continue
+                    base_cobjs = derived_records_by_p[float(p)]
+                    default_accs = [float(b.get("always", {}).get("default", {}).get("acc", float("nan"))) for b in base_cobjs if "default" in (b.get("always") or {})]
+                    default_acc_mean = float(np.mean(default_accs)) if len(default_accs) > 0 else float("nan")
+                    if not np.isfinite(default_acc_mean):
+                        continue
+                    delta_acc_pride_vs_default_pol[float(p)] = {}
+                    for key in ["default", "cyclic", "full", "switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]:
+                        accs = []
+                        for cobj in cobjs:
+                            if key in ["default", "cyclic", "full"]:
+                                always = cobj.get("always", {}) or {}
+                                if key in always:
+                                    accs.append(float(always[key]["acc"]))
+                            elif key in cobj:
+                                accs.append(float(cobj[key]["accuracies"][0]))
+                        if len(accs) > 0:
+                            delta_acc_pride_vs_default_pol[float(p)][key] = float(np.mean(accs) - default_acc_mean)
+                    delta_acc_pride_vs_default_heur[float(p)] = {}
+                    heur_labels_pvd = set()
+                    for cobj in cobjs:
+                        for hp in (cobj.get("heuristic_points", []) or []):
+                            if isinstance(hp, dict) and hp.get("label") is not None:
+                                heur_labels_pvd.add(str(hp.get("label")))
+                    for lab in heur_labels_pvd:
+                        accs = []
+                        for cobj in cobjs:
+                            hp_map = {str(h.get("label")): h for h in (cobj.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                            if lab in hp_map and "acc" in hp_map[lab]:
+                                accs.append(float(hp_map[lab]["acc"]))
+                        if len(accs) > 0:
+                            delta_acc_pride_vs_default_heur[float(p)][lab] = float(np.mean(accs) - default_acc_mean)
+                if any(len(d) > 0 for d in delta_acc_pride_vs_default_pol.values()):
+                    out_acc_pvd_pol = os.path.join(out_dir, f"{args.task}_aggregate_delta_acc_pride_vs_default_POLICIES.png")
+                    _plot_delta_cost_bars_by_p(delta_acc_pride_vs_default_pol, out_acc_pvd_pol, f"{args.task} — ΔAcc (OURS+PRIDE - default) (Policies)", ylabel="Δ Accuracy (vs default)")
+                    logger.info(_purple(f"Saved Δacc bar plot (OURS+PRIDE vs default, policies): {out_acc_pvd_pol}"))
+                    if wandb_ok and wandb_run is not None:
+                        try:
+                            import wandb
+                            wandb_run.log({f"plots/{args.task}/aggregate/delta_acc_pride_vs_default_policies": wandb.Image(out_acc_pvd_pol)})
+                        except Exception:
+                            pass
+                if any(len(d) > 0 for d in delta_acc_pride_vs_default_heur.values()):
+                    out_acc_pvd_heur = os.path.join(out_dir, f"{args.task}_aggregate_delta_acc_pride_vs_default_HEURISTICS.png")
+                    _plot_delta_cost_bars_by_p(delta_acc_pride_vs_default_heur, out_acc_pvd_heur, f"{args.task} — ΔAcc (OURS+PRIDE - default) (Heuristics)", ylabel="Δ Accuracy (vs default)")
+                    logger.info(_purple(f"Saved Δacc bar plot (OURS+PRIDE vs default, heuristics): {out_acc_pvd_heur}"))
+                    if wandb_ok and wandb_run is not None:
+                        try:
+                            import wandb
+                            wandb_run.log({f"plots/{args.task}/aggregate/delta_acc_pride_vs_default_heuristics": wandb.Image(out_acc_pvd_heur)})
                         except Exception:
                             pass
             except Exception:
