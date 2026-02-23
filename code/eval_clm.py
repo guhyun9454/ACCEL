@@ -874,18 +874,19 @@ def _plot_cyclic_random_pride_vs_baseline_curves(
     out_dir: str,
     task: str,
 ):
-    """Plot 3 curves: X=cost, Y=acc/recall_std. Each point = p(%). (1) Cyclic no PRIDE 5~100%, (2) PRIDE+OURS Online Sqrt All p=5/10/20/30, (3) OURS th1/2 no PRIDE p=5/10/20/30."""
+    """Plot 3 curves: X=cost, Y=acc/recall_std. Macro avg over subjects (MMLU: 57 subj, ARC/CSQA: 1). (1) Cyclic no PRIDE 5~100%, (2) PRIDE+OURS Online Sqrt All p=5/10/20/30, (3) OURS th1/2 no PRIDE p=5/10/20/30."""
     if not derived_records_by_p:
         logger.debug("three-curves plot skipped: derived_records_by_p empty")
         return
     fractions = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     ps_heuristic = [5, 10, 20, 30]
-    # Curve 1: Cyclic (no PRIDE) — 11 points, each (cost, acc, recall_std)
+    # Curve 1: Cyclic (no PRIDE) — 11 points, macro avg (np.mean) over subjects
     p_cyclic = next((float(p) for p in ps_heuristic if float(p) in derived_records_by_p), None)
     if p_cyclic is None:
         logger.warning("three-curves plot skipped: no p in {5,10,20,30} in derived_records_by_p (keys=%s)", list(derived_records_by_p.keys()))
         return
     cobjs_b = derived_records_by_p.get(p_cyclic, [])
+    n_subjects = len(cobjs_b)
     cost_cyclic, acc_cyclic, rstd_cyclic = [], [], []
     for fp in fractions:
         key = f"cyclic_random_{fp}"
@@ -935,9 +936,10 @@ def _plot_cyclic_random_pride_vs_baseline_curves(
     _plot_curve(ax, cost_cyclic, acc_cyclic, fractions, "o", color_cyclic, "-", "Cyclic (no PRIDE)")
     _plot_curve(ax, cost_pride, acc_pride, ps_heuristic, "s", color_pride, "--", "PRIDE+OURS (Online Sqrt All)")
     _plot_curve(ax, cost_ours, acc_ours, ps_heuristic, "^", color_ours, "-.", "OURS (th1/2, no PRIDE)")
+    macro_note = f" (macro over {n_subjects} subjects)" if n_subjects > 1 else ""
     ax.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax.set_ylabel("Accuracy (%)", fontsize=11)
-    ax.set_title(f"{task} — Accuracy", fontsize=12)
+    ax.set_title(f"{task} — Accuracy{macro_note}", fontsize=12)
     ax.legend(loc="best", fontsize=9)
     ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
@@ -952,7 +954,7 @@ def _plot_cyclic_random_pride_vs_baseline_curves(
     _plot_curve(ax2, cost_ours, rstd_ours, ps_heuristic, "^", color_ours, "-.", "OURS (th1/2, no PRIDE)")
     ax2.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax2.set_ylabel("Recall std", fontsize=11)
-    ax2.set_title(f"{task} — Recall std", fontsize=12)
+    ax2.set_title(f"{task} — Recall std{macro_note}", fontsize=12)
     ax2.legend(loc="best", fontsize=9)
     ax2.grid(True, linestyle="--", alpha=0.4)
     fig2.tight_layout()
