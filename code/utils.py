@@ -33,6 +33,9 @@ REFER_OPTIONS = [
 
 
 def save_results(save_file_path, results: list, metrics: dict = None):
+    save_dir = os.path.dirname(save_file_path)
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
     while True:
         try:
             with open(save_file_path, 'w') as f:

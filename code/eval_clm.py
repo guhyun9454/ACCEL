@@ -876,12 +876,14 @@ def _plot_cyclic_random_pride_vs_baseline_curves(
 ):
     """Plot 3 curves: X=cost, Y=acc/recall_std. Each point = p(%). (1) Cyclic no PRIDE 5~100%, (2) PRIDE+OURS Online Sqrt All p=5/10/20/30, (3) OURS th1/2 no PRIDE p=5/10/20/30."""
     if not derived_records_by_p:
+        logger.debug("three-curves plot skipped: derived_records_by_p empty")
         return
     fractions = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     ps_heuristic = [5, 10, 20, 30]
     # Curve 1: Cyclic (no PRIDE) — 11 points, each (cost, acc, recall_std)
     p_cyclic = next((float(p) for p in ps_heuristic if float(p) in derived_records_by_p), None)
     if p_cyclic is None:
+        logger.warning("three-curves plot skipped: no p in {5,10,20,30} in derived_records_by_p (keys=%s)", list(derived_records_by_p.keys()))
         return
     cobjs_b = derived_records_by_p.get(p_cyclic, [])
     cost_cyclic, acc_cyclic, rstd_cyclic = [], [], []
@@ -2806,6 +2808,7 @@ def main():
         pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
         recall_std_vs_p_records: List[dict] = []  # [{'subject':str,'p':float,'method':str,'kind':str,'rstd':float}]
 
+        os.makedirs(args.save_path, exist_ok=True)
         for subject in subjects[::1]:
             cached_path = f'{args.save_path}/{subject}.jsonl'
             use_cached = (not bool(getattr(args, 'force', False))) and os.path.exists(cached_path)
@@ -4118,6 +4121,16 @@ def main():
                 main_fig_path = os.path.join(out_dir, f"{args.task}_main_figure_cost_vs_acc.png")
                 _plot_main_figure_cost_vs_acc(derived_records_by_p, main_fig_path, args.task)
                 logger.info(_purple(f"Saved main figure (cost vs acc): {main_fig_path}"))
+                # Three-curves plot (Cyclic / PRIDE+OURS / OURS) — runs with derived_records_by_p; PRIDE optional
+                try:
+                    _plot_cyclic_random_pride_vs_baseline_curves(
+                        derived_records_by_p,
+                        derived_records_pride_by_p,
+                        out_dir,
+                        args.task,
+                    )
+                except Exception as ex:
+                    logger.warning(f"Cyclic random PRIDE vs BASELINE plot failed: {ex}")
             except Exception as ex:
                 logger.warning(f"Main figure plot failed: {ex}")
 
@@ -4414,17 +4427,6 @@ def main():
                             wandb_run.log({f"plots/{args.task}/aggregate/delta_acc_pride_vs_default_heuristics": wandb.Image(out_acc_pvd_heur)})
                         except Exception:
                             pass
-
-                # Cyclic random PRIDE vs BASELINE curves (5/10/20/30)
-                try:
-                    _plot_cyclic_random_pride_vs_baseline_curves(
-                        derived_records_by_p,
-                        derived_records_pride_by_p,
-                        out_dir,
-                        args.task,
-                    )
-                except Exception as ex:
-                    logger.warning(f"Cyclic random PRIDE vs BASELINE plot failed: {ex}")
             except Exception:
                 pass
 

@@ -134,7 +134,7 @@ def parse_arguments():
 
     args = parser.parse_args()
 
-    args.model_name = args.pretrained_model_path.split('/')[-1]
+    args.model_name = str(args.pretrained_model_path.split('/')[-1]).replace('/', '_')
 
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
