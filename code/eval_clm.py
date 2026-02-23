@@ -920,21 +920,21 @@ def _plot_cyclic_random_pride_vs_baseline_curves(
     cost_pride, acc_pride, rstd_pride = _agg_heur(cobjs_p, "Online Sqrt (All)") if cobjs_p else ([float("nan")] * 4, [float("nan")] * 4, [float("nan")] * 4)
     cost_ours, acc_ours, rstd_ours = _agg_heur(derived_records_by_p, "th1/2")
 
-    def _plot_curve(ax, costs, accs_or_rstds, fractions_or_ps, marker, color, linestyle, label, annotate_p):
+    def _plot_curve(ax, costs, accs_or_rstds, fractions_or_ps, marker, color, linestyle, label):
         valid = [(c, y) for c, y in zip(costs, accs_or_rstds) if np.isfinite(c) and np.isfinite(y)]
         if not valid:
             return
         xs, ys = zip(*sorted(valid, key=lambda t: t[0]))
         ax.plot(xs, ys, marker=marker, color=color, linestyle=linestyle, linewidth=2, markersize=8, label=label)
-        if annotate_p:
-            for (c, y), p in zip(zip(costs, accs_or_rstds), fractions_or_ps):
-                if np.isfinite(c) and np.isfinite(y):
-                    ax.annotate(f"{int(p)}%", (c, y), textcoords="offset points", xytext=(4, 4), fontsize=7, alpha=0.9)
 
+    # Colors: light blue (Full Perm), light orange (Cyclic Perm), green (PriDe)
+    color_cyclic = "#F39C12"   # light orange (Cyclic Perm)
+    color_pride = "#27AE60"    # green (PriDe)
+    color_ours = "#5DADE2"     # light blue (Full Perm)
     fig, ax = plt.subplots(figsize=(10, 6.5), dpi=160)
-    _plot_curve(ax, cost_cyclic, acc_cyclic, fractions, "o", "#1f77b4", "-", "Cyclic (no PRIDE)", True)
-    _plot_curve(ax, cost_pride, acc_pride, ps_heuristic, "s", "#d62728", "--", "PRIDE+OURS (Online Sqrt All)", True)
-    _plot_curve(ax, cost_ours, acc_ours, ps_heuristic, "^", "#2ca02c", "-.", "OURS (th1/2, no PRIDE)", True)
+    _plot_curve(ax, cost_cyclic, acc_cyclic, fractions, "o", color_cyclic, "-", "Cyclic (no PRIDE)")
+    _plot_curve(ax, cost_pride, acc_pride, ps_heuristic, "s", color_pride, "--", "PRIDE+OURS (Online Sqrt All)")
+    _plot_curve(ax, cost_ours, acc_ours, ps_heuristic, "^", color_ours, "-.", "OURS (th1/2, no PRIDE)")
     ax.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax.set_ylabel("Accuracy (%)", fontsize=11)
     ax.set_title(f"{task} — Accuracy", fontsize=12)
@@ -947,9 +947,9 @@ def _plot_cyclic_random_pride_vs_baseline_curves(
     logger.info(_purple(f"Saved three-curves acc: {out_path}"))
 
     fig2, ax2 = plt.subplots(figsize=(10, 6.5), dpi=160)
-    _plot_curve(ax2, cost_cyclic, rstd_cyclic, fractions, "o", "#1f77b4", "-", "Cyclic (no PRIDE)", True)
-    _plot_curve(ax2, cost_pride, rstd_pride, ps_heuristic, "s", "#d62728", "--", "PRIDE+OURS (Online Sqrt All)", True)
-    _plot_curve(ax2, cost_ours, rstd_ours, ps_heuristic, "^", "#2ca02c", "-.", "OURS (th1/2, no PRIDE)", True)
+    _plot_curve(ax2, cost_cyclic, rstd_cyclic, fractions, "o", color_cyclic, "-", "Cyclic (no PRIDE)")
+    _plot_curve(ax2, cost_pride, rstd_pride, ps_heuristic, "s", color_pride, "--", "PRIDE+OURS (Online Sqrt All)")
+    _plot_curve(ax2, cost_ours, rstd_ours, ps_heuristic, "^", color_ours, "-.", "OURS (th1/2, no PRIDE)")
     ax2.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax2.set_ylabel("Recall std", fontsize=11)
     ax2.set_title(f"{task} — Recall std", fontsize=12)
