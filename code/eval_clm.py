@@ -2492,6 +2492,7 @@ def _compute_curves_for_one_percentile(
     base_pred_idx: Optional[List[int]] = None,
     cyclic_pred_idx: Optional[List[int]] = None,
     probe2_pred_idx: Optional[List[int]] = None,
+    full_pred_idx: Optional[List[int]] = None,
 ) -> dict:
     """
     REAL-WORLD online evaluation (no beta / no offline prefix).
@@ -2667,6 +2668,8 @@ def _compute_curves_for_one_percentile(
             curve_obj["ours_avggap_recall_std"] = float(_recall_std(labels_idx, preds_avg, k))
             curve_obj["default_recall_std"] = float(_recall_std(labels_idx, base_pred_idx, k))
             curve_obj["cyclic_recall_std"] = float(_recall_std(labels_idx, cyclic_pred_idx, k))
+            if full_enabled and full_pred_idx is not None and len(full_pred_idx) == len(labels_idx):
+                curve_obj["full_recall_std"] = float(_recall_std(labels_idx, full_pred_idx, k))
         except Exception:
             pass
     if full_enabled:
@@ -2691,7 +2694,7 @@ def _log_baseline_report(curve_obj: dict):
     logger.info(f"BASELINE default(ensemble) : cost={always['default']['cost']:.3f}, acc={always['default']['acc']:.4f}{_recall_str(curve_obj.get('default_recall_std'))}")
     logger.info(f"BASELINE cyclic(ensemble)  : cost={always['cyclic']['cost']:.3f}, acc={always['cyclic']['acc']:.4f}{_recall_str(curve_obj.get('cyclic_recall_std'))}")
     if "full" in always:
-        logger.info(f"BASELINE full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}")
+        logger.info(f"BASELINE full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}{_recall_str(curve_obj.get('full_recall_std'))}")
     else:
         logger.info("BASELINE full(ensemble)    : (disabled)")
 
@@ -2726,7 +2729,7 @@ def _log_named_report(name: str, curve_obj: dict):
     if "cyclic" in always:
         logger.info(f"{name} cyclic(ensemble)  : cost={always['cyclic']['cost']:.3f}, acc={always['cyclic']['acc']:.4f}{_recall_str(curve_obj.get('cyclic_recall_std'))}")
     if "full" in always:
-        logger.info(f"{name} full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}")
+        logger.info(f"{name} full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}{_recall_str(curve_obj.get('full_recall_std'))}")
 
     for key in ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]:
         if key in curve_obj:
@@ -2929,9 +2932,9 @@ def main():
                 logger.info(f"Results saved: {subject}")
 
             # =========================================================
-            # Derived policies & PRIDE_FREE (historically ONLY when args.setting == 'full')
+            # Derived policies & PRIDE_FREE (full or cyclic for MMLU aggregate plots)
             # =========================================================
-            if args.setting == 'full' and len(results) > 0:
+            if args.setting in ('full', 'cyclic') and len(results) > 0:
                 try:
                     if getattr(args, 'option_id_set', None):
                         option_ids = list(args.option_id_set)
@@ -2971,6 +2974,7 @@ def main():
                     base_correct_list = []
                     cyclic_correct_list = []
                     full_correct_list = []
+                    full_pred_idx_list = []  # argmax(agg_full) for recall_std when full_enabled
 
                     base_probs_list = []  # identity row (letter-space)
                     base_pred_idx_list = []     # argmax(base_probs) as index
@@ -3041,7 +3045,9 @@ def main():
                         # full (all perms) - only if available
                         if full_enabled:
                             agg_full = _aggregate_probs_over_permutations(probs_seq_np, perm_list, k)
-                            pred_full = option_ids[int(np.argmax(agg_full))]
+                            pred_full_idx = int(np.argmax(agg_full))
+                            pred_full = option_ids[pred_full_idx]
+                            full_pred_idx_list.append(pred_full_idx)
                             corr_full = (pred_full == data['ideal'])
                             full_correct_list.append(corr_full)
                             full_corrects += 1 if corr_full else 0
@@ -3124,6 +3130,7 @@ def main():
                         base_correct_list_pr = []
                         cyclic_correct_list_pr = []
                         full_correct_list_pr = []
+                        full_pred_idx_list_pr = []
                         default_conf_pr = []
                         mean_gap_list_pr = []
                         flip_trigger_mask_pr = []
@@ -3154,8 +3161,9 @@ def main():
                             # full (if available)
                             if full_enabled:
                                 agg_full_corr = _aggregate_probs_over_permutations(ps_corr, perm_list, k)
-                                pred_full_corr = option_ids[int(np.argmax(agg_full_corr))]
-                                full_correct_list_pr.append(pred_full_corr == ideals[i])
+                                pred_full_idx_pr = int(np.argmax(agg_full_corr))
+                                full_pred_idx_list_pr.append(pred_full_idx_pr)
+                                full_correct_list_pr.append(option_ids[pred_full_idx_pr] == ideals[i])
 
                             # gaps + probe2
                             vals = np.sort(base_row_corr)[::-1]
@@ -3253,6 +3261,7 @@ def main():
                             base_pred_idx=base_pred_idx_list,
                             cyclic_pred_idx=cyclic_pred_idx_list,
                             probe2_pred_idx=probe2_pred_idx_list,
+                            full_pred_idx=full_pred_idx_list if full_enabled and len(full_pred_idx_list) == len(ideals) else None,
                         )
                         if cobj:
                             curve_objs_baseline.append(cobj)
@@ -3283,6 +3292,7 @@ def main():
                                     base_pred_idx=base_pred_idx_list_pr,
                                     cyclic_pred_idx=cyclic_pred_idx_list_pr,
                                     probe2_pred_idx=probe2_pred_idx_list_pr,
+                                    full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
                                 )
                                 if cobj_pr:
                                     curve_objs_pride.append(cobj_pr)
@@ -3310,7 +3320,7 @@ def main():
                             try:
                                 labels_idx = [option_ids.index(str(x)) for x in ideals]
 
-                                # BASELINE: default / cyclic (always)
+                                # BASELINE: default / cyclic / full (always policies)
                                 recall_std_vs_p_records.append({
                                     "subject": str(subject), "p": float(perc), "method": "default", "kind": "BASELINE",
                                     "rstd": float(_recall_std(labels_idx, base_pred_idx_list, k=k))
@@ -3319,6 +3329,11 @@ def main():
                                     "subject": str(subject), "p": float(perc), "method": "cyclic", "kind": "BASELINE",
                                     "rstd": float(_recall_std(labels_idx, cyclic_pred_idx_list, k=k))
                                 })
+                                if full_enabled and len(full_pred_idx_list) == len(labels_idx):
+                                    recall_std_vs_p_records.append({
+                                        "subject": str(subject), "p": float(perc), "method": "full", "kind": "BASELINE",
+                                        "rstd": float(_recall_std(labels_idx, full_pred_idx_list, k=k))
+                                    })
 
                                 # BASELINE: switch_cyclic (online th1 quantile; dc gate)
                                 _, _, preds_sc = _run_online_switch_cyclic_with_preds(
@@ -3444,6 +3459,11 @@ def main():
                                         "subject": str(subject), "p": float(perc), "method": "cyclic", "kind": "PRIDE+OURS",
                                         "rstd": float(_recall_std(labels_idx, cyclic_pred_idx_list_pr, k=k))
                                     })
+                                    if full_enabled and len(full_pred_idx_list_pr) == len(labels_idx):
+                                        recall_std_vs_p_records.append({
+                                            "subject": str(subject), "p": float(perc), "method": "full", "kind": "PRIDE+OURS",
+                                            "rstd": float(_recall_std(labels_idx, full_pred_idx_list_pr, k=k))
+                                        })
 
                                     # PRIDE: switch_cyclic
                                     _, _, preds_sc_pr = _run_online_switch_cyclic_with_preds(
@@ -4029,14 +4049,81 @@ def main():
                             except Exception:
                                 pass
 
-                    policy_methods = [m for m in methods if m in {"default", "cyclic", "switch_cyclic", "ours_avggap"}]
-                    heur_methods = [m for m in methods if m not in {"default", "cyclic", "switch_cyclic", "ours_avggap"}]
+                    policy_methods = [m for m in methods if m in {"default", "cyclic", "full", "switch_cyclic", "ours_avggap"}]
+                    # Heuristics plot: default, cyclic + all heuristic points (MMLU/ARC/CSQA)
+                    heur_methods = [m for m in methods if m in {"default", "cyclic"} or m not in {"default", "cyclic", "full", "switch_cyclic", "ours_avggap"}]
 
                     out_png_pol = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_vs_p_overlay_POLICIES.png")
                     _plot_overlay(policy_methods, out_png_pol, "(Policies)", f"plots/{args.task}/aggregate/recall_std_vs_p_overlay_policies")
 
                     out_png_heur = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_vs_p_overlay_HEURISTICS.png")
-                    _plot_overlay(heur_methods, out_png_heur, "(Heuristics)", f"plots/{args.task}/aggregate/recall_std_vs_p_overlay_heuristics")
+                    _plot_overlay(heur_methods, out_png_heur, "(default, cyclic + Heuristics)", f"plots/{args.task}/aggregate/recall_std_vs_p_overlay_heuristics")
+
+                    # recall_std (BASELINE) bar plot — always (pride 안 붙인 경우에도)
+                    rstd_baseline_by_p: Dict[float, Dict[str, float]] = {}
+                    for p in ps:
+                        rstd_baseline_by_p[float(p)] = {}
+                        for m in methods:
+                            r_b = _mean_rstd(m, "BASELINE", p)
+                            if np.isfinite(r_b):
+                                rstd_baseline_by_p[float(p)][m] = float(r_b)
+                    rstd_pol = {p: {m: v for m, v in (d or {}).items() if m in set(policy_methods)} for p, d in rstd_baseline_by_p.items()}
+                    rstd_heur = {p: {m: v for m, v in (d or {}).items() if m in set(heur_methods)} for p, d in rstd_baseline_by_p.items()}
+                    if any(len(d) > 0 for d in rstd_pol.values()):
+                        out_rstd_pol = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_BASELINE_POLICIES.png")
+                        _plot_delta_cost_bars_by_p(rstd_pol, out_rstd_pol, f"{args.task} — recall_std (BASELINE) (Policies)", ylabel="recall_std")
+                        logger.info(_purple(f"Saved recall_std bar plot (BASELINE, policies): {out_rstd_pol}"))
+                        if wandb_ok and wandb_run is not None:
+                            try:
+                                import wandb
+                                wandb_run.log({f"plots/{args.task}/aggregate/recall_std_baseline_policies": wandb.Image(out_rstd_pol)})
+                            except Exception:
+                                pass
+                    if any(len(d) > 0 for d in rstd_heur.values()):
+                        out_rstd_heur = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_BASELINE_HEURISTICS.png")
+                        _plot_delta_cost_bars_by_p(rstd_heur, out_rstd_heur, f"{args.task} — recall_std (BASELINE) (default, cyclic + Heuristics)", ylabel="recall_std")
+                        logger.info(_purple(f"Saved recall_std bar plot (BASELINE, heuristics): {out_rstd_heur}"))
+                        if wandb_ok and wandb_run is not None:
+                            try:
+                                import wandb
+                                wandb_run.log({f"plots/{args.task}/aggregate/recall_std_baseline_heuristics": wandb.Image(out_rstd_heur)})
+                            except Exception:
+                                pass
+
+                    # Δ recall_std (PRIDE+OURS - BASELINE) bar plot (only when PRIDE data exists)
+                    has_pride = any(str(r.get("kind")) == "PRIDE+OURS" for r in recall_std_vs_p_records)
+                    delta_rstd_by_p: Dict[float, Dict[str, float]] = {}
+                    if has_pride:
+                        for p in ps:
+                            delta_rstd_by_p[float(p)] = {}
+                            for m in methods:
+                                r_b = _mean_rstd(m, "BASELINE", p)
+                                r_p = _mean_rstd(m, "PRIDE+OURS", p)
+                                if np.isfinite(r_b) and np.isfinite(r_p):
+                                    delta_rstd_by_p[float(p)][m] = float(r_p - r_b)
+                    if has_pride:
+                        drpol_subset = {p: {m: v for m, v in (d or {}).items() if m in set(policy_methods)} for p, d in delta_rstd_by_p.items()}
+                        drheur_subset = {p: {m: v for m, v in (d or {}).items() if m in set(heur_methods)} for p, d in delta_rstd_by_p.items()}
+                    if has_pride and any(len(d) > 0 for d in drpol_subset.values()):
+                        out_png_drpol = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_delta_POLICIES.png")
+                        _plot_delta_cost_bars_by_p(drpol_subset, out_png_drpol, f"{args.task} — Δ recall_std (PRIDE+OURS - BASELINE) (Policies)", ylabel="Δ recall_std")
+                        logger.info(_purple(f"Saved Δ recall_std bar plot (policies): {out_png_drpol}"))
+                        if wandb_ok and wandb_run is not None:
+                            try:
+                                import wandb
+                                wandb_run.log({f"plots/{args.task}/aggregate/recall_std_delta_policies": wandb.Image(out_png_drpol)})
+                            except Exception:
+                                pass
+                    if has_pride and any(len(d) > 0 for d in drheur_subset.values()):
+                        out_png_drheur = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_delta_HEURISTICS.png")
+                        _plot_delta_cost_bars_by_p(drheur_subset, out_png_drheur, f"{args.task} — Δ recall_std (PRIDE+OURS - BASELINE) (default, cyclic + Heuristics)", ylabel="Δ recall_std")
+                        logger.info(_purple(f"Saved Δ recall_std bar plot (heuristics): {out_png_drheur}"))
+                        if wandb_ok and wandb_run is not None:
+                            try:
+                                import wandb
+                                wandb_run.log({f"plots/{args.task}/aggregate/recall_std_delta_heuristics": wandb.Image(out_png_drheur)})
+                            except Exception:
+                                pass
             except Exception:
                 pass
 
@@ -4049,32 +4136,31 @@ def main():
                 for key in keys:
                     accs = []
                     costs = []
-                    ws = []
+                    rstds = []
                     for cobj in cobjs:
-                        n = int(cobj.get("n_samples", 0)) or 0
                         if key in ["default", "cyclic", "full"]:
                             always = cobj.get("always", {}) or {}
                             if key not in always:
                                 continue
                             costs.append(float(always[key]["cost"]))
                             accs.append(float(always[key]["acc"]))
+                            rkey = f"{key}_recall_std"
+                            if rkey in cobj and isinstance(cobj.get(rkey), (int, float)):
+                                rstds.append(float(cobj[rkey]))
                         else:
                             if key not in cobj:
                                 continue
                             costs.append(float(cobj[key]["costs"][0]))
                             accs.append(float(cobj[key]["accuracies"][0]))
-                        ws.append(n if n > 0 else 1)
 
                     if len(accs) == 0:
                         continue
                     cost_macro = float(np.mean(costs))
                     acc_macro = float(np.mean(accs))
-                    wsum = float(np.sum(ws))
-                    acc_micro = float(np.sum([a * w for a, w in zip(accs, ws)]) / wsum) if wsum > 0 else float("nan")
-                    if single_subject:
-                        logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}")
-                    else:
-                        logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+                    line = f"{key:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
+                    if len(rstds) > 0:
+                        line += f", recall_std={float(np.mean(rstds)):.4f}"
+                    logger.info(line)
 
                 # Heuristic points (e.g., th1/2, th1/sqrt(k), Online Sqrt) if available
                 heuristic_labels = set()
@@ -4113,14 +4199,9 @@ def main():
                             continue
                         costs_f = [t[0] for t in filt]
                         accs_f = [t[1] for t in filt]
-                        ws_f = [t[2] for t in filt]
                         cost_macro = float(np.mean(costs_f))
                         acc_macro = float(np.mean(accs_f))
-                        wsum = float(np.sum(ws_f))
-                        acc_micro = float(np.sum([a * w for a, w in zip(accs_f, ws_f)]) / wsum) if wsum > 0 else float("nan")
                         line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
-                        if not single_subject:
-                            line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}"
                         if len(n_bases) == len(costs_f) and len(n_probe2s) == len(costs_f) and len(n_cyclics) == len(costs_f):
                             line += f", n_base≈{int(np.mean(n_bases)):.0f}, n_probe2≈{int(np.mean(n_probe2s)):.0f}, n_cyclic≈{int(np.mean(n_cyclics)):.0f}"
                         if len(rstds) > 0:
@@ -4155,32 +4236,31 @@ def main():
                 for key in keys:
                     accs = []
                     costs = []
-                    ws = []
+                    rstds = []
                     for cobj in cobjs:
-                        n = int(cobj.get("n_samples", 0)) or 0
                         if key in ["default", "cyclic", "full"]:
                             always = cobj.get("always", {}) or {}
                             if key not in always:
                                 continue
                             costs.append(float(always[key]["cost"]))
                             accs.append(float(always[key]["acc"]))
+                            rkey = f"{key}_recall_std"
+                            if rkey in cobj and isinstance(cobj.get(rkey), (int, float)):
+                                rstds.append(float(cobj[rkey]))
                         else:
                             if key not in cobj:
                                 continue
                             costs.append(float(cobj[key]["costs"][0]))
                             accs.append(float(cobj[key]["accuracies"][0]))
-                        ws.append(n if n > 0 else 1)
 
                     if len(accs) == 0:
                         continue
                     cost_macro = float(np.mean(costs))
                     acc_macro = float(np.mean(accs))
-                    wsum = float(np.sum(ws))
-                    acc_micro = float(np.sum([a * w for a, w in zip(accs, ws)]) / wsum) if wsum > 0 else float("nan")
-                    if single_subject:
-                        logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}")
-                    else:
-                        logger.info(f"{key:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}")
+                    line = f"{key:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
+                    if len(rstds) > 0:
+                        line += f", recall_std={float(np.mean(rstds)):.4f}"
+                    logger.info(line)
 
                 # Heuristic points averages (PRIDE+OURS)
                 heuristic_labels = set()
@@ -4218,14 +4298,9 @@ def main():
                             continue
                         costs_f = [t[0] for t in filt]
                         accs_f = [t[1] for t in filt]
-                        ws_f = [t[2] for t in filt]
                         cost_macro = float(np.mean(costs_f))
                         acc_macro = float(np.mean(accs_f))
-                        wsum = float(np.sum(ws_f))
-                        acc_micro = float(np.sum([a * w for a, w in zip(accs_f, ws_f)]) / wsum) if wsum > 0 else float("nan")
                         line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
-                        if not single_subject:
-                            line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc_macro={acc_macro:.4f}, acc_micro={acc_micro:.4f}"
                         if len(n_bases) == len(costs_f) and len(n_probe2s) == len(costs_f) and len(n_cyclics) == len(costs_f):
                             line += f", n_base≈{int(np.mean(n_bases)):.0f}, n_probe2≈{int(np.mean(n_probe2s)):.0f}, n_cyclic≈{int(np.mean(n_cyclics)):.0f}"
                         if len(rstds) > 0:
