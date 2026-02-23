@@ -4059,34 +4059,40 @@ def main():
                     out_png_heur = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_vs_p_overlay_HEURISTICS.png")
                     _plot_overlay(heur_methods, out_png_heur, "(default, cyclic + Heuristics)", f"plots/{args.task}/aggregate/recall_std_vs_p_overlay_heuristics")
 
-                    # recall_std (BASELINE) bar plot — always (pride 안 붙인 경우에도)
-                    rstd_baseline_by_p: Dict[float, Dict[str, float]] = {}
+                    # Δ recall_std (OURS without PRIDE - default) bar plot — always (pride 안 붙인 경우에도)
+                    # reference = default (baseline anchor); delta = recall_std(method) - recall_std(default)
+                    rstd_delta_from_default_by_p: Dict[float, Dict[str, float]] = {}
                     for p in ps:
-                        rstd_baseline_by_p[float(p)] = {}
+                        rstd_delta_from_default_by_p[float(p)] = {}
+                        r_default = _mean_rstd("default", "BASELINE", p)
                         for m in methods:
+                            if m == "default":
+                                continue
                             r_b = _mean_rstd(m, "BASELINE", p)
-                            if np.isfinite(r_b):
-                                rstd_baseline_by_p[float(p)][m] = float(r_b)
-                    rstd_pol = {p: {m: v for m, v in (d or {}).items() if m in set(policy_methods)} for p, d in rstd_baseline_by_p.items()}
-                    rstd_heur = {p: {m: v for m, v in (d or {}).items() if m in set(heur_methods)} for p, d in rstd_baseline_by_p.items()}
-                    if any(len(d) > 0 for d in rstd_pol.values()):
-                        out_rstd_pol = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_BASELINE_POLICIES.png")
-                        _plot_delta_cost_bars_by_p(rstd_pol, out_rstd_pol, f"{args.task} — recall_std (BASELINE) (Policies)", ylabel="recall_std")
-                        logger.info(_purple(f"Saved recall_std bar plot (BASELINE, policies): {out_rstd_pol}"))
+                            if np.isfinite(r_b) and np.isfinite(r_default):
+                                rstd_delta_from_default_by_p[float(p)][m] = float(r_b - r_default)
+                            elif np.isfinite(r_b):
+                                rstd_delta_from_default_by_p[float(p)][m] = float(r_b)
+                    rstd_delta_pol = {p: {m: v for m, v in (d or {}).items() if m in set(policy_methods)} for p, d in rstd_delta_from_default_by_p.items()}
+                    rstd_delta_heur = {p: {m: v for m, v in (d or {}).items() if m in set(heur_methods)} for p, d in rstd_delta_from_default_by_p.items()}
+                    if any(len(d) > 0 for d in rstd_delta_pol.values()):
+                        out_rstd_pol = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_delta_from_default_POLICIES.png")
+                        _plot_delta_cost_bars_by_p(rstd_delta_pol, out_rstd_pol, f"{args.task} — Δ recall_std (OURS - default) (Policies)", ylabel="Δ recall_std (vs default)")
+                        logger.info(_purple(f"Saved Δ recall_std bar plot (OURS vs default, policies): {out_rstd_pol}"))
                         if wandb_ok and wandb_run is not None:
                             try:
                                 import wandb
-                                wandb_run.log({f"plots/{args.task}/aggregate/recall_std_baseline_policies": wandb.Image(out_rstd_pol)})
+                                wandb_run.log({f"plots/{args.task}/aggregate/recall_std_delta_from_default_policies": wandb.Image(out_rstd_pol)})
                             except Exception:
                                 pass
-                    if any(len(d) > 0 for d in rstd_heur.values()):
-                        out_rstd_heur = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_BASELINE_HEURISTICS.png")
-                        _plot_delta_cost_bars_by_p(rstd_heur, out_rstd_heur, f"{args.task} — recall_std (BASELINE) (default, cyclic + Heuristics)", ylabel="recall_std")
-                        logger.info(_purple(f"Saved recall_std bar plot (BASELINE, heuristics): {out_rstd_heur}"))
+                    if any(len(d) > 0 for d in rstd_delta_heur.values()):
+                        out_rstd_heur = os.path.join(out_dir, f"{args.task}_aggregate_recall_std_delta_from_default_HEURISTICS.png")
+                        _plot_delta_cost_bars_by_p(rstd_delta_heur, out_rstd_heur, f"{args.task} — Δ recall_std (OURS - default) (default, cyclic + Heuristics)", ylabel="Δ recall_std (vs default)")
+                        logger.info(_purple(f"Saved Δ recall_std bar plot (OURS vs default, heuristics): {out_rstd_heur}"))
                         if wandb_ok and wandb_run is not None:
                             try:
                                 import wandb
-                                wandb_run.log({f"plots/{args.task}/aggregate/recall_std_baseline_heuristics": wandb.Image(out_rstd_heur)})
+                                wandb_run.log({f"plots/{args.task}/aggregate/recall_std_delta_from_default_heuristics": wandb.Image(out_rstd_heur)})
                             except Exception:
                                 pass
 
