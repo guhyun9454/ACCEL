@@ -2927,6 +2927,23 @@ def _log_baseline_report(curve_obj: dict):
                 extra += f", recall_std={rstd:.4f}"
             logger.info(f"BASELINE {key:<12} : cost={c0:.3f}, acc={a0:.4f}{extra}")
 
+    # Cyclic random fractions (plot에 쓰이는 것과 동일)
+    def _log_cyclic_random(obj: dict, prefix: str):
+        fracs = sorted([int(k.replace("cyclic_random_", "")) for k in (obj or {}).keys()
+                       if isinstance(k, str) and k.startswith("cyclic_random_") and not k.endswith("_recall_std")],
+                      key=lambda x: x)
+        if fracs:
+            logger.info(_purple(f"---- Cyclic random fractions (plot과 동일) [{prefix}] ----"))
+            for fp in fracs:
+                k = f"cyclic_random_{fp}"
+                if k in obj and isinstance(obj[k], dict) and "costs" in obj[k] and "accuracies" in obj[k]:
+                    c = float(obj[k]["costs"][0])
+                    a = float(obj[k]["accuracies"][0])
+                    rstd = obj.get(f"{k}_recall_std")
+                    extra = f", recall_std={rstd:.4f}" if isinstance(rstd, (int, float)) else ""
+                    logger.info(f"BASELINE cyclic_{fp}%      : cost={c:.3f}, acc={a:.4f}{extra}")
+    _log_cyclic_random(curve_obj, "BASELINE")
+
 
 def _log_named_report(name: str, curve_obj: dict):
     """Same format as baseline report, but with custom header prefix."""
@@ -2956,6 +2973,21 @@ def _log_named_report(name: str, curve_obj: dict):
             if isinstance(rstd, (int, float)):
                 extra += f", recall_std={rstd:.4f}"
             logger.info(f"{name} {key:<12} : cost={c0:.3f}, acc={a0:.4f}{extra}")
+
+    # Cyclic random fractions (plot Default+PRIDE curve와 동일)
+    fracs = sorted([int(k.replace("cyclic_random_", "")) for k in (curve_obj or {}).keys()
+                    if isinstance(k, str) and k.startswith("cyclic_random_") and not k.endswith("_recall_std")],
+                   key=lambda x: x)
+    if fracs:
+        logger.info(_purple(f"---- Cyclic random fractions (plot Default+PRIDE와 동일) [{name}] ----"))
+        for fp in fracs:
+            k = f"cyclic_random_{fp}"
+            if k in curve_obj and isinstance(curve_obj[k], dict) and "costs" in curve_obj[k] and "accuracies" in curve_obj[k]:
+                c = float(curve_obj[k]["costs"][0])
+                a = float(curve_obj[k]["accuracies"][0])
+                rstd = curve_obj.get(f"{k}_recall_std")
+                extra = f", recall_std={rstd:.4f}" if isinstance(rstd, (int, float)) else ""
+                logger.info(f"{name} cyclic_{fp}%      : cost={c:.3f}, acc={a:.4f}{extra}")
 
 
 def main():
@@ -3315,128 +3347,14 @@ def main():
                     curve_objs_pride = []
 
                     for run_idx in range(n_runs):
-                        pride_prior = None
-                        pride_meta = None
-                        prefix_ids_set = set()
-                        base_correct_list_pr = []
-                        cyclic_correct_list_pr = []
-                        full_correct_list_pr = []
-                        full_pred_idx_list_pr = []
-                        default_conf_pr = np.array([])
-                        mean_conf_pr = np.array([])
-                        arr_flip_trigger_pr = np.array([])
-                        arr_probe2_correct_pr = np.array([])
-                        base_pred_idx_list_pr = []
-                        cyclic_pred_idx_list_pr = []
-                        probe2_pred_idx_list_pr = []
-
-                        if pride_enabled:
-                            # Seed varies per run for n-run averaging
-                            seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)) + run_idx)
-                            pride_prior, pride_meta = _estimate_pride_prior_random_prefix_mean(
-                                per_sample_probs=per_sample_probs,
-                                cyclic_indices=cyclic_indices,
-                                k=k,
-                                prefix_ratio=float(getattr(args, "pride_prefix_ratio", 0.02)),
-                                seed=seed,
-                            )
-                            prefix_ids_set = set(int(x) for x in (pride_meta.get("prefix_ids") or []))
-                            if run_idx == 0:
-                                logger.info(_purple(f"==== PRIDE prior estimated (random prefix {pride_meta.get('m')}/{pride_meta.get('N')}) ===="))
-                                logger.info(f"prior: {[float(x) for x in np.asarray(pride_prior, dtype=np.float64).tolist()]}")
-
-                            # Recall test: base-only predictions (log once)
-                            if run_idx == 0:
-                                try:
-                                    base_labels = [option_ids.index(str(x)) for x in ideals]
-                                    base_preds = []
-                                    for i in range(len(per_sample_probs)):
-                                        ps = np.asarray(per_sample_probs[i], dtype=np.float64)
-                                        base_row = np.asarray(ps[identity_idx], dtype=np.float64)
-                                        base_row_corr = _pride_correct_row(base_row, pride_prior)
-                                        base_preds.append(int(np.argmax(base_row_corr)))
-                                    rstd = _recall_std(base_labels, base_preds, k=k)
-                                    logger.info(_purple(f"PRIDE recall_std (base-only, over labels): {rstd:.4f}"))
-                                    pride_recall_std_records.append({"subject": str(subject), "rstd": float(rstd), "m": int(pride_meta.get("m", 0)), "N": int(pride_meta.get("N", 0))})
-                                except Exception:
-                                    pass
-
-                            # build debiased correctness + gaps (same pipeline, but on corrected probs)
-                            base_correct_list_pr = []
-                            cyclic_correct_list_pr = []
-                            full_correct_list_pr = []
-                            full_pred_idx_list_pr = []
-                            default_conf_pr = []
-                            mean_gap_list_pr = []
-                            flip_trigger_mask_pr = []
-                            probe2_correct_list_pr = []
-                            base_pred_idx_list_pr = []
-                            cyclic_pred_idx_list_pr = []
-                            probe2_pred_idx_list_pr = []
-
-                            for i in range(len(per_sample_probs)):
-                                ps = np.asarray(per_sample_probs[i], dtype=np.float64)
-                                ps_corr = np.asarray([_pride_correct_row(ps[j], pride_prior) for j in range(ps.shape[0])], dtype=np.float64)
-
-                                # cyclic ensemble (k rotations)
-                                cyc_probs_corr = [ps_corr[idx] for idx in cyclic_indices]
-                                agg_cyc_corr = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs_corr], cyc_perms, k)
-                                pred_cyc_corr = option_ids[int(np.argmax(agg_cyc_corr))]
-                                cyclic_pred_idx_list_pr.append(int(np.argmax(agg_cyc_corr)))
-                                corr_cyc_corr = (pred_cyc_corr == ideals[i])
-                                cyclic_correct_list_pr.append(corr_cyc_corr)
-
-                                # base (identity)
-                                base_row_corr = np.asarray(ps_corr[identity_idx], dtype=np.float64)
-                                pred_base_corr = option_ids[int(np.argmax(base_row_corr))]
-                                base_pred_idx_list_pr.append(int(np.argmax(base_row_corr)))
-                                corr_base_corr = (pred_base_corr == ideals[i])
-                                base_correct_list_pr.append(corr_base_corr)
-
-                                # full (if available)
-                                if full_enabled:
-                                    agg_full_corr = _aggregate_probs_over_permutations(ps_corr, perm_list, k)
-                                    pred_full_idx_pr = int(np.argmax(agg_full_corr))
-                                    full_pred_idx_list_pr.append(pred_full_idx_pr)
-                                    full_correct_list_pr.append(option_ids[pred_full_idx_pr] == ideals[i])
-
-                                # gaps + probe2
-                                vals = np.sort(base_row_corr)[::-1]
-                                top1 = float(vals[0]) if vals.shape[0] > 0 else 0.0
-                                top2 = float(vals[1]) if vals.shape[0] > 1 else 0.0
-                                default_conf_pr.append(top1 - top2)
-
-                                shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_row_corr, k)
-                                probe_perm_idx = cyclic_indices[shift]
-
-                                agg_base = _aggregate_probs_over_permutations([base_row_corr.tolist()], [tuple(range(k))], k)
-                                probe_row_corr = np.asarray(ps_corr[probe_perm_idx], dtype=np.float64)
-                                agg_probe = _aggregate_probs_over_permutations([probe_row_corr.tolist()], [cyc_perms[shift]], k)
-
-                                mean_probs = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_probe, dtype=np.float64)) / 2.0
-                                vals_mean = np.sort(mean_probs)[::-1]
-                                mean_gap = float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0
-                                mean_gap_list_pr.append(mean_gap)
-
-                                pred_base_cs = option_ids[int(np.argmax(agg_base))]
-                                pred_probe_cs = option_ids[int(np.argmax(agg_probe))]
-                                flip_trigger_mask_pr.append(pred_base_cs != pred_probe_cs)
-
-                                pred2 = option_ids[int(np.argmax(mean_probs))]
-                                probe2_pred_idx_list_pr.append(int(np.argmax(mean_probs)))
-                                probe2_correct_list_pr.append(pred2 == ideals[i])
-
-                            default_conf_pr = np.asarray(default_conf_pr, dtype=np.float64)
-                            mean_conf_pr = np.asarray(mean_gap_list_pr, dtype=np.float64)
-                            arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
-                            arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
-
-                        # perc loop (inside run loop; perc_list from curve block below)
                         perc_list_run = _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100") or "5,10,20,30")
                         cyclic_fracs_run = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
+
                         for perc in perc_list_run:
                             perc = float(perc)
                             labels_idx_for_curves = [option_ids.index(str(x)) for x in ideals]
+
+                            # --- 1) BASELINE Curves 계산 ---
                             cobj = _compute_curves_for_one_percentile(
                                 subject=subject, tag="baseline", k=k, perm_list=perm_list,
                                 base_correct_list=base_correct_list, cyclic_correct_list=cyclic_correct_list,
@@ -3448,39 +3366,117 @@ def main():
                                 full_pred_idx=full_pred_idx_list if full_enabled and len(full_pred_idx_list) == len(ideals) else None,
                                 cyclic_fractions=cyclic_fracs_run, run_seed_offset=run_idx,
                             )
+
                             if cobj:
                                 by_perc_baseline[perc].append(cobj)
-                                if pride_enabled and pride_prior is not None:
-                                    pride_fracs = [int(x) for x in perc_list_run if 0 <= x <= 100]
-                                    cobj_pr = _compute_curves_for_one_percentile(
-                                        subject=subject, tag="pride_mix", k=k, perm_list=perm_list,
-                                        base_correct_list=base_correct_list_pr, cyclic_correct_list=cyclic_correct_list,
-                                        full_correct_list=full_correct_list_pr if full_enabled else [],
-                                        default_conf=default_conf_pr, mean_conf=mean_conf_pr,
-                                        flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
-                                        perc_value=perc, full_enabled=bool(full_enabled),
-                                        forced_cyclic_ids=prefix_ids_set, labels_idx=labels_idx_for_curves,
-                                        base_pred_idx=base_pred_idx_list_pr, cyclic_pred_idx=cyclic_pred_idx_list,
-                                        probe2_pred_idx=probe2_pred_idx_list_pr,
-                                        full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
-                                        cyclic_fractions=pride_fracs, run_seed_offset=run_idx,
-                                    )
-                                    if cobj_pr:
-                                        try:
-                                            if "always" in cobj and "always" in cobj_pr:
-                                                if "cyclic" in cobj["always"]:
-                                                    cobj_pr["always"]["cyclic"] = dict(cobj["always"]["cyclic"])
-                                                if "full" in (cobj["always"] or {}) and "full" in (cobj_pr["always"] or {}):
-                                                    cobj_pr["always"]["full"] = dict(cobj["always"]["full"])
-                                            if "cyclic" in cobj:
-                                                cobj_pr["cyclic"] = dict(cobj["cyclic"])
-                                            if "full" in cobj and "full" in cobj_pr:
-                                                cobj_pr["full"] = dict(cobj["full"])
-                                        except Exception:
-                                            pass
-                                        by_perc_pride[perc].append(cobj_pr)
-                                    # heuristic th1/2 for cobj_pr (report-only OURS+PRIDE)
-                                    th1p = float(perc)
+                                def _get_static_pt(th1_p, rule_func):
+                                    c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
+                                        default_conf, mean_conf, base_correct_list, cyclic_correct_list,
+                                        arr_probe2_correct, k, th1_p, rule_func, None)
+                                    out = {'cost': c, 'acc': a, 'label': 'th1/2', 'marker': '*', 'color': 'gray'}
+                                    try:
+                                        _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                            default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
+                                            labels_idx_for_curves, k, th1_p, rule_func, None)
+                                        out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
+                                        out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
+                                    except Exception:
+                                        pass
+                                    return out
+                                if "heuristic_points" not in cobj:
+                                    cobj["heuristic_points"] = [_get_static_pt(perc, lambda x: x / 2.0)]
+
+                            # --- 2) PRIDE Curves 계산 (고정 0.02 대신 perc/100.0 적용) ---
+                            if pride_enabled:
+                                seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)) + run_idx)
+                                pride_prior, pride_meta = _estimate_pride_prior_random_prefix_mean(
+                                    per_sample_probs=per_sample_probs,
+                                    cyclic_indices=cyclic_indices,
+                                    k=k,
+                                    prefix_ratio=perc / 100.0,
+                                    seed=seed,
+                                )
+                                prefix_ids_set = set(int(x) for x in (pride_meta.get("prefix_ids") or []))
+
+                                base_correct_list_pr = []
+                                cyclic_correct_list_pr = []
+                                full_correct_list_pr = []
+                                full_pred_idx_list_pr = []
+                                default_conf_pr = []
+                                mean_gap_list_pr = []
+                                flip_trigger_mask_pr = []
+                                probe2_correct_list_pr = []
+                                base_pred_idx_list_pr = []
+                                cyclic_pred_idx_list_pr = []
+                                probe2_pred_idx_list_pr = []
+
+                                for i in range(len(per_sample_probs)):
+                                    ps = np.asarray(per_sample_probs[i], dtype=np.float64)
+                                    ps_corr = np.asarray([_pride_correct_row(ps[j], pride_prior) for j in range(ps.shape[0])], dtype=np.float64)
+
+                                    # Cyclic
+                                    cyc_probs_corr = [ps_corr[idx] for idx in cyclic_indices]
+                                    agg_cyc_corr = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs_corr], cyc_perms, k)
+                                    pred_cyc_corr = option_ids[int(np.argmax(agg_cyc_corr))]
+                                    cyclic_pred_idx_list_pr.append(int(np.argmax(agg_cyc_corr)))
+                                    cyclic_correct_list_pr.append(pred_cyc_corr == ideals[i])
+
+                                    # Base
+                                    base_row_corr = np.asarray(ps_corr[identity_idx], dtype=np.float64)
+                                    pred_base_corr = option_ids[int(np.argmax(base_row_corr))]
+                                    base_pred_idx_list_pr.append(int(np.argmax(base_row_corr)))
+                                    base_correct_list_pr.append(pred_base_corr == ideals[i])
+
+                                    # Full
+                                    if full_enabled:
+                                        agg_full_corr = _aggregate_probs_over_permutations(ps_corr, perm_list, k)
+                                        pred_full_idx_pr = int(np.argmax(agg_full_corr))
+                                        full_pred_idx_list_pr.append(pred_full_idx_pr)
+                                        full_correct_list_pr.append(option_ids[pred_full_idx_pr] == ideals[i])
+
+                                    # Gaps
+                                    vals = np.sort(base_row_corr)[::-1]
+                                    default_conf_pr.append((float(vals[0]) if len(vals) > 0 else 0.0) - (float(vals[1]) if len(vals) > 1 else 0.0))
+
+                                    shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_row_corr, k)
+                                    probe_perm_idx = cyclic_indices[shift]
+                                    agg_base = _aggregate_probs_over_permutations([base_row_corr.tolist()], [tuple(range(k))], k)
+                                    probe_row_corr = np.asarray(ps_corr[probe_perm_idx], dtype=np.float64)
+                                    agg_probe = _aggregate_probs_over_permutations([probe_row_corr.tolist()], [cyc_perms[shift]], k)
+
+                                    mean_probs = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_probe, dtype=np.float64)) / 2.0
+                                    vals_mean = np.sort(mean_probs)[::-1]
+                                    mean_gap_list_pr.append(float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0)
+
+                                    pred_base_cs = option_ids[int(np.argmax(agg_base))]
+                                    pred_probe_cs = option_ids[int(np.argmax(agg_probe))]
+                                    flip_trigger_mask_pr.append(pred_base_cs != pred_probe_cs)
+
+                                    pred2 = option_ids[int(np.argmax(mean_probs))]
+                                    probe2_pred_idx_list_pr.append(int(np.argmax(mean_probs)))
+                                    probe2_correct_list_pr.append(pred2 == ideals[i])
+
+                                default_conf_pr = np.asarray(default_conf_pr, dtype=np.float64)
+                                mean_conf_pr = np.asarray(mean_gap_list_pr, dtype=np.float64)
+                                arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
+                                arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
+
+                                pride_fracs = [int(x) for x in perc_list_run if 0 <= x <= 100]
+                                cobj_pr = _compute_curves_for_one_percentile(
+                                    subject=subject, tag="pride_mix", k=k, perm_list=perm_list,
+                                    base_correct_list=base_correct_list_pr, cyclic_correct_list=cyclic_correct_list,
+                                    full_correct_list=full_correct_list_pr if full_enabled else [],
+                                    default_conf=default_conf_pr, mean_conf=mean_conf_pr,
+                                    flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
+                                    perc_value=perc, full_enabled=bool(full_enabled),
+                                    forced_cyclic_ids=prefix_ids_set, labels_idx=labels_idx_for_curves,
+                                    base_pred_idx=base_pred_idx_list_pr, cyclic_pred_idx=cyclic_pred_idx_list,
+                                    probe2_pred_idx=probe2_pred_idx_list_pr,
+                                    full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
+                                    cyclic_fractions=pride_fracs, run_seed_offset=run_idx,
+                                )
+                                if cobj_pr:
+                                    by_perc_pride[perc].append(cobj_pr)
                                     def _get_static_pt_pride(th1_p, rule_func):
                                         c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
                                             default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list,
@@ -3491,29 +3487,12 @@ def main():
                                                 default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list,
                                                 probe2_pred_idx_list_pr, labels_idx_for_curves, k, th1_p, rule_func, prefix_ids_set)
                                             out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
+                                            out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
                                         except Exception:
                                             pass
                                         return out
-                                    if cobj_pr and "heuristic_points" not in cobj_pr:
-                                        cobj_pr["heuristic_points"] = [_get_static_pt_pride(th1p, lambda x: x / 2.0)]
-
-                            # heuristic th1/2 for baseline cobj (OURS no PRIDE)
-                            th1p = float(perc)
-                            def _get_static_pt(th1_p, rule_func):
-                                c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
-                                    default_conf, mean_conf, base_correct_list, cyclic_correct_list,
-                                    arr_probe2_correct, k, th1_p, rule_func, None)
-                                out = {'cost': c, 'acc': a, 'label': 'th1/2', 'marker': '*', 'color': 'gray'}
-                                try:
-                                    _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
-                                        default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
-                                        labels_idx_for_curves, k, th1_p, rule_func, None)
-                                    out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
-                                except Exception:
-                                    pass
-                                return out
-                            if cobj and "heuristic_points" not in cobj:
-                                cobj["heuristic_points"] = [_get_static_pt(th1p, lambda x: x / 2.0)]
+                                    if "heuristic_points" not in cobj_pr:
+                                        cobj_pr["heuristic_points"] = [_get_static_pt_pride(perc, lambda x: x / 2.0)]
 
                     # Merge over runs and append to derived_records
                     perc_list = _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", None) or "2,5,10,20,30,40,50,60,70,80,90,100")
@@ -3608,87 +3587,6 @@ def main():
 
         # (PRIDE recall_std histogram removed — only three-curves acc/recall_std kept)
 
-        # Aggregate derived-policy summary (only available when args.setting == 'full')
-        if len(derived_records_by_p) > 0:
-            for p, cobjs in sorted(derived_records_by_p.items(), key=lambda t: t[0]):
-                keys = ["default", "cyclic", "full", "switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
-                logger.info(_purple(f"==== AGGREGATE Derived policy report (REAL-WORLD online, p={p}) ===="))
-                single_subject = (len(cobjs) <= 1)
-                for key in keys:
-                    accs = []
-                    costs = []
-                    rstds = []
-                    for cobj in cobjs:
-                        if key in ["default", "cyclic", "full"]:
-                            always = cobj.get("always", {}) or {}
-                            if key not in always:
-                                continue
-                            costs.append(float(always[key]["cost"]))
-                            accs.append(float(always[key]["acc"]))
-                            rkey = f"{key}_recall_std"
-                            if rkey in cobj and isinstance(cobj.get(rkey), (int, float)):
-                                rstds.append(float(cobj[rkey]))
-                        else:
-                            if key not in cobj:
-                                continue
-                            costs.append(float(cobj[key]["costs"][0]))
-                            accs.append(float(cobj[key]["accuracies"][0]))
-
-                    if len(accs) == 0:
-                        continue
-                    cost_macro = float(np.mean(costs))
-                    acc_macro = float(np.mean(accs))
-                    line = f"{key:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
-                    if len(rstds) > 0:
-                        line += f", recall_std={float(np.mean(rstds)):.4f}"
-                    logger.info(line)
-
-                # Heuristic points (e.g., th1/2, th1/sqrt(k), Online Sqrt) if available
-                heuristic_labels = set()
-                for cobj in cobjs:
-                    for hp in (cobj.get("heuristic_points", []) or []):
-                        if isinstance(hp, dict) and hp.get("label") is not None:
-                            heuristic_labels.add(str(hp.get("label")))
-
-                if len(heuristic_labels) > 0:
-                    logger.info(_purple(f"---- Heuristic points (aggregated over subjects, p={p}) ----"))
-                    for lab in sorted(heuristic_labels):
-                        costs = []
-                        accs = []
-                        ws = []
-                        n_bases, n_probe2s, n_cyclics, rstds = [], [], [], []
-                        for cobj in cobjs:
-                            n = int(cobj.get("n_samples", 0)) or 0
-                            hp_map = {str(h.get("label")): h for h in (cobj.get("heuristic_points", []) or []) if isinstance(h, dict)}
-                            if lab not in hp_map:
-                                continue
-                            h = hp_map[lab]
-                            costs.append(float(h.get("cost", float("nan"))))
-                            accs.append(float(h.get("acc", float("nan"))))
-                            ws.append(n if n > 0 else 1)
-                            if "n_base" in h and h["n_base"] is not None:
-                                n_bases.append(int(h["n_base"]))
-                            if "n_probe2" in h and h["n_probe2"] is not None:
-                                n_probe2s.append(int(h["n_probe2"]))
-                            if "n_cyclic" in h and h["n_cyclic"] is not None:
-                                n_cyclics.append(int(h["n_cyclic"]))
-                            if "recall_std" in h and isinstance(h.get("recall_std"), (int, float)):
-                                rstds.append(float(h["recall_std"]))
-                        # filter out nans
-                        filt = [(c, a, w) for c, a, w in zip(costs, accs, ws) if (not np.isnan(c)) and (not np.isnan(a))]
-                        if len(filt) == 0:
-                            continue
-                        costs_f = [t[0] for t in filt]
-                        accs_f = [t[1] for t in filt]
-                        cost_macro = float(np.mean(costs_f))
-                        acc_macro = float(np.mean(accs_f))
-                        line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
-                        if len(n_bases) == len(costs_f) and len(n_probe2s) == len(costs_f) and len(n_cyclics) == len(costs_f):
-                            line += f", n_base≈{int(np.mean(n_bases)):.0f}, n_probe2≈{int(np.mean(n_probe2s)):.0f}, n_cyclic≈{int(np.mean(n_cyclics)):.0f}"
-                        if len(rstds) > 0:
-                            line += f", recall_std={float(np.mean(rstds)):.4f}"
-                        logger.info(line)
-
         # Three-curves: Cost vs Acc, Cost vs Recall_std (Cyclic / Default+PRIDE / OURS th1/2)
         if len(derived_records_by_p) > 0:
             try:
@@ -3709,200 +3607,80 @@ def main():
             except Exception as ex:
                 logger.warning(f"Three-curves plot failed: {ex}")
 
-        # Aggregate PRIDE+OURS derived-policy summary (if enabled)
-        if len(derived_records_pride_by_p) > 0:
-            # For plotting: delta cost per p (policies + heuristics)
-            delta_cost_policies_by_p: Dict[float, Dict[str, float]] = {}
-            delta_cost_heur_by_p: Dict[float, Dict[str, float]] = {}
-            delta_acc_policies_by_p: Dict[float, Dict[str, float]] = {}
-            delta_acc_heur_by_p: Dict[float, Dict[str, float]] = {}
+        # =========================================================
+        # 커스텀 최종 요약 리포트 (사용자 맞춤형 포맷)
+        # =========================================================
+        if len(derived_records_by_p) > 0:
+            logger.info(_purple("==== FINAL CONDENSED REPORT ===="))
 
-            for p, cobjs in sorted(derived_records_pride_by_p.items(), key=lambda t: t[0]):
-                keys = ["default", "cyclic", "full", "switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
-                logger.info(_purple(f"==== AGGREGATE PRIDE+OURS Derived policy report (REAL-WORLD online, p={p}) ===="))
-                single_subject = (len(cobjs) <= 1)
-                for key in keys:
-                    accs = []
-                    costs = []
-                    rstds = []
-                    for cobj in cobjs:
-                        if key in ["default", "cyclic", "full"]:
-                            always = cobj.get("always", {}) or {}
-                            if key not in always:
-                                continue
-                            costs.append(float(always[key]["cost"]))
-                            accs.append(float(always[key]["acc"]))
-                            rkey = f"{key}_recall_std"
-                            if rkey in cobj and isinstance(cobj.get(rkey), (int, float)):
-                                rstds.append(float(cobj[rkey]))
-                        else:
-                            if key not in cobj:
-                                continue
-                            costs.append(float(cobj[key]["costs"][0]))
-                            accs.append(float(cobj[key]["accuracies"][0]))
+            def get_cyclic_stats(cobjs, p):
+                key = f"cyclic_random_{int(p)}"
+                accs, rstds = [], []
+                for c in cobjs:
+                    if key in c and "accuracies" in c[key]:
+                        accs.append(c[key]["accuracies"][0])
+                    rk = f"{key}_recall_std"
+                    if rk in c:
+                        rstds.append(c[rk])
+                if not accs:
+                    return float("nan"), float("nan")
+                return float(np.mean(accs)), float(np.nanmean(rstds)) if rstds else float("nan")
 
-                    if len(accs) == 0:
-                        continue
-                    cost_macro = float(np.mean(costs))
-                    acc_macro = float(np.mean(accs))
-                    line = f"{key:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
-                    if len(rstds) > 0:
-                        line += f", recall_std={float(np.mean(rstds)):.4f}"
-                    logger.info(line)
+            def get_heur_stats(cobjs, label="th1/2"):
+                accs, rstds, nb, np2, nc = [], [], [], [], []
+                for c in cobjs:
+                    hps = {str(h.get("label")): h for h in (c.get("heuristic_points") or []) if isinstance(h, dict)}
+                    if label in hps:
+                        h = hps[label]
+                        accs.append(h.get("acc", float("nan")))
+                        if "recall_std" in h:
+                            rstds.append(h["recall_std"])
+                        if "n_base" in h:
+                            nb.append(h["n_base"])
+                        if "n_probe2" in h:
+                            np2.append(h["n_probe2"])
+                        if "n_cyclic" in h:
+                            nc.append(h["n_cyclic"])
+                if not accs:
+                    return float("nan"), float("nan"), 0.0, 0.0, 0.0
+                return (
+                    float(np.mean(accs)),
+                    float(np.nanmean(rstds)) if rstds else float("nan"),
+                    float(np.mean(nb)) if nb else 0.0,
+                    float(np.mean(np2)) if np2 else 0.0,
+                    float(np.mean(nc)) if nc else 0.0,
+                )
 
-                # Heuristic points averages (PRIDE+OURS)
-                heuristic_labels = set()
-                for cobj in cobjs:
-                    for hp in (cobj.get("heuristic_points", []) or []):
-                        if isinstance(hp, dict) and hp.get("label") is not None:
-                            heuristic_labels.add(str(hp.get("label")))
+            pride_fracs = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+            cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
-                if len(heuristic_labels) > 0:
-                    logger.info(_purple(f"---- Heuristic points (PRIDE+OURS aggregated over subjects, p={p}) ----"))
-                    for lab in sorted(heuristic_labels):
-                        costs = []
-                        accs = []
-                        ws = []
-                        n_bases, n_probe2s, n_cyclics, rstds = [], [], [], []
-                        for cobj in cobjs:
-                            n = int(cobj.get("n_samples", 0)) or 0
-                            hp_map = {str(h.get("label")): h for h in (cobj.get("heuristic_points", []) or []) if isinstance(h, dict)}
-                            if lab not in hp_map:
-                                continue
-                            h = hp_map[lab]
-                            costs.append(float(h.get("cost", float("nan"))))
-                            accs.append(float(h.get("acc", float("nan"))))
-                            ws.append(n if n > 0 else 1)
-                            if "n_base" in h and h["n_base"] is not None:
-                                n_bases.append(int(h["n_base"]))
-                            if "n_probe2" in h and h["n_probe2"] is not None:
-                                n_probe2s.append(int(h["n_probe2"]))
-                            if "n_cyclic" in h and h["n_cyclic"] is not None:
-                                n_cyclics.append(int(h["n_cyclic"]))
-                            if "recall_std" in h and isinstance(h.get("recall_std"), (int, float)):
-                                rstds.append(float(h["recall_std"]))
-                        filt = [(c, a, w) for c, a, w in zip(costs, accs, ws) if (not np.isnan(c)) and (not np.isnan(a))]
-                        if len(filt) == 0:
-                            continue
-                        costs_f = [t[0] for t in filt]
-                        accs_f = [t[1] for t in filt]
-                        cost_macro = float(np.mean(costs_f))
-                        acc_macro = float(np.mean(accs_f))
-                        line = f"{lab:<14}: cost≈{cost_macro:.3f}, acc={acc_macro:.4f}"
-                        if len(n_bases) == len(costs_f) and len(n_probe2s) == len(costs_f) and len(n_cyclics) == len(costs_f):
-                            line += f", n_base≈{int(np.mean(n_bases)):.0f}, n_probe2≈{int(np.mean(n_probe2s)):.0f}, n_cyclic≈{int(np.mean(n_cyclics)):.0f}"
-                        if len(rstds) > 0:
-                            line += f", recall_std={float(np.mean(rstds)):.4f}"
-                        logger.info(line)
+            # 1. default + pride
+            logger.info("---- default + pride ----")
+            for p in pride_fracs:
+                if float(p) in derived_records_pride_by_p:
+                    acc, rstd = get_cyclic_stats(derived_records_pride_by_p[float(p)], p)
+                    logger.info(f"default_pride_{p:03d}% : acc={acc:.4f}, recall_std={rstd:.4f}")
 
-                # cost/acc overhead vs BASELINE (Δ data always for plots; extra log when verbose)
+            # 2. ours + pride
+            logger.info("---- ours + pride ----")
+            for p in pride_fracs:
+                if float(p) in derived_records_pride_by_p:
+                    acc, rstd, nb, np2, nc = get_heur_stats(derived_records_pride_by_p[float(p)], "th1/2")
+                    logger.info(f"ours_pride_{p:03d}% : acc={acc:.4f}, recall_std={rstd:.4f}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+
+            # 3. ours
+            logger.info("---- ours ----")
+            for p in pride_fracs:
                 if float(p) in derived_records_by_p:
-                    try:
-                        base_cobjs = derived_records_by_p[float(p)]
-                        if bool(getattr(args, "verbose", False)):
-                            logger.info(_purple(f"---- Prefix overhead Δcost (PRIDE+OURS - BASELINE), p={p} ----"))
-                        for key in keys:
-                            base_costs = []
-                            pride_costs = []
-                            for b, pr in zip(base_cobjs, cobjs):
-                                if key in ["default", "cyclic", "full"]:
-                                    if key in (b.get("always", {}) or {}) and key in (pr.get("always", {}) or {}):
-                                        base_costs.append(float(b["always"][key]["cost"]))
-                                        pride_costs.append(float(pr["always"][key]["cost"]))
-                                else:
-                                    if key in b and key in pr:
-                                        base_costs.append(float(b[key]["costs"][0]))
-                                        pride_costs.append(float(pr[key]["costs"][0]))
-                            if len(base_costs) == 0 or len(pride_costs) == 0:
-                                continue
-                            d = float(np.mean(np.asarray(pride_costs, dtype=np.float64) - np.asarray(base_costs, dtype=np.float64)))
-                            if bool(getattr(args, "verbose", False)):
-                                logger.info(f"{key:<14}: Δcost≈{d:+.3f}")
-                            delta_cost_policies_by_p.setdefault(float(p), {})[str(key)] = float(d)
+                    acc, rstd, nb, np2, nc = get_heur_stats(derived_records_by_p[float(p)], "th1/2")
+                    logger.info(f"ours_{p:03d}% : acc={acc:.4f}, recall_std={rstd:.4f}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
-                            # Δacc (macro over subjects)
-                            try:
-                                base_accs = []
-                                pride_accs = []
-                                for b, pr in zip(base_cobjs, cobjs):
-                                    if key in ["default", "cyclic", "full"]:
-                                        if key in (b.get("always", {}) or {}) and key in (pr.get("always", {}) or {}):
-                                            base_accs.append(float(b["always"][key]["acc"]))
-                                            pride_accs.append(float(pr["always"][key]["acc"]))
-                                    else:
-                                        if key in b and key in pr:
-                                            base_accs.append(float(b[key]["accuracies"][0]))
-                                            pride_accs.append(float(pr[key]["accuracies"][0]))
-                                if len(base_accs) > 0 and len(pride_accs) > 0:
-                                    da = float(np.mean(np.asarray(pride_accs, dtype=np.float64) - np.asarray(base_accs, dtype=np.float64)))
-                                    delta_acc_policies_by_p.setdefault(float(p), {})[str(key)] = float(da)
-                            except Exception:
-                                pass
-
-                        # Δacc for policies (skip switch_cyclic, ours_top2flip, ours_avggap)
-                        skip_dacc_keys = {"switch_cyclic", "ours_top2flip", "ours_avggap"}
-                        if float(p) in delta_acc_policies_by_p:
-                            logger.info(_purple(f"---- Prefix overhead Δacc (PRIDE+OURS - BASELINE), p={p} ----"))
-                            for key in keys:
-                                if key in skip_dacc_keys:
-                                    continue
-                                if key in (delta_acc_policies_by_p.get(float(p), {}) or {}):
-                                    logger.info(f"{key:<14}: Δacc≈{float(delta_acc_policies_by_p[float(p)][key]):+.4f}")
-
-                        # Heuristic delta-costs (if present on both)
-                        heur_labels = set()
-                        for b, pr in zip(base_cobjs, cobjs):
-                            for hp in (b.get("heuristic_points", []) or []):
-                                if isinstance(hp, dict) and hp.get("label") is not None:
-                                    heur_labels.add(str(hp.get("label")))
-                        for lab in sorted(list(heur_labels)):
-                            bcosts = []
-                            pcosts = []
-                            for b, pr in zip(base_cobjs, cobjs):
-                                bmap = {str(h.get("label")): h for h in (b.get("heuristic_points", []) or []) if isinstance(h, dict)}
-                                pmap = {str(h.get("label")): h for h in (pr.get("heuristic_points", []) or []) if isinstance(h, dict)}
-                                if lab not in bmap or lab not in pmap:
-                                    continue
-                                bcosts.append(float(bmap[lab].get("cost", float("nan"))))
-                                pcosts.append(float(pmap[lab].get("cost", float("nan"))))
-                            filt = [(bb, pp) for bb, pp in zip(bcosts, pcosts) if np.isfinite(bb) and np.isfinite(pp)]
-                            if len(filt) == 0:
-                                continue
-                            bb = np.asarray([t[0] for t in filt], dtype=np.float64)
-                            pp = np.asarray([t[1] for t in filt], dtype=np.float64)
-                            d2 = float(np.mean(pp - bb))
-                            delta_cost_heur_by_p.setdefault(float(p), {})[str(lab)] = float(d2)
-
-                            # heuristic Δacc (macro)
-                            try:
-                                baccs = []
-                                paccs = []
-                                for b, pr in zip(base_cobjs, cobjs):
-                                    bmap = {str(h.get("label")): h for h in (b.get("heuristic_points", []) or []) if isinstance(h, dict)}
-                                    pmap = {str(h.get("label")): h for h in (pr.get("heuristic_points", []) or []) if isinstance(h, dict)}
-                                    if lab in bmap and lab in pmap:
-                                        baccs.append(float(bmap[lab].get("acc", float("nan"))))
-                                        paccs.append(float(pmap[lab].get("acc", float("nan"))))
-                                filt2 = [(ba, pa) for ba, pa in zip(baccs, paccs) if np.isfinite(ba) and np.isfinite(pa)]
-                                if len(filt2) > 0:
-                                    ba = np.asarray([t[0] for t in filt2], dtype=np.float64)
-                                    pa = np.asarray([t[1] for t in filt2], dtype=np.float64)
-                                    da2 = float(np.mean(pa - ba))
-                                    delta_acc_heur_by_p.setdefault(float(p), {})[str(lab)] = float(da2)
-                            except Exception:
-                                pass
-
-                        # Print heuristics Δcost/Δacc
-                        if float(p) in delta_cost_heur_by_p:
-                            logger.info(_purple(f"---- Prefix overhead Δcost (Heuristics), p={p} ----"))
-                            for lab, v in sorted((delta_cost_heur_by_p.get(float(p), {}) or {}).items(), key=lambda t: str(t[0])):
-                                logger.info(f"{str(lab):<18}: Δcost≈{float(v):+.3f}")
-                        if float(p) in delta_acc_heur_by_p:
-                            logger.info(_purple(f"---- Prefix overhead Δacc (Heuristics), p={p} ----"))
-                            for lab, v in sorted((delta_acc_heur_by_p.get(float(p), {}) or {}).items(), key=lambda t: str(t[0])):
-                                logger.info(f"{str(lab):<18}: Δacc≈{float(v):+.4f}")
-                    except Exception:
-                        pass
+            # 4. cyclic
+            logger.info("---- cyclic ----")
+            base_any_cobjs = next(iter(derived_records_by_p.values()), []) if derived_records_by_p else []
+            for p in cyclic_fracs:
+                acc, rstd = get_cyclic_stats(base_any_cobjs, p)
+                logger.info(f"cyclic_{p:03d}% : acc={acc:.4f}, recall_std={rstd:.4f}")
 
     # -------- finalize W&B --------
     try:
