@@ -2752,7 +2752,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.pretrained_model_path,
         device_map='auto',
-        use_safetensors=True,
+        use_safetensors=False,
         torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
         cache_dir=getattr(args, "cache_dir", None),
     )
