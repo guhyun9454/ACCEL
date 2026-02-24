@@ -928,7 +928,16 @@ def _plot_th2_tradeoff_curve_compare(
     """
     dense_th2_list = list(range(1, 31))
     default_acc_base = float(np.mean(np.asarray(base_correct_base, dtype=np.float64))) if len(base_correct_base) else float("nan")
-    default_acc_pr = float(np.mean(np.asarray(base_correct_pr, dtype=np.float64))) if len(base_correct_pr) else float("nan")
+    # PRIDE default: prefix->cyclic, postfix->base (debias_pride.py와 동일)
+    Npr = len(base_correct_pr)
+    if forced_cyclic_ids_pr is not None and Npr > 0:
+        default_corrects_pr = [
+            cyclic_correct_pr[i] if i in forced_cyclic_ids_pr else base_correct_pr[i]
+            for i in range(Npr)
+        ]
+        default_acc_pr = float(np.mean(np.asarray(default_corrects_pr, dtype=np.float64)))
+    else:
+        default_acc_pr = float(np.mean(np.asarray(base_correct_pr, dtype=np.float64))) if Npr else float("nan")
     # Anchor for PRIDE curves: use BASELINE default as reference (requested)
     anchor_default_acc = float(default_acc_base)
 
@@ -2136,7 +2145,16 @@ def _compute_and_plot_th2_tradeoff(
     4. Online Sqrt (All) (D)
     5. Online Sqrt (LowConf-only update) (X)
     """
-    default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
+    # Default: prefix->cyclic, postfix->base (debias_pride.py와 동일)
+    N = len(base_correct_list)
+    if forced_cyclic_ids is not None:
+        default_corrects = [
+            cyclic_correct_list[i] if i in forced_cyclic_ids else base_correct_list[i]
+            for i in range(N)
+        ]
+        default_acc = float(np.mean(np.asarray(default_corrects, dtype=np.float64)))
+    else:
+        default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
     
     # Dense curve range (requested: 1..30)
     dense_th2_list = list(range(1, 31))
@@ -2463,7 +2481,15 @@ def _compute_curves_for_one_percentile(
     C_cyc = float(k)
     C_full = float(len(perm_list)) if full_enabled else float("nan")
 
-    default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
+    # Default ensemble: prefix -> cyclic, postfix -> base (debias_pride.py와 동일)
+    if forced_cyclic_ids is not None:
+        default_corrects = [
+            cyclic_correct_list[i] if i in forced_cyclic_ids else base_correct_list[i]
+            for i in range(N)
+        ]
+        default_acc = float(np.mean(np.asarray(default_corrects, dtype=np.float64)))
+    else:
+        default_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64)))
     cyclic_acc_always = float(np.mean(np.asarray(cyclic_correct_list, dtype=np.float64)))
     full_acc_always = float(np.mean(np.asarray(full_correct_list, dtype=np.float64))) if full_enabled and len(full_correct_list) == N else float("nan")
 
@@ -2622,7 +2648,13 @@ def _compute_curves_for_one_percentile(
             curve_obj["switch_cyclic_recall_std"] = float(_recall_std(labels_idx, preds_sc, k))
             curve_obj["ours_top2flip_recall_std"] = float(_recall_std(labels_idx, preds_top2, k))
             curve_obj["ours_avggap_recall_std"] = float(_recall_std(labels_idx, preds_avg, k))
-            curve_obj["default_recall_std"] = float(_recall_std(labels_idx, base_pred_idx, k))
+            # Default: prefix->cyclic, postfix->base (debias_pride.py와 동일)
+            default_pred_idx = (
+                [cyclic_pred_idx[i] if i in forced_cyclic_ids else base_pred_idx[i] for i in range(N)]
+                if forced_cyclic_ids is not None
+                else base_pred_idx
+            )
+            curve_obj["default_recall_std"] = float(_recall_std(labels_idx, default_pred_idx, k))
             curve_obj["cyclic_recall_std"] = float(_recall_std(labels_idx, cyclic_pred_idx, k))
             if full_enabled and full_pred_idx is not None and len(full_pred_idx) == len(labels_idx):
                 curve_obj["full_recall_std"] = float(_recall_std(labels_idx, full_pred_idx, k))
