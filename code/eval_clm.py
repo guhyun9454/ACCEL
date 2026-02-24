@@ -3081,530 +3081,541 @@ def main():
         transition_records_full: List[dict] = []
 
         for subject in subjects[::1]:
-            cached_path = f'{args.save_path}/{subject}.jsonl'
-            use_cached = (not bool(getattr(args, 'force', False))) and os.path.exists(cached_path)
+            # n_runs > 1이면 run별 다른 seed로 평가 (few-shot, run_seed 고정 해제)
+            run_indices = list(range(n_runs))
+            for run_idx in run_indices:
+                use_run_suffix = (n_runs > 1)
+                cached_path = (f'{args.save_path}/{subject}_run{run_idx}.jsonl' if use_run_suffix
+                               else f'{args.save_path}/{subject}.jsonl')
+                use_cached = (not bool(getattr(args, 'force', False))) and os.path.exists(cached_path)
 
-            logger.info(_blue(f"Preparing: {subject}"))
-            few_shot_samples = prepare_few_shot_samples(subject)
-            eval_samples = prepare_eval_samples(subject)
-            eval_fn = prepare_eval_fn(model, toker, few_shot_samples)
+                few_shot_seed = run_idx if use_run_suffix else None
+                run_seed = run_idx if use_run_suffix else None
 
-            if use_cached:
-                logger.info(_blue(f"Using cached results: {cached_path}"))
-                results = _read_results_file(cached_path) or []
-            else:
-                logger.info(_blue(f"Run started: {subject}"))
-                max_samples = 100 if bool(getattr(args, 'test', False)) else None
-                n_threads = torch.cuda.device_count()
-                n_threads = max(1, int(n_threads)) if 'falcon' not in args.pretrained_model_path else 1
-                results = eval_all_samples(
-                    eval_fn, eval_samples,
-                    name=f'{args.task},{args.num_few_shot},{args.setting},{subject}',
-                    threads=n_threads,
-                    max_num_samples=max_samples,
-                )
-                gc.collect()
-                torch.cuda.empty_cache()
+                logger.info(_blue(f"Preparing: {subject}" + (f" [run {run_idx+1}/{n_runs}]" if use_run_suffix else "")))
+                few_shot_samples = prepare_few_shot_samples(subject, few_shot_seed=few_shot_seed)
+                eval_samples = prepare_eval_samples(subject)
+                eval_fn = prepare_eval_fn(model, toker, few_shot_samples)
 
-            metrics = None
-            if len(results) > 0:
-                if args.setting in ['perm', 'full', 'cyclic']:
-                    if getattr(args, 'option_id_set', None):
-                        option_ids = list(args.option_id_set)
-                    else:
-                        k_guess = len(results[0]['data']['options'])
-                        option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
-                    k = len(option_ids)
+                if use_cached:
+                    logger.info(_blue(f"Using cached results: {cached_path}"))
+                    results = _read_results_file(cached_path) or []
+                else:
+                    logger.info(_blue(f"Run started: {subject}" + (f" [run {run_idx+1}/{n_runs}]" if use_run_suffix else "")))
+                    max_samples = 100 if bool(getattr(args, 'test', False)) else None
+                    n_threads = torch.cuda.device_count()
+                    n_threads = max(1, int(n_threads)) if 'falcon' not in args.pretrained_model_path else 1
+                    results = eval_all_samples(
+                        eval_fn, eval_samples,
+                        name=f'{args.task},{args.num_few_shot},{args.setting},{subject}' + (f',run{run_idx}' if use_run_suffix else ''),
+                        threads=n_threads,
+                        max_num_samples=max_samples,
+                        run_seed=run_seed,
+                    )
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
-                    # If results contain only k rotations (e.g., k>=5 full-permutation disabled),
-                    # aggregate with rotations instead of factorial permutations.
-                    probs_len0 = None
-                    try:
-                        probs_len0 = len(results[0]['data'].get('probs', []))
-                    except Exception:
-                        probs_len0 = None
-
-                    if args.setting in ['perm', 'full']:
-                        if probs_len0 == k:
-                            logger.info(_orange(f"[Auto] Full permutation disabled or not provided (k={k}). Using cyclic rotations for aggregation."))
-                            perm_list = _rotations(k)
+                metrics = None
+                if len(results) > 0:
+                    if args.setting in ['perm', 'full', 'cyclic']:
+                        if getattr(args, 'option_id_set', None):
+                            option_ids = list(args.option_id_set)
                         else:
+                            k_guess = len(results[0]['data']['options'])
+                            option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
+                        k = len(option_ids)
+
+                        # If results contain only k rotations (e.g., k>=5 full-permutation disabled),
+                        # aggregate with rotations instead of factorial permutations.
+                        probs_len0 = None
+                        try:
+                            probs_len0 = len(results[0]['data'].get('probs', []))
+                        except Exception:
+                            probs_len0 = None
+
+                        if args.setting in ['perm', 'full']:
+                            if probs_len0 == k:
+                                logger.info(_orange(f"[Auto] Full permutation disabled or not provided (k={k}). Using cyclic rotations for aggregation."))
+                                perm_list = _rotations(k)
+                            else:
+                                from itertools import permutations
+                                perm_list = list(sorted(permutations(range(k))))
+                        else:
+                            perm_list = _rotations(k)
+
+                        total = 0
+                        corrects = 0
+                        for r in results:
+                            if r.get('type') != 'result':
+                                continue
+                            data = r['data']
+                            probs_seq = data.get('probs', None)
+                            if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
+                                continue
+                            agg = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
+                            pred_letter = option_ids[int(np.argmax(agg))]
+                            if pred_letter == data['ideal']:
+                                corrects += 1
+                            total += 1
+                        acc = (corrects / total) if total > 0 else float('nan')
+                        metrics = {'type': 'metric', 'data': {'accuracy': acc}}
+                        logger.info(_purple(f"==== Ensemble report ({args.setting}) ===="))
+                        logger.info(f"accuracy: {acc:.4f}")
+
+                        # aggregate: (micro uses correct/total; macro uses per-subject acc mean)
+                        if total > 0:
+                            eval_acc_records.append({
+                                "subject": str(subject),
+                                "corrects": int(corrects),
+                                "total": int(total),
+                                "acc": float(acc),
+                            })
+                    else:
+                        metrics = {'type': 'metric', 'data': {}}
+                        metrics['data']['accuracy'] = get_accuracy(results)
+                        metrics['data']['boostrap_std'] = get_bootstrap_accuracy_std(results)
+
+                        # aggregate (base/noid/shuffle etc)
+                        total_b = 0
+                        corrects_b = 0
+                        for r in results:
+                            if r.get("type") != "result":
+                                continue
+                            data = r.get("data", {}) or {}
+                            corr = data.get("correct", None)
+                            if corr is None:
+                                if ("sampled" in data) and ("ideal" in data):
+                                    corr = (data.get("sampled") == data.get("ideal"))
+                                else:
+                                    continue
+                            total_b += 1
+                            corrects_b += 1 if bool(corr) else 0
+                        if total_b > 0:
+                            eval_acc_records.append({
+                                "subject": str(subject),
+                                "corrects": int(corrects_b),
+                                "total": int(total_b),
+                                "acc": float(corrects_b) / float(total_b),
+                            })
+
+                logger.info(_orange(f"Run completed: {subject}" + (f" [run {run_idx+1}/{n_runs}]" if use_run_suffix else "")))
+
+                if not use_cached:
+                    save_results(cached_path, results, metrics)
+                    logger.info(f"Results saved: {subject}" + (f" [run {run_idx}]" if use_run_suffix else ""))
+
+                # =========================================================
+                # Derived policies & PRIDE_FREE (full or cyclic for MMLU aggregate plots)
+                # =========================================================
+                if args.setting in ('full', 'cyclic') and len(results) > 0:
+                    try:
+                        if getattr(args, 'option_id_set', None):
+                            option_ids = list(args.option_id_set)
+                        else:
+                            k_guess = len(results[0]['data']['options'])
+                            option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
+                        k = len(option_ids)
+
+                        # Determine whether full permutations exist in cached results.
+                        probs_len0 = None
+                        try:
+                            probs_len0 = len(results[0]['data'].get('probs', []))
+                        except Exception:
+                            probs_len0 = None
+
+                        full_enabled = (probs_len0 is not None and probs_len0 == math.factorial(k))
+                        if full_enabled:
                             from itertools import permutations
                             perm_list = list(sorted(permutations(range(k))))
-                    else:
-                        perm_list = _rotations(k)
-
-                    total = 0
-                    corrects = 0
-                    for r in results:
-                        if r.get('type') != 'result':
-                            continue
-                        data = r['data']
-                        probs_seq = data.get('probs', None)
-                        if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
-                            continue
-                        agg = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
-                        pred_letter = option_ids[int(np.argmax(agg))]
-                        if pred_letter == data['ideal']:
-                            corrects += 1
-                        total += 1
-                    acc = (corrects / total) if total > 0 else float('nan')
-                    metrics = {'type': 'metric', 'data': {'accuracy': acc}}
-                    logger.info(_purple(f"==== Ensemble report ({args.setting}) ===="))
-                    logger.info(f"accuracy: {acc:.4f}")
-
-                    # aggregate: (micro uses correct/total; macro uses per-subject acc mean)
-                    if total > 0:
-                        eval_acc_records.append({
-                            "subject": str(subject),
-                            "corrects": int(corrects),
-                            "total": int(total),
-                            "acc": float(acc),
-                        })
-                else:
-                    metrics = {'type': 'metric', 'data': {}}
-                    metrics['data']['accuracy'] = get_accuracy(results)
-                    metrics['data']['boostrap_std'] = get_bootstrap_accuracy_std(results)
-
-                    # aggregate (base/noid/shuffle etc)
-                    total_b = 0
-                    corrects_b = 0
-                    for r in results:
-                        if r.get("type") != "result":
-                            continue
-                        data = r.get("data", {}) or {}
-                        corr = data.get("correct", None)
-                        if corr is None:
-                            if ("sampled" in data) and ("ideal" in data):
-                                corr = (data.get("sampled") == data.get("ideal"))
-                            else:
-                                continue
-                        total_b += 1
-                        corrects_b += 1 if bool(corr) else 0
-                    if total_b > 0:
-                        eval_acc_records.append({
-                            "subject": str(subject),
-                            "corrects": int(corrects_b),
-                            "total": int(total_b),
-                            "acc": float(corrects_b) / float(total_b),
-                        })
-
-            logger.info(_orange(f"Run completed: {subject}"))
-
-            if not use_cached:
-                save_results(cached_path, results, metrics)
-                logger.info(f"Results saved: {subject}")
-
-            # =========================================================
-            # Derived policies & PRIDE_FREE (full or cyclic for MMLU aggregate plots)
-            # =========================================================
-            if args.setting in ('full', 'cyclic') and len(results) > 0:
-                try:
-                    if getattr(args, 'option_id_set', None):
-                        option_ids = list(args.option_id_set)
-                    else:
-                        k_guess = len(results[0]['data']['options'])
-                        option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
-                    k = len(option_ids)
-
-                    # Determine whether full permutations exist in cached results.
-                    probs_len0 = None
-                    try:
-                        probs_len0 = len(results[0]['data'].get('probs', []))
-                    except Exception:
-                        probs_len0 = None
-
-                    full_enabled = (probs_len0 is not None and probs_len0 == math.factorial(k))
-                    if full_enabled:
-                        from itertools import permutations
-                        perm_list = list(sorted(permutations(range(k))))
-                    else:
-                        # fallback to cyclic rotations only
-                        logger.info(_orange(f"[Auto] k={k} full permutations not available. Running derived policies with cyclic rotations only."))
-                        perm_list = _rotations(k)
-                    identity_idx = perm_list.index(tuple(range(k)))
-
-                    cyclic_indices = [
-                        perm_list.index(tuple((i + s) % k for i in range(k)))
-                        for s in range(k)
-                    ]
-                    cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]
-
-                    # ---------- collect per-sample raw probs ----------
-                    per_sample_probs = []
-                    ideals = []
-
-                    # ---------- derived correctness lists (baseline) ----------
-                    base_correct_list = []
-                    cyclic_correct_list = []
-                    full_correct_list = []
-                    full_pred_idx_list = []  # argmax(agg_full) for recall_std when full_enabled
-
-                    base_probs_list = []  # identity row (letter-space)
-                    base_pred_idx_list = []     # argmax(base_probs) as index
-                    cyclic_pred_idx_list = []   # argmax(agg_cyc) as index
-                    probe2_pred_idx_list = []   # argmax(mean_probs) as index
-
-                    cyclic_results = []
-                    base_results = []
-
-                    full_total = 0
-                    full_corrects = 0
-                    cyclic_total = 0
-                    cyclic_corrects = 0
-
-                    for r in results:
-                        if r.get('type') != 'result':
-                            continue
-                        data = r['data']
-                        probs_seq = data.get('probs')
-                        if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
-                            continue
-
-                        probs_seq_np = np.asarray(probs_seq, dtype=np.float64)
-                        per_sample_probs.append(probs_seq_np)
-
-                        ideals.append(data['ideal'])
-
-                        # cyclic (k rotations)
-                        cyc_probs = [probs_seq_np[idx] for idx in cyclic_indices]
-                        cyclic_results.append({
-                            'type': 'result',
-                            'data': {
-                                'idx': data['idx'],
-                                'prompt': data.get('prompt'),
-                                'options': data['options'],
-                                'probs': [cp.tolist() for cp in cyc_probs],
-                                'ideal': data['ideal'],
-                            },
-                        })
-                        agg_cyc = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs], cyc_perms, k)
-                        pred_cyc = option_ids[int(np.argmax(agg_cyc))]
-                        cyclic_pred_idx_list.append(int(np.argmax(agg_cyc)))
-                        corr_cyc = (pred_cyc == data['ideal'])
-                        cyclic_correct_list.append(corr_cyc)
-                        cyclic_corrects += 1 if corr_cyc else 0
-                        cyclic_total += 1
-
-                        # base (identity only)
-                        base_probs = np.asarray(probs_seq_np[identity_idx], dtype=np.float64)
-                        base_probs_list.append(base_probs)
-                        pred_base = option_ids[int(np.argmax(base_probs))]
-                        base_pred_idx_list.append(int(np.argmax(base_probs)))
-                        corr_base = (pred_base == data['ideal'])
-                        base_correct_list.append(corr_base)
-                        base_results.append({
-                            'type': 'result',
-                            'data': {
-                                'idx': data['idx'],
-                                'prompt': data.get('prompt'),
-                                'options': data['options'],
-                                'probs': base_probs.tolist(),
-                                'sampled': pred_base,
-                                'ideal': data['ideal'],
-                                'correct': corr_base,
-                            },
-                        })
-
-                        # full (all perms) - only if available
-                        if full_enabled:
-                            agg_full = _aggregate_probs_over_permutations(probs_seq_np, perm_list, k)
-                            pred_full_idx = int(np.argmax(agg_full))
-                            pred_full = option_ids[pred_full_idx]
-                            full_pred_idx_list.append(pred_full_idx)
-                            corr_full = (pred_full == data['ideal'])
-                            full_correct_list.append(corr_full)
-                            full_corrects += 1 if corr_full else 0
-                            full_total += 1
-
-                    # ---------- confidence stats & probe triggers (baseline) ----------
-                    default_conf = []          # base gap (letter-space)
-                    mean_gap_list = []         # gap(mean(base,probe)) (content-space)
-                    flip_trigger_mask = []     # pred_base != pred_probe (content-space)
-                    probe2_correct_list = []   # correctness of argmax(mean_probs)
-
-                    for i, bp in enumerate(base_probs_list):
-                        bp = np.asarray(bp, dtype=np.float64)
-                        vals = np.sort(bp)[::-1]
-                        top1 = float(vals[0]) if vals.shape[0] > 0 else 0.0
-                        top2 = float(vals[1]) if vals.shape[0] > 1 else 0.0
-                        default_conf.append(top1 - top2)
-
-                        shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(bp, k)
-                        probe_perm_idx = cyclic_indices[shift]
-
-                        probs_base_raw = per_sample_probs[i][identity_idx]
-                        agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [tuple(range(k))], k)
-
-                        probs_probe_raw = per_sample_probs[i][probe_perm_idx]
-                        agg_probe = _aggregate_probs_over_permutations([probs_probe_raw.tolist()], [cyc_perms[shift]], k)
-
-                        mean_probs = (agg_base + agg_probe) / 2.0
-                        vals_mean = np.sort(mean_probs)[::-1]
-                        mean_gap = float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0
-                        mean_gap_list.append(mean_gap)
-
-                        pred_base_cs = option_ids[int(np.argmax(agg_base))]
-                        pred_probe_cs = option_ids[int(np.argmax(agg_probe))]
-                        flip_trigger_mask.append(pred_base_cs != pred_probe_cs)
-
-                        pred2 = option_ids[int(np.argmax(mean_probs))]
-                        probe2_pred_idx_list.append(int(np.argmax(mean_probs)))
-                        probe2_correct_list.append(pred2 == ideals[i])
-
-                    default_conf = np.asarray(default_conf, dtype=np.float64)
-                    mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
-                    arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
-                    arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
-
-                    # Base T/F 그룹별 Gap 및 트랜지션 카운트 수집 (Cyclic & Full)
-                    base_t_gaps_cyc, base_f_gaps_cyc = [], []
-                    t_to_f_count_cyc, f_to_t_count_cyc = 0, 0
-                    for bc, cc, conf in zip(base_correct_list, cyclic_correct_list, default_conf):
-                        if bc:
-                            base_t_gaps_cyc.append(float(conf))
-                            if not cc:
-                                t_to_f_count_cyc += 1
                         else:
-                            base_f_gaps_cyc.append(float(conf))
-                            if cc:
-                                f_to_t_count_cyc += 1
-                    transition_records_cyclic.append({
-                        "subject": str(subject),
-                        "base_t_gaps": base_t_gaps_cyc,
-                        "base_f_gaps": base_f_gaps_cyc,
-                        "t_to_f_count": t_to_f_count_cyc,
-                        "f_to_t_count": f_to_t_count_cyc,
-                    })
+                            # fallback to cyclic rotations only
+                            logger.info(_orange(f"[Auto] k={k} full permutations not available. Running derived policies with cyclic rotations only."))
+                            perm_list = _rotations(k)
+                        identity_idx = perm_list.index(tuple(range(k)))
 
-                    if full_enabled and len(full_correct_list) == len(base_correct_list):
-                        base_t_gaps_full, base_f_gaps_full = [], []
-                        t_to_f_count_full, f_to_t_count_full = 0, 0
-                        for bc, fc, conf in zip(base_correct_list, full_correct_list, default_conf):
+                        cyclic_indices = [
+                            perm_list.index(tuple((i + s) % k for i in range(k)))
+                            for s in range(k)
+                        ]
+                        cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]
+
+                        # ---------- collect per-sample raw probs ----------
+                        per_sample_probs = []
+                        ideals = []
+
+                        # ---------- derived correctness lists (baseline) ----------
+                        base_correct_list = []
+                        cyclic_correct_list = []
+                        full_correct_list = []
+                        full_pred_idx_list = []  # argmax(agg_full) for recall_std when full_enabled
+
+                        base_probs_list = []  # identity row (letter-space)
+                        base_pred_idx_list = []     # argmax(base_probs) as index
+                        cyclic_pred_idx_list = []   # argmax(agg_cyc) as index
+                        probe2_pred_idx_list = []   # argmax(mean_probs) as index
+
+                        cyclic_results = []
+                        base_results = []
+
+                        full_total = 0
+                        full_corrects = 0
+                        cyclic_total = 0
+                        cyclic_corrects = 0
+
+                        for r in results:
+                            if r.get('type') != 'result':
+                                continue
+                            data = r['data']
+                            probs_seq = data.get('probs')
+                            if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
+                                continue
+
+                            probs_seq_np = np.asarray(probs_seq, dtype=np.float64)
+                            per_sample_probs.append(probs_seq_np)
+
+                            ideals.append(data['ideal'])
+
+                            # cyclic (k rotations)
+                            cyc_probs = [probs_seq_np[idx] for idx in cyclic_indices]
+                            cyclic_results.append({
+                                'type': 'result',
+                                'data': {
+                                    'idx': data['idx'],
+                                    'prompt': data.get('prompt'),
+                                    'options': data['options'],
+                                    'probs': [cp.tolist() for cp in cyc_probs],
+                                    'ideal': data['ideal'],
+                                },
+                            })
+                            agg_cyc = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs], cyc_perms, k)
+                            pred_cyc = option_ids[int(np.argmax(agg_cyc))]
+                            cyclic_pred_idx_list.append(int(np.argmax(agg_cyc)))
+                            corr_cyc = (pred_cyc == data['ideal'])
+                            cyclic_correct_list.append(corr_cyc)
+                            cyclic_corrects += 1 if corr_cyc else 0
+                            cyclic_total += 1
+
+                            # base (identity only)
+                            base_probs = np.asarray(probs_seq_np[identity_idx], dtype=np.float64)
+                            base_probs_list.append(base_probs)
+                            pred_base = option_ids[int(np.argmax(base_probs))]
+                            base_pred_idx_list.append(int(np.argmax(base_probs)))
+                            corr_base = (pred_base == data['ideal'])
+                            base_correct_list.append(corr_base)
+                            base_results.append({
+                                'type': 'result',
+                                'data': {
+                                    'idx': data['idx'],
+                                    'prompt': data.get('prompt'),
+                                    'options': data['options'],
+                                    'probs': base_probs.tolist(),
+                                    'sampled': pred_base,
+                                    'ideal': data['ideal'],
+                                    'correct': corr_base,
+                                },
+                            })
+
+                            # full (all perms) - only if available
+                            if full_enabled:
+                                agg_full = _aggregate_probs_over_permutations(probs_seq_np, perm_list, k)
+                                pred_full_idx = int(np.argmax(agg_full))
+                                pred_full = option_ids[pred_full_idx]
+                                full_pred_idx_list.append(pred_full_idx)
+                                corr_full = (pred_full == data['ideal'])
+                                full_correct_list.append(corr_full)
+                                full_corrects += 1 if corr_full else 0
+                                full_total += 1
+
+                        # ---------- confidence stats & probe triggers (baseline) ----------
+                        default_conf = []          # base gap (letter-space)
+                        mean_gap_list = []         # gap(mean(base,probe)) (content-space)
+                        flip_trigger_mask = []     # pred_base != pred_probe (content-space)
+                        probe2_correct_list = []   # correctness of argmax(mean_probs)
+
+                        for i, bp in enumerate(base_probs_list):
+                            bp = np.asarray(bp, dtype=np.float64)
+                            vals = np.sort(bp)[::-1]
+                            top1 = float(vals[0]) if vals.shape[0] > 0 else 0.0
+                            top2 = float(vals[1]) if vals.shape[0] > 1 else 0.0
+                            default_conf.append(top1 - top2)
+
+                            shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(bp, k)
+                            probe_perm_idx = cyclic_indices[shift]
+
+                            probs_base_raw = per_sample_probs[i][identity_idx]
+                            agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [tuple(range(k))], k)
+
+                            probs_probe_raw = per_sample_probs[i][probe_perm_idx]
+                            agg_probe = _aggregate_probs_over_permutations([probs_probe_raw.tolist()], [cyc_perms[shift]], k)
+
+                            mean_probs = (agg_base + agg_probe) / 2.0
+                            vals_mean = np.sort(mean_probs)[::-1]
+                            mean_gap = float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0
+                            mean_gap_list.append(mean_gap)
+
+                            pred_base_cs = option_ids[int(np.argmax(agg_base))]
+                            pred_probe_cs = option_ids[int(np.argmax(agg_probe))]
+                            flip_trigger_mask.append(pred_base_cs != pred_probe_cs)
+
+                            pred2 = option_ids[int(np.argmax(mean_probs))]
+                            probe2_pred_idx_list.append(int(np.argmax(mean_probs)))
+                            probe2_correct_list.append(pred2 == ideals[i])
+
+                        default_conf = np.asarray(default_conf, dtype=np.float64)
+                        mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
+                        arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
+                        arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
+
+                        # Base T/F 그룹별 Gap 및 트랜지션 카운트 수집 (Cyclic & Full)
+                        base_t_gaps_cyc, base_f_gaps_cyc = [], []
+                        t_to_f_count_cyc, f_to_t_count_cyc = 0, 0
+                        for bc, cc, conf in zip(base_correct_list, cyclic_correct_list, default_conf):
                             if bc:
-                                base_t_gaps_full.append(float(conf))
-                                if not fc:
-                                    t_to_f_count_full += 1
+                                base_t_gaps_cyc.append(float(conf))
+                                if not cc:
+                                    t_to_f_count_cyc += 1
                             else:
-                                base_f_gaps_full.append(float(conf))
-                                if fc:
-                                    f_to_t_count_full += 1
-                        transition_records_full.append({
+                                base_f_gaps_cyc.append(float(conf))
+                                if cc:
+                                    f_to_t_count_cyc += 1
+                        transition_records_cyclic.append({
                             "subject": str(subject),
-                            "base_t_gaps": base_t_gaps_full,
-                            "base_f_gaps": base_f_gaps_full,
-                            "t_to_f_count": t_to_f_count_full,
-                            "f_to_t_count": f_to_t_count_full,
+                            "base_t_gaps": base_t_gaps_cyc,
+                            "base_f_gaps": base_f_gaps_cyc,
+                            "t_to_f_count": t_to_f_count_cyc,
+                            "f_to_t_count": f_to_t_count_cyc,
                         })
 
-                    # ---------- optional: PRIDE debiasing + n_runs averaging (like debiase_pride.py) ----------
-                    pride_enabled = bool(getattr(args, "pride_mix", False))
-                    by_perc_baseline: Dict[float, List[dict]] = defaultdict(list)
-                    by_perc_pride: Dict[float, List[dict]] = defaultdict(list)
-                    curve_objs_baseline = []
-                    curve_objs_pride = []
+                        if full_enabled and len(full_correct_list) == len(base_correct_list):
+                            base_t_gaps_full, base_f_gaps_full = [], []
+                            t_to_f_count_full, f_to_t_count_full = 0, 0
+                            for bc, fc, conf in zip(base_correct_list, full_correct_list, default_conf):
+                                if bc:
+                                    base_t_gaps_full.append(float(conf))
+                                    if not fc:
+                                        t_to_f_count_full += 1
+                                else:
+                                    base_f_gaps_full.append(float(conf))
+                                    if fc:
+                                        f_to_t_count_full += 1
+                            transition_records_full.append({
+                                "subject": str(subject),
+                                "base_t_gaps": base_t_gaps_full,
+                                "base_f_gaps": base_f_gaps_full,
+                                "t_to_f_count": t_to_f_count_full,
+                                "f_to_t_count": f_to_t_count_full,
+                            })
 
-                    for run_idx in range(n_runs):
-                        perc_list_run = _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100") or "5,10,20,30")
-                        cyclic_fracs_run = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
+                        # ---------- optional: PRIDE debiasing + n_runs averaging (like debiase_pride.py) ----------
+                        pride_enabled = bool(getattr(args, "pride_mix", False))
+                        by_perc_baseline: Dict[float, List[dict]] = defaultdict(list)
+                        by_perc_pride: Dict[float, List[dict]] = defaultdict(list)
+                        curve_objs_baseline = []
+                        curve_objs_pride = []
 
-                        for perc in perc_list_run:
-                            perc = float(perc)
-                            labels_idx_for_curves = [option_ids.index(str(x)) for x in ideals]
+                        # n_runs>1이면 외부 run_idx당 1회만 (이미 다른 결과). n_runs==1이면 n_runs번 curve variation
+                        inner_run_indices = [run_idx] if use_run_suffix else list(range(n_runs))
+                        for run_idx_inner in inner_run_indices:
+                            perc_list_run = _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100") or "5,10,20,30")
+                            cyclic_fracs_run = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
 
-                            # --- 1) BASELINE Curves 계산 ---
-                            cobj = _compute_curves_for_one_percentile(
-                                subject=subject, tag="baseline", k=k, perm_list=perm_list,
-                                base_correct_list=base_correct_list, cyclic_correct_list=cyclic_correct_list,
-                                full_correct_list=full_correct_list if full_enabled else [],
-                                default_conf=default_conf, mean_conf=mean_conf, flip_trigger=arr_flip_trigger,
-                                probe2_correct=arr_probe2_correct, perc_value=perc, full_enabled=bool(full_enabled),
-                                labels_idx=labels_idx_for_curves, base_pred_idx=base_pred_idx_list,
-                                cyclic_pred_idx=cyclic_pred_idx_list, probe2_pred_idx=probe2_pred_idx_list,
-                                full_pred_idx=full_pred_idx_list if full_enabled and len(full_pred_idx_list) == len(ideals) else None,
-                                cyclic_fractions=cyclic_fracs_run, run_seed_offset=run_idx,
-                            )
+                            for perc in perc_list_run:
+                                perc = float(perc)
+                                labels_idx_for_curves = [option_ids.index(str(x)) for x in ideals]
 
-                            if cobj:
-                                by_perc_baseline[perc].append(cobj)
-                                def _get_static_pt(th1_p, rule_func):
-                                    c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
-                                        default_conf, mean_conf, base_correct_list, cyclic_correct_list,
-                                        arr_probe2_correct, k, th1_p, rule_func, None)
-                                    out = {'cost': c, 'acc': a, 'label': 'th1/2', 'marker': '*', 'color': 'gray'}
-                                    try:
-                                        _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
-                                            default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
-                                            labels_idx_for_curves, k, th1_p, rule_func, None)
-                                        out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
-                                        out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
-                                    except Exception:
-                                        pass
-                                    return out
-                                if "heuristic_points" not in cobj:
-                                    cobj["heuristic_points"] = [_get_static_pt(perc, lambda x: x / 2.0)]
-
-                            # --- 2) PRIDE Curves 계산 (고정 0.02 대신 perc/100.0 적용) ---
-                            if pride_enabled:
-                                seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)) + run_idx)
-                                pride_prior, pride_meta = _estimate_pride_prior_random_prefix_mean(
-                                    per_sample_probs=per_sample_probs,
-                                    cyclic_indices=cyclic_indices,
-                                    k=k,
-                                    prefix_ratio=perc / 100.0,
-                                    seed=seed,
+                                # --- 1) BASELINE Curves 계산 ---
+                                cobj = _compute_curves_for_one_percentile(
+                                    subject=subject, tag="baseline", k=k, perm_list=perm_list,
+                                    base_correct_list=base_correct_list, cyclic_correct_list=cyclic_correct_list,
+                                    full_correct_list=full_correct_list if full_enabled else [],
+                                    default_conf=default_conf, mean_conf=mean_conf, flip_trigger=arr_flip_trigger,
+                                    probe2_correct=arr_probe2_correct, perc_value=perc, full_enabled=bool(full_enabled),
+                                    labels_idx=labels_idx_for_curves, base_pred_idx=base_pred_idx_list,
+                                    cyclic_pred_idx=cyclic_pred_idx_list, probe2_pred_idx=probe2_pred_idx_list,
+                                    full_pred_idx=full_pred_idx_list if full_enabled and len(full_pred_idx_list) == len(ideals) else None,
+                                    cyclic_fractions=cyclic_fracs_run, run_seed_offset=run_idx_inner,
                                 )
-                                prefix_ids_set = set(int(x) for x in (pride_meta.get("prefix_ids") or []))
 
-                                base_correct_list_pr = []
-                                cyclic_correct_list_pr = []
-                                full_correct_list_pr = []
-                                full_pred_idx_list_pr = []
-                                default_conf_pr = []
-                                mean_gap_list_pr = []
-                                flip_trigger_mask_pr = []
-                                probe2_correct_list_pr = []
-                                base_pred_idx_list_pr = []
-                                cyclic_pred_idx_list_pr = []
-                                probe2_pred_idx_list_pr = []
-
-                                for i in range(len(per_sample_probs)):
-                                    ps = np.asarray(per_sample_probs[i], dtype=np.float64)
-                                    ps_corr = np.asarray([_pride_correct_row(ps[j], pride_prior) for j in range(ps.shape[0])], dtype=np.float64)
-
-                                    # Cyclic
-                                    cyc_probs_corr = [ps_corr[idx] for idx in cyclic_indices]
-                                    agg_cyc_corr = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs_corr], cyc_perms, k)
-                                    pred_cyc_corr = option_ids[int(np.argmax(agg_cyc_corr))]
-                                    cyclic_pred_idx_list_pr.append(int(np.argmax(agg_cyc_corr)))
-                                    cyclic_correct_list_pr.append(pred_cyc_corr == ideals[i])
-
-                                    # Base
-                                    base_row_corr = np.asarray(ps_corr[identity_idx], dtype=np.float64)
-                                    pred_base_corr = option_ids[int(np.argmax(base_row_corr))]
-                                    base_pred_idx_list_pr.append(int(np.argmax(base_row_corr)))
-                                    base_correct_list_pr.append(pred_base_corr == ideals[i])
-
-                                    # Full
-                                    if full_enabled:
-                                        agg_full_corr = _aggregate_probs_over_permutations(ps_corr, perm_list, k)
-                                        pred_full_idx_pr = int(np.argmax(agg_full_corr))
-                                        full_pred_idx_list_pr.append(pred_full_idx_pr)
-                                        full_correct_list_pr.append(option_ids[pred_full_idx_pr] == ideals[i])
-
-                                    # Gaps
-                                    vals = np.sort(base_row_corr)[::-1]
-                                    default_conf_pr.append((float(vals[0]) if len(vals) > 0 else 0.0) - (float(vals[1]) if len(vals) > 1 else 0.0))
-
-                                    shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_row_corr, k)
-                                    probe_perm_idx = cyclic_indices[shift]
-                                    agg_base = _aggregate_probs_over_permutations([base_row_corr.tolist()], [tuple(range(k))], k)
-                                    probe_row_corr = np.asarray(ps_corr[probe_perm_idx], dtype=np.float64)
-                                    agg_probe = _aggregate_probs_over_permutations([probe_row_corr.tolist()], [cyc_perms[shift]], k)
-
-                                    mean_probs = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_probe, dtype=np.float64)) / 2.0
-                                    vals_mean = np.sort(mean_probs)[::-1]
-                                    mean_gap_list_pr.append(float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0)
-
-                                    pred_base_cs = option_ids[int(np.argmax(agg_base))]
-                                    pred_probe_cs = option_ids[int(np.argmax(agg_probe))]
-                                    flip_trigger_mask_pr.append(pred_base_cs != pred_probe_cs)
-
-                                    pred2 = option_ids[int(np.argmax(mean_probs))]
-                                    probe2_pred_idx_list_pr.append(int(np.argmax(mean_probs)))
-                                    probe2_correct_list_pr.append(pred2 == ideals[i])
-
-                                default_conf_pr = np.asarray(default_conf_pr, dtype=np.float64)
-                                mean_conf_pr = np.asarray(mean_gap_list_pr, dtype=np.float64)
-                                arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
-                                arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
-
-                                pride_fracs = [int(x) for x in perc_list_run if 0 <= x <= 100]
-                                cobj_pr = _compute_curves_for_one_percentile(
-                                    subject=subject, tag="pride_mix", k=k, perm_list=perm_list,
-                                    base_correct_list=base_correct_list_pr, cyclic_correct_list=cyclic_correct_list,
-                                    full_correct_list=full_correct_list_pr if full_enabled else [],
-                                    default_conf=default_conf_pr, mean_conf=mean_conf_pr,
-                                    flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
-                                    perc_value=perc, full_enabled=bool(full_enabled),
-                                    forced_cyclic_ids=prefix_ids_set, labels_idx=labels_idx_for_curves,
-                                    base_pred_idx=base_pred_idx_list_pr, cyclic_pred_idx=cyclic_pred_idx_list,
-                                    probe2_pred_idx=probe2_pred_idx_list_pr,
-                                    full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
-                                    cyclic_fractions=pride_fracs, run_seed_offset=run_idx,
-                                )
-                                if cobj_pr:
-                                    by_perc_pride[perc].append(cobj_pr)
-                                    def _get_static_pt_pride(th1_p, rule_func):
+                                if cobj:
+                                    by_perc_baseline[perc].append(cobj)
+                                    def _get_static_pt(th1_p, rule_func):
                                         c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
-                                            default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list,
-                                            arr_probe2_correct_pr, k, th1_p, rule_func, prefix_ids_set)
+                                            default_conf, mean_conf, base_correct_list, cyclic_correct_list,
+                                            arr_probe2_correct, k, th1_p, rule_func, None)
                                         out = {'cost': c, 'acc': a, 'label': 'th1/2', 'marker': '*', 'color': 'gray'}
                                         try:
                                             _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
-                                                default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list,
-                                                probe2_pred_idx_list_pr, labels_idx_for_curves, k, th1_p, rule_func, prefix_ids_set)
+                                                default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
+                                                labels_idx_for_curves, k, th1_p, rule_func, None)
                                             out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
                                             out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
                                         except Exception:
                                             pass
                                         return out
-                                    if "heuristic_points" not in cobj_pr:
-                                        cobj_pr["heuristic_points"] = [_get_static_pt_pride(perc, lambda x: x / 2.0)]
+                                    if "heuristic_points" not in cobj:
+                                        cobj["heuristic_points"] = [_get_static_pt(perc, lambda x: x / 2.0)]
 
-                    # Merge over runs and append to derived_records
-                    perc_list = _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", None) or "2,5,10,20,30,40,50,60,70,80,90,100")
-                    for perc in perc_list:
-                        perc = float(perc)
-                        cobjs_b = by_perc_baseline.get(perc, [])
-                        cobjs_p = by_perc_pride.get(perc, [])
-                        merged_b = _merge_curve_objs_over_runs(cobjs_b) if cobjs_b else None
-                        merged_p = _merge_curve_objs_over_runs(cobjs_p) if cobjs_p else None
-                        if merged_b:
-                            derived_records_by_p.setdefault(perc, []).append(merged_b)
-                            curve_objs_baseline.append(merged_b)
-                        if merged_p:
-                            derived_records_pride_by_p.setdefault(perc, []).append(merged_p)
-                            curve_objs_pride.append(merged_p)
+                                # --- 2) PRIDE Curves 계산 (고정 0.02 대신 perc/100.0 적용) ---
+                                if pride_enabled:
+                                    seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)) + run_idx_inner)
+                                    pride_prior, pride_meta = _estimate_pride_prior_random_prefix_mean(
+                                        per_sample_probs=per_sample_probs,
+                                        cyclic_indices=cyclic_indices,
+                                        k=k,
+                                        prefix_ratio=perc / 100.0,
+                                        seed=seed,
+                                    )
+                                    prefix_ids_set = set(int(x) for x in (pride_meta.get("prefix_ids") or []))
 
-                    # ---------- save cyclic/base derived results ----------
-                    cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
-                    if getattr(args, 'option_id_set', None):
-                        cyclic_save_path += f'_id-{args.option_id_set}'
-                    os.makedirs(cyclic_save_path, exist_ok=True)
+                                    base_correct_list_pr = []
+                                    cyclic_correct_list_pr = []
+                                    full_correct_list_pr = []
+                                    full_pred_idx_list_pr = []
+                                    default_conf_pr = []
+                                    mean_gap_list_pr = []
+                                    flip_trigger_mask_pr = []
+                                    probe2_correct_list_pr = []
+                                    base_pred_idx_list_pr = []
+                                    cyclic_pred_idx_list_pr = []
+                                    probe2_pred_idx_list_pr = []
 
-                    cyclic_acc = (cyclic_corrects / cyclic_total) if cyclic_total > 0 else float('nan')
-                    save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results,
+                                    for i in range(len(per_sample_probs)):
+                                        ps = np.asarray(per_sample_probs[i], dtype=np.float64)
+                                        ps_corr = np.asarray([_pride_correct_row(ps[j], pride_prior) for j in range(ps.shape[0])], dtype=np.float64)
+
+                                        # Cyclic
+                                        cyc_probs_corr = [ps_corr[idx] for idx in cyclic_indices]
+                                        agg_cyc_corr = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs_corr], cyc_perms, k)
+                                        pred_cyc_corr = option_ids[int(np.argmax(agg_cyc_corr))]
+                                        cyclic_pred_idx_list_pr.append(int(np.argmax(agg_cyc_corr)))
+                                        cyclic_correct_list_pr.append(pred_cyc_corr == ideals[i])
+
+                                        # Base
+                                        base_row_corr = np.asarray(ps_corr[identity_idx], dtype=np.float64)
+                                        pred_base_corr = option_ids[int(np.argmax(base_row_corr))]
+                                        base_pred_idx_list_pr.append(int(np.argmax(base_row_corr)))
+                                        base_correct_list_pr.append(pred_base_corr == ideals[i])
+
+                                        # Full
+                                        if full_enabled:
+                                            agg_full_corr = _aggregate_probs_over_permutations(ps_corr, perm_list, k)
+                                            pred_full_idx_pr = int(np.argmax(agg_full_corr))
+                                            full_pred_idx_list_pr.append(pred_full_idx_pr)
+                                            full_correct_list_pr.append(option_ids[pred_full_idx_pr] == ideals[i])
+
+                                        # Gaps
+                                        vals = np.sort(base_row_corr)[::-1]
+                                        default_conf_pr.append((float(vals[0]) if len(vals) > 0 else 0.0) - (float(vals[1]) if len(vals) > 1 else 0.0))
+
+                                        shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_row_corr, k)
+                                        probe_perm_idx = cyclic_indices[shift]
+                                        agg_base = _aggregate_probs_over_permutations([base_row_corr.tolist()], [tuple(range(k))], k)
+                                        probe_row_corr = np.asarray(ps_corr[probe_perm_idx], dtype=np.float64)
+                                        agg_probe = _aggregate_probs_over_permutations([probe_row_corr.tolist()], [cyc_perms[shift]], k)
+
+                                        mean_probs = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_probe, dtype=np.float64)) / 2.0
+                                        vals_mean = np.sort(mean_probs)[::-1]
+                                        mean_gap_list_pr.append(float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0)
+
+                                        pred_base_cs = option_ids[int(np.argmax(agg_base))]
+                                        pred_probe_cs = option_ids[int(np.argmax(agg_probe))]
+                                        flip_trigger_mask_pr.append(pred_base_cs != pred_probe_cs)
+
+                                        pred2 = option_ids[int(np.argmax(mean_probs))]
+                                        probe2_pred_idx_list_pr.append(int(np.argmax(mean_probs)))
+                                        probe2_correct_list_pr.append(pred2 == ideals[i])
+
+                                    default_conf_pr = np.asarray(default_conf_pr, dtype=np.float64)
+                                    mean_conf_pr = np.asarray(mean_gap_list_pr, dtype=np.float64)
+                                    arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
+                                    arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
+
+                                    pride_fracs = [int(x) for x in perc_list_run if 0 <= x <= 100]
+                                    cobj_pr = _compute_curves_for_one_percentile(
+                                        subject=subject, tag="pride_mix", k=k, perm_list=perm_list,
+                                        base_correct_list=base_correct_list_pr, cyclic_correct_list=cyclic_correct_list,
+                                        full_correct_list=full_correct_list_pr if full_enabled else [],
+                                        default_conf=default_conf_pr, mean_conf=mean_conf_pr,
+                                        flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
+                                        perc_value=perc, full_enabled=bool(full_enabled),
+                                        forced_cyclic_ids=prefix_ids_set, labels_idx=labels_idx_for_curves,
+                                        base_pred_idx=base_pred_idx_list_pr, cyclic_pred_idx=cyclic_pred_idx_list,
+                                        probe2_pred_idx=probe2_pred_idx_list_pr,
+                                        full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
+                                        cyclic_fractions=pride_fracs, run_seed_offset=run_idx_inner,
+                                    )
+                                    if cobj_pr:
+                                        by_perc_pride[perc].append(cobj_pr)
+                                        def _get_static_pt_pride(th1_p, rule_func):
+                                            c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
+                                                default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list,
+                                                arr_probe2_correct_pr, k, th1_p, rule_func, prefix_ids_set)
+                                            out = {'cost': c, 'acc': a, 'label': 'th1/2', 'marker': '*', 'color': 'gray'}
+                                            try:
+                                                _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                                    default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list,
+                                                    probe2_pred_idx_list_pr, labels_idx_for_curves, k, th1_p, rule_func, prefix_ids_set)
+                                                out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
+                                                out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
+                                            except Exception:
+                                                pass
+                                            return out
+                                        if "heuristic_points" not in cobj_pr:
+                                            cobj_pr["heuristic_points"] = [_get_static_pt_pride(perc, lambda x: x / 2.0)]
+
+                        # Merge over runs and append to derived_records
+                        perc_list = _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", None) or "2,5,10,20,30,40,50,60,70,80,90,100")
+                        for perc in perc_list:
+                            perc = float(perc)
+                            cobjs_b = by_perc_baseline.get(perc, [])
+                            cobjs_p = by_perc_pride.get(perc, [])
+                            merged_b = _merge_curve_objs_over_runs(cobjs_b) if cobjs_b else None
+                            merged_p = _merge_curve_objs_over_runs(cobjs_p) if cobjs_p else None
+                            if merged_b:
+                                derived_records_by_p.setdefault(perc, []).append(merged_b)
+                                curve_objs_baseline.append(merged_b)
+                            if merged_p:
+                                derived_records_pride_by_p.setdefault(perc, []).append(merged_p)
+                                curve_objs_pride.append(merged_p)
+
+                        # ---------- save cyclic/base derived results ----------
+                        cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
+                        if getattr(args, 'option_id_set', None):
+                            cyclic_save_path += f'_id-{args.option_id_set}'
+                        os.makedirs(cyclic_save_path, exist_ok=True)
+
+                        cyclic_acc = (cyclic_corrects / cyclic_total) if cyclic_total > 0 else float('nan')
+                        save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results,
                                  metrics={'type': 'metric', 'data': {'accuracy': cyclic_acc}})
 
-                    base_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}'
-                    if getattr(args, 'option_id_set', None):
-                        base_save_path += f'_id-{args.option_id_set}'
-                    os.makedirs(base_save_path, exist_ok=True)
+                        base_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}'
+                        if getattr(args, 'option_id_set', None):
+                            base_save_path += f'_id-{args.option_id_set}'
+                        os.makedirs(base_save_path, exist_ok=True)
 
-                    base_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64))) if len(base_correct_list) else float('nan')
-                    save_results(f'{base_save_path}/{subject}.jsonl', base_results,
+                        base_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64))) if len(base_correct_list) else float('nan')
+                        save_results(f'{base_save_path}/{subject}.jsonl', base_results,
                                  metrics={'type': 'metric', 'data': {'accuracy': base_acc}})
 
-                    full_acc = (full_corrects / full_total) if full_total > 0 else float('nan')
+                        full_acc = (full_corrects / full_total) if full_total > 0 else float('nan')
 
-                    # ---------- curve save path (for per-subject plots when not MMLU) ----------
-                    curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
-                    if getattr(args, 'option_id_set', None):
-                        curve_save_path += f'_id-{args.option_id_set}'
-                    os.makedirs(curve_save_path, exist_ok=True)
+                        # ---------- curve save path (for per-subject plots when not MMLU) ----------
+                        curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
+                        if getattr(args, 'option_id_set', None):
+                            curve_save_path += f'_id-{args.option_id_set}'
+                        os.makedirs(curve_save_path, exist_ok=True)
 
-                    # (per-subject report removed — FINAL CONDENSED REPORT only)
-                    save_results(f'{curve_save_path}/{subject}_curve.jsonl', curve_objs_baseline, metrics=None)
-                    if pride_enabled and len(curve_objs_pride) > 0:
-                        save_results(f'{curve_save_path}/{subject}_pride_curve.jsonl', curve_objs_pride, metrics=None)
+                        # (per-subject report removed — FINAL CONDENSED REPORT only)
+                        save_results(f'{curve_save_path}/{subject}_curve.jsonl', curve_objs_baseline, metrics=None)
+                        if pride_enabled and len(curve_objs_pride) > 0:
+                            save_results(f'{curve_save_path}/{subject}_pride_curve.jsonl', curve_objs_pride, metrics=None)
 
-                    # (th2 tradeoff plot removed — only macro three-curves acc/recall_std at end)
+                        # (th2 tradeoff plot removed — only macro three-curves acc/recall_std at end)
 
-                except Exception as e:
-                    logger.warning(f"Failed to derive curves for subject '{subject}': {e}")
-                    import traceback
-                    traceback.print_exc()
+                    except Exception as e:
+                        logger.warning(f"Failed to derive curves for subject '{subject}': {e}")
+                        import traceback
+                        traceback.print_exc()
 
             logging_cuda_memory_usage()
 

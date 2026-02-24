@@ -148,7 +148,7 @@ def move_answer(x, moved_option):
         return x
 
 
-def eval_all_samples(eval_fn, eval_samples, name=None, max_num_samples=None, existing_results=None, threads=10):
+def eval_all_samples(eval_fn, eval_samples, name=None, max_num_samples=None, existing_results=None, threads=10, run_seed=None):
     work_items = _index_samples(eval_samples, max_num_samples)
 
     if existing_results is not None:
@@ -161,12 +161,15 @@ def eval_all_samples(eval_fn, eval_samples, name=None, max_num_samples=None, exi
     else:
         existing_results = []
 
+    seed_suffix = run_seed if run_seed is not None else "20230101"
+
     def eval_sample(args):
         """
         Evaluate a single sample.
+        run_seed가 있으면 seed가 run마다 달라짐 (n_runs 시 seed 고정 해제).
         """
         idx, _ = args
-        seed = f"{idx}:20230101".encode("utf-8")
+        seed = f"{idx}:{seed_suffix}".encode("utf-8")
         rng = random.Random(seed)
         return eval_fn(args, rng)
 

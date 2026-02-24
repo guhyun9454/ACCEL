@@ -231,7 +231,8 @@ def prepare_eval(args, eval_name):
         return user_prompt
 
     # prepare_few_shot_samples
-    def prepare_few_shot_samples(subject):
+    # few_shot_seed: None이면 기존 동작(첫 N개). 정수면 해당 seed로 shuffle 후 사용 (n_runs 시 run별 다른 few-shot)
+    def prepare_few_shot_samples(subject, few_shot_seed=None):
         df = pd.read_csv(f'{data_path}/dev/{subject}_dev.csv', names=("Question", *option_ids_header, "Answer"), dtype=str)
         if setting in ['noid']:
             few_shot_samples = df.apply(lambda x:
@@ -243,6 +244,9 @@ def prepare_eval(args, eval_name):
                 create_user_prompt(x["Question"], [x[e] for e in option_ids_header])
                 + ' ' + option_ids[option_ids_header.index(x["Answer"])]
             , axis=1).to_list()
+        if few_shot_seed is not None:
+            rng = random.Random(int(few_shot_seed))
+            rng.shuffle(few_shot_samples)
         return few_shot_samples
 
     if getattr(args, 'skip_full', False) and setting == 'full':
