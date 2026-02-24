@@ -3530,34 +3530,13 @@ def main():
 
                     full_acc = (full_corrects / full_total) if full_total > 0 else float('nan')
 
-                    logger.info(_orange(f"Derived and saved cyclic results: {subject}"))
-                    logger.info(_orange(f"Derived and saved base results: {subject}"))
-                    # (optional) verbose summary
-                    if bool(getattr(args, "verbose", False)):
-                        if full_enabled:
-                            logger.info(_purple(f"[{subject}] Accuracies — Full: {full_acc:.4f}, Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
-                        else:
-                            logger.info(_purple(f"[{subject}] Accuracies — Full: (disabled), Cyclic: {cyclic_acc:.4f}, Default: {base_acc:.4f}"))
-
                     # ---------- curve save path (for per-subject plots when not MMLU) ----------
                     curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
                     if getattr(args, 'option_id_set', None):
                         curve_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(curve_save_path, exist_ok=True)
 
-                    # [REMOVED duplicate run loop and perc loop - now in n_runs block above]
-                    # Per-subject report and plots (skipped for MMLU; only macro three-curves at end)
-                    if not skip_per_subject_plots:
-                        for perc in perc_list:
-                            perc = float(perc)
-                            merged_b = next((c for c in curve_objs_baseline if abs(float(c.get("percentile", 0)) - perc) < 0.01), None)
-                            merged_p = next((c for c in curve_objs_pride if abs(float(c.get("percentile", 0)) - perc) < 0.01), None)
-                            if merged_b:
-                                _log_baseline_report(merged_b)
-                            if merged_p:
-                                _log_named_report("PRIDE+OURS", merged_p)
-
-                    # (per-subject plots removed — only macro three-curves acc/recall_std at end)
+                    # (per-subject report removed — FINAL CONDENSED REPORT only)
                     save_results(f'{curve_save_path}/{subject}_curve.jsonl', curve_objs_baseline, metrics=None)
                     if pride_enabled and len(curve_objs_pride) > 0:
                         save_results(f'{curve_save_path}/{subject}_pride_curve.jsonl', curve_objs_pride, metrics=None)
@@ -3570,22 +3549,6 @@ def main():
                     traceback.print_exc()
 
             logging_cuda_memory_usage()
-
-        # ---------- end subjects loop: print aggregate summary ----------
-        if len(eval_acc_records) > 0:
-            macro_acc = float(np.mean([float(r["acc"]) for r in eval_acc_records]))
-            micro_total = int(np.sum([int(r["total"]) for r in eval_acc_records]))
-            micro_corrects = int(np.sum([int(r["corrects"]) for r in eval_acc_records]))
-            micro_acc = (float(micro_corrects) / float(micro_total)) if micro_total > 0 else float("nan")
-            logger.info(_purple(f"==== AGGREGATE report over subjects ({args.task}, setting={args.setting}) ===="))
-            logger.info(f"subjects: {len(eval_acc_records)}/{len(subjects)}")
-            if len(eval_acc_records) <= 1:
-                logger.info(f"accuracy: {macro_acc:.4f}")
-            else:
-                logger.info(f"accuracy (macro mean over subjects): {macro_acc:.4f}")
-                logger.info(f"accuracy (micro = sum correct / sum total): {micro_acc:.4f}")
-
-        # (PRIDE recall_std histogram removed — only three-curves acc/recall_std kept)
 
         # Three-curves: Cost vs Acc, Cost vs Recall_std (Cyclic / Default+PRIDE / OURS th1/2)
         if len(derived_records_by_p) > 0:
@@ -3615,23 +3578,30 @@ def main():
 
             def get_cyclic_stats(cobjs, p):
                 key = f"cyclic_random_{int(p)}"
-                accs, rstds = [], []
+                costs, accs, rstds = [], [], []
                 for c in cobjs:
-                    if key in c and "accuracies" in c[key]:
+                    if key in c and "costs" in c[key] and "accuracies" in c[key]:
+                        costs.append(c[key]["costs"][0])
                         accs.append(c[key]["accuracies"][0])
                     rk = f"{key}_recall_std"
                     if rk in c:
                         rstds.append(c[rk])
                 if not accs:
-                    return float("nan"), float("nan")
-                return float(np.mean(accs)), float(np.nanmean(rstds)) if rstds else float("nan")
+                    return float("nan"), float("nan"), float("nan")
+                return (
+                    float(np.mean(costs)) if costs else float("nan"),
+                    float(np.mean(accs)),
+                    float(np.nanmean(rstds)) if rstds else float("nan"),
+                )
 
             def get_heur_stats(cobjs, label="th1/2"):
-                accs, rstds, nb, np2, nc = [], [], [], [], []
+                costs, accs, rstds, nb, np2, nc = [], [], [], [], [], []
                 for c in cobjs:
                     hps = {str(h.get("label")): h for h in (c.get("heuristic_points") or []) if isinstance(h, dict)}
                     if label in hps:
                         h = hps[label]
+                        if "cost" in h:
+                            costs.append(h["cost"])
                         accs.append(h.get("acc", float("nan")))
                         if "recall_std" in h:
                             rstds.append(h["recall_std"])
@@ -3642,8 +3612,9 @@ def main():
                         if "n_cyclic" in h:
                             nc.append(h["n_cyclic"])
                 if not accs:
-                    return float("nan"), float("nan"), 0.0, 0.0, 0.0
+                    return float("nan"), float("nan"), float("nan"), 0.0, 0.0, 0.0
                 return (
+                    float(np.mean(costs)) if costs else float("nan"),
                     float(np.mean(accs)),
                     float(np.nanmean(rstds)) if rstds else float("nan"),
                     float(np.mean(nb)) if nb else 0.0,
@@ -3658,29 +3629,29 @@ def main():
             logger.info("---- default + pride ----")
             for p in pride_fracs:
                 if float(p) in derived_records_pride_by_p:
-                    acc, rstd = get_cyclic_stats(derived_records_pride_by_p[float(p)], p)
-                    logger.info(f"default_pride_{p:03d}% : acc={acc:.4f}, recall_std={rstd:.4f}")
+                    cost, acc, rstd = get_cyclic_stats(derived_records_pride_by_p[float(p)], p)
+                    logger.info(f"default_pride_{p:03d}% : cost={cost:.3f}, acc={acc:.4f}, recall_std={rstd:.4f}")
 
             # 2. ours + pride
             logger.info("---- ours + pride ----")
             for p in pride_fracs:
                 if float(p) in derived_records_pride_by_p:
-                    acc, rstd, nb, np2, nc = get_heur_stats(derived_records_pride_by_p[float(p)], "th1/2")
-                    logger.info(f"ours_pride_{p:03d}% : acc={acc:.4f}, recall_std={rstd:.4f}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                    cost, acc, rstd, nb, np2, nc = get_heur_stats(derived_records_pride_by_p[float(p)], "th1/2")
+                    logger.info(f"ours_pride_{p:03d}% : cost={cost:.3f}, acc={acc:.4f}, recall_std={rstd:.4f}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 3. ours
             logger.info("---- ours ----")
             for p in pride_fracs:
                 if float(p) in derived_records_by_p:
-                    acc, rstd, nb, np2, nc = get_heur_stats(derived_records_by_p[float(p)], "th1/2")
-                    logger.info(f"ours_{p:03d}% : acc={acc:.4f}, recall_std={rstd:.4f}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                    cost, acc, rstd, nb, np2, nc = get_heur_stats(derived_records_by_p[float(p)], "th1/2")
+                    logger.info(f"ours_{p:03d}% : cost={cost:.3f}, acc={acc:.4f}, recall_std={rstd:.4f}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 4. cyclic
             logger.info("---- cyclic ----")
             base_any_cobjs = next(iter(derived_records_by_p.values()), []) if derived_records_by_p else []
             for p in cyclic_fracs:
-                acc, rstd = get_cyclic_stats(base_any_cobjs, p)
-                logger.info(f"cyclic_{p:03d}% : acc={acc:.4f}, recall_std={rstd:.4f}")
+                cost, acc, rstd = get_cyclic_stats(base_any_cobjs, p)
+                logger.info(f"cyclic_{p:03d}% : cost={cost:.3f}, acc={acc:.4f}, recall_std={rstd:.4f}")
 
     # -------- finalize W&B --------
     try:
