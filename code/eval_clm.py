@@ -825,6 +825,8 @@ def _plot_three_curves_acc_recall_std(
     task: str,
     cyclic_fractions: List[int],
     pride_ours_fractions: List[int],
+    wandb_ok: bool = False,
+    wandb_run: Any = None,
 ):
     """
     Three curves: (1) Cyclic (no PRIDE), (2) Default+PRIDE, (3) OURS (th1/2, no PRIDE).
@@ -917,6 +919,12 @@ def _plot_three_curves_acc_recall_std(
     fig.savefig(out_acc, bbox_inches="tight")
     plt.close(fig)
     logger.info(_purple(f"Saved three-curves acc: {out_acc}"))
+    if wandb_ok and wandb_run is not None:
+        try:
+            import wandb
+            wandb_run.log({f"plots/{task}/three_curves_acc": wandb.Image(out_acc)})
+        except Exception:
+            pass
 
     fig2, ax2 = plt.subplots(figsize=(10, 6.5), dpi=160)
     _plot_curve(ax2, cost_cyc, rstd_cyc, "o", color_cyclic, "-", "Cyclic (no PRIDE)")
@@ -932,6 +940,12 @@ def _plot_three_curves_acc_recall_std(
     fig2.savefig(out_rstd, bbox_inches="tight")
     plt.close(fig2)
     logger.info(_purple(f"Saved three-curves recall_std: {out_rstd}"))
+    if wandb_ok and wandb_run is not None:
+        try:
+            import wandb
+            wandb_run.log({f"plots/{task}/three_curves_recall_std": wandb.Image(out_rstd)})
+        except Exception:
+            pass
 
 
 def _plot_delta_cost_bars_by_p(
@@ -3566,6 +3580,8 @@ def main():
                     args.task,
                     cyclic_fractions=cyclic_fracs or [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
                     pride_ours_fractions=pride_fracs or [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                    wandb_ok=wandb_ok,
+                    wandb_run=wandb_run,
                 )
             except Exception as ex:
                 logger.warning(f"Three-curves plot failed: {ex}")
