@@ -91,6 +91,12 @@ def parse_arguments():
     parser.add_argument("--pride_seed", type=int, default=0,
                         help="Seed for PRIDE random prefix sampling (default=0).")
 
+    # Three-curves plot: fraction lists (modify to change number of points)
+    parser.add_argument("--plot_cyclic_fractions", type=str, default="0,10,20,30,40,50,60,70,80,90,100",
+                        help="Cyclic (no PRIDE) curve fractions, comma-separated (e.g. 0,10,20,...,100).")
+    parser.add_argument("--plot_pride_ours_fractions", type=str, default="2,5,10,20,30,40,50,60,70,80,90,100",
+                        help="Default+PRIDE and OURS th1/2 curve fractions (p values), comma-separated.")
+
     parser.add_argument("--verbose", action="store_true",
                         help="Print verbose logs (extra summaries).")
 

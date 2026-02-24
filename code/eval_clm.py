@@ -484,6 +484,64 @@ def _estimate_pride_prior_random_prefix_mean(
     return prior, meta
 
 
+def _run_cyclic_random_fraction(
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    k: int,
+    fraction_pct: int,
+    seed: int,
+) -> Tuple[float, float]:
+    """
+    Randomly select fraction_pct% of samples to run cyclic; rest use base.
+    Returns (cost, acc).
+    """
+    N = len(base_correct)
+    if N == 0:
+        return float("nan"), float("nan")
+    frac = max(0.0, min(1.0, float(fraction_pct) / 100.0))
+    m = int(round(frac * N))
+    rng = np.random.default_rng(int(seed))
+    cyclic_indices = set(rng.choice(np.arange(N, dtype=np.int64), size=min(m, N), replace=False))
+    total_cost, corrects = 0.0, 0
+    for i in range(N):
+        if i in cyclic_indices:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+        else:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+    return total_cost / float(N), corrects / float(N)
+
+
+def _run_cyclic_random_fraction_with_preds(
+    base_pred_idx: List[int],
+    cyclic_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    fraction_pct: int,
+    seed: int,
+) -> Tuple[float, float, List[int]]:
+    """Returns (cost, acc, preds) for recall_std."""
+    N = len(base_pred_idx)
+    if N == 0:
+        return float("nan"), float("nan"), []
+    frac = max(0.0, min(1.0, float(fraction_pct) / 100.0))
+    m = int(round(frac * N))
+    rng = np.random.default_rng(int(seed))
+    cyclic_indices = set(rng.choice(np.arange(N, dtype=np.int64), size=min(m, N), replace=False))
+    total_cost, corrects = 0.0, 0
+    preds: List[int] = []
+    for i in range(N):
+        if i in cyclic_indices:
+            pred_i = int(cyclic_pred_idx[i])
+            total_cost += float(k)
+        else:
+            pred_i = int(base_pred_idx[i])
+            total_cost += 1.0
+        preds.append(pred_i)
+        corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+    return total_cost / float(N), corrects / float(N), preds
+
 
 def logging_cuda_memory_usage():
     if not _NVML_OK:
@@ -759,48 +817,120 @@ def _plot_baseline_vs_pride_points_scatter(
     plt.close()
 
 
-def _plot_main_figure_cost_vs_acc(
+def _plot_three_curves_acc_recall_std(
     derived_records_by_p: Dict[float, List[dict]],
-    out_path: str,
+    derived_records_pride_by_p: Dict[float, List[dict]],
+    out_dir: str,
     task: str,
+    cyclic_fractions: List[int],
+    pride_ours_fractions: List[int],
 ):
     """
-    Main figure: Cost vs Accuracy trade-off — SLM improvement via cascading policy.
-    Shows default (cost≈1), cyclic (cost=k), and our policies achieving Pareto improvement.
+    Three curves: (1) Cyclic (no PRIDE), (2) Default+PRIDE, (3) OURS (th1/2, no PRIDE).
+    X=Cost, Y=Accuracy or Recall_std. Fractions configurable via args.
     """
-    if not derived_records_by_p or len(derived_records_by_p) == 0:
+    if not derived_records_by_p:
+        logger.debug("three-curves plot skipped: derived_records_by_p empty")
         return
-    fig, ax = plt.subplots(figsize=(10, 6.5), dpi=180)
-    keys = ["default", "cyclic", "switch_cyclic", "ours_top2flip", "ours_avggap"]
-    colors = {"default": "#2ca02c", "cyclic": "#1f77b4", "switch_cyclic": "#ff7f0e", "ours_top2flip": "#d62728", "ours_avggap": "#9467bd"}
-    markers = {"default": "o", "cyclic": "s", "switch_cyclic": "^", "ours_top2flip": "v", "ours_avggap": "D"}
-    for key in keys:
-        costs_all, accs_all = [], []
-        for p, cobjs in sorted(derived_records_by_p.items(), key=lambda t: t[0]):
-            for cobj in cobjs:
-                n = int(cobj.get("n_samples", 0)) or 1
-                if key in ["default", "cyclic"]:
-                    always = cobj.get("always", {}) or {}
-                    if key not in always:
-                        continue
-                    costs_all.append(float(always[key]["cost"]))
-                    accs_all.append(float(always[key]["acc"]) * 100.0)
-                elif key in cobj:
-                    costs_all.append(float(cobj[key]["costs"][0]))
-                    accs_all.append(float(cobj[key]["accuracies"][0]) * 100.0)
-        if len(costs_all) > 0 and len(accs_all) > 0:
-            c_mean = float(np.mean(costs_all))
-            a_mean = float(np.mean(accs_all))
-            ax.scatter(c_mean, a_mean, marker=markers.get(key, "o"), s=120, c=colors.get(key, "gray"),
-                       label=key, zorder=5, edgecolors="black", linewidths=0.8)
+    color_cyclic = "#F39C12"
+    color_pride = "#27AE60"
+    color_ours = "#5DADE2"
+    n_subjects = len(next(iter(derived_records_by_p.values()), []))
+    macro_note = f" (macro over {n_subjects} subjects)" if n_subjects > 1 else ""
+
+    def _agg_cyclic(by_p, fracs):
+        costs, accs, rstds = [], [], []
+        p_any = next((float(p) for p in fracs if float(p) in by_p), None) or next(iter(by_p.keys()), None)
+        cobjs = by_p.get(float(p_any), []) if p_any is not None else []
+        for fp in fracs:
+            key = f"cyclic_random_{fp}"
+            cbs = [float(c[key]["costs"][0]) for c in cobjs if key in c]
+            abs_ = [float(c[key]["accuracies"][0]) * 100.0 for c in cobjs if key in c]
+            rbs = [float(c.get(f"{key}_recall_std", float("nan"))) for c in cobjs if key in c]
+            costs.append(np.mean(cbs) if cbs else float("nan"))
+            accs.append(np.mean(abs_) if abs_ else float("nan"))
+            rstds.append(np.nanmean(rbs) if rbs else float("nan"))
+        return costs, accs, rstds
+
+    def _agg_heur(by_p, label, fracs):
+        costs, accs, rstds = [], [], []
+        for p in fracs:
+            pts = by_p.get(float(p), [])
+            cl, al, rl = [], [], []
+            for c in pts:
+                hp_map = {str(h.get("label")): h for h in (c.get("heuristic_points", []) or []) if isinstance(h, dict)}
+                h = hp_map.get(label, {})
+                if h and "cost" in h:
+                    cl.append(float(h["cost"]))
+                if h and "acc" in h:
+                    al.append(float(h["acc"]) * 100.0)
+                if h and "recall_std" in h:
+                    rl.append(float(h["recall_std"]))
+            costs.append(np.mean(cl) if cl else float("nan"))
+            accs.append(np.mean(al) if al else float("nan"))
+            rstds.append(np.nanmean(rl) if rl else float("nan"))
+        return costs, accs, rstds
+
+    def _agg_pride_default(by_p, fracs):
+        costs, accs, rstds = [], [], []
+        for p in fracs:
+            pts = by_p.get(float(p), [])
+            cl, al, rl = [], [], []
+            for c in pts:
+                key = f"cyclic_random_{int(p)}"
+                if key in c:
+                    cl.append(float(c[key]["costs"][0]))
+                    al.append(float(c[key]["accuracies"][0]) * 100.0)
+                rkey = f"{key}_recall_std"
+                if rkey in c and isinstance(c.get(rkey), (int, float)):
+                    rl.append(float(c[rkey]))
+            costs.append(np.mean(cl) if cl else float("nan"))
+            accs.append(np.mean(al) if al else float("nan"))
+            rstds.append(np.nanmean(rl) if rl else float("nan"))
+        return costs, accs, rstds
+
+    cost_cyc, acc_cyc, rstd_cyc = _agg_cyclic(derived_records_by_p, cyclic_fractions)
+    cobjs_p = derived_records_pride_by_p if derived_records_pride_by_p else {}
+    cost_pride, acc_pride, rstd_pride = _agg_pride_default(cobjs_p, pride_ours_fractions) if cobjs_p else ([float("nan")] * len(pride_ours_fractions), [float("nan")] * len(pride_ours_fractions), [float("nan")] * len(pride_ours_fractions))
+    cost_ours, acc_ours, rstd_ours = _agg_heur(derived_records_by_p, "th1/2", pride_ours_fractions)
+
+    def _plot_curve(ax, costs, yvals, marker, color, linestyle, label):
+        valid = [(c, y) for c, y in zip(costs, yvals) if np.isfinite(c) and np.isfinite(y)]
+        if not valid:
+            return
+        xs, ys = zip(*sorted(valid, key=lambda t: t[0]))
+        ax.plot(xs, ys, marker=marker, color=color, linestyle=linestyle, linewidth=2, markersize=8, label=label)
+
+    os.makedirs(out_dir, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(10, 6.5), dpi=160)
+    _plot_curve(ax, cost_cyc, acc_cyc, "o", color_cyclic, "-", "Cyclic (no PRIDE)")
+    _plot_curve(ax, cost_pride, acc_pride, "s", color_pride, "--", "Default+PRIDE")
+    _plot_curve(ax, cost_ours, acc_ours, "^", color_ours, "-.", "OURS (th1/2, no PRIDE)")
     ax.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax.set_ylabel("Accuracy (%)", fontsize=11)
-    ax.set_title(f"{task} — Cost vs Accuracy (SLM cascading policy)", fontsize=12)
+    ax.set_title(f"{task} — Accuracy{macro_note}", fontsize=12)
+    ax.legend(loc="best", fontsize=9)
     ax.grid(True, linestyle="--", alpha=0.4)
-    ax.legend(loc="lower right", fontsize=9)
     fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight")
+    out_acc = os.path.join(out_dir, f"{task}_three_curves_acc.png")
+    fig.savefig(out_acc, bbox_inches="tight")
     plt.close(fig)
+    logger.info(_purple(f"Saved three-curves acc: {out_acc}"))
+
+    fig2, ax2 = plt.subplots(figsize=(10, 6.5), dpi=160)
+    _plot_curve(ax2, cost_cyc, rstd_cyc, "o", color_cyclic, "-", "Cyclic (no PRIDE)")
+    _plot_curve(ax2, cost_pride, rstd_pride, "s", color_pride, "--", "Default+PRIDE")
+    _plot_curve(ax2, cost_ours, rstd_ours, "^", color_ours, "-.", "OURS (th1/2, no PRIDE)")
+    ax2.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
+    ax2.set_ylabel("Recall std", fontsize=11)
+    ax2.set_title(f"{task} — Recall std{macro_note}", fontsize=12)
+    ax2.legend(loc="best", fontsize=9)
+    ax2.grid(True, linestyle="--", alpha=0.4)
+    fig2.tight_layout()
+    out_rstd = os.path.join(out_dir, f"{task}_three_curves_recall_std.png")
+    fig2.savefig(out_rstd, bbox_inches="tight")
+    plt.close(fig2)
+    logger.info(_purple(f"Saved three-curves recall_std: {out_rstd}"))
 
 
 def _plot_delta_cost_bars_by_p(
@@ -2467,6 +2597,7 @@ def _compute_curves_for_one_percentile(
     cyclic_pred_idx: Optional[List[int]] = None,
     probe2_pred_idx: Optional[List[int]] = None,
     full_pred_idx: Optional[List[int]] = None,
+    cyclic_fractions: Optional[List[int]] = None,
 ) -> dict:
     """
     REAL-WORLD online evaluation (no beta / no offline prefix).
@@ -2606,6 +2737,18 @@ def _compute_curves_for_one_percentile(
         forced_cyclic_ids=forced_cyclic_ids,
     )
 
+    # Cyclic random fraction (for three-curves plot)
+    cyclic_fractions = cyclic_fractions or [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    seed_base = _stable_u32_seed(str(subject), 0)
+    cyclic_random_costs: Dict[str, float] = {}
+    cyclic_random_accs: Dict[str, float] = {}
+    for fp in cyclic_fractions:
+        c_r, a_r = _run_cyclic_random_fraction(
+            base_correct_list, cyclic_correct_list, k, int(fp), seed_base + int(fp)
+        )
+        cyclic_random_costs[f"cyclic_random_{fp}"] = float(c_r)
+        cyclic_random_accs[f"cyclic_random_{fp}"] = float(a_r)
+
     # Prefix overhead accounting for "always" ensembles
     default_cost_always = 1.0
     if forced_cyclic_ids is not None and N > 0:
@@ -2628,6 +2771,7 @@ def _compute_curves_for_one_percentile(
         },
 
         "cyclic": {"costs": [float(C_cyc)], "accuracies": [float(cyclic_acc_always)]},
+        **{key: {"costs": [cyclic_random_costs[key]], "accuracies": [cyclic_random_accs[key]]} for key in cyclic_random_costs},
         "switch_cyclic": {"costs": [float(switch_cyclic_cost)], "accuracies": [float(switch_cyclic_acc)], "stats": dict(sc_stats)},
         "ours_top2flip": {"costs": [float(c_top2)], "accuracies": [float(a_top2)], "stats": dict(top2_stats)},
         "ours_avggap": {"costs": [float(c_avg)], "accuracies": [float(a_avg)]},
@@ -2656,6 +2800,11 @@ def _compute_curves_for_one_percentile(
             )
             curve_obj["default_recall_std"] = float(_recall_std(labels_idx, default_pred_idx, k))
             curve_obj["cyclic_recall_std"] = float(_recall_std(labels_idx, cyclic_pred_idx, k))
+            for fp in cyclic_fractions:
+                _, _, preds_r = _run_cyclic_random_fraction_with_preds(
+                    base_pred_idx, cyclic_pred_idx, labels_idx, k, int(fp), seed_base + int(fp)
+                )
+                curve_obj[f"cyclic_random_{fp}_recall_std"] = float(_recall_std(labels_idx, preds_r, k))
             if full_enabled and full_pred_idx is not None and len(full_pred_idx) == len(labels_idx):
                 curve_obj["full_recall_std"] = float(_recall_std(labels_idx, full_pred_idx, k))
         except Exception:
@@ -3220,10 +3369,13 @@ def main():
                         curve_save_path += f'_id-{args.option_id_set}'
                     os.makedirs(curve_save_path, exist_ok=True)
 
-                    perc_src = getattr(args, "ours_low_conf_percent_list", None)
+                    # Use plot_pride_ours_fractions for three-curves (Default+PRIDE, OURS th1/2)
+                    perc_src = getattr(args, "plot_pride_ours_fractions", None)
                     if perc_src is None or (isinstance(perc_src, str) and perc_src.strip() == ""):
-                        perc_src = getattr(args, "ours_low_conf_percent", 10.0)
+                        perc_src = getattr(args, "ours_low_conf_percent_list", "5,10,20,30")
                     perc_list = _parse_percent_value_list(perc_src)
+                    cyclic_fracs = _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100"))
+                    cyclic_fracs = [int(x) for x in cyclic_fracs if 0 <= x <= 100]
                     curve_objs_baseline = []
                     baseline_by_p = {}
                     curve_objs_pride = []
@@ -3250,6 +3402,7 @@ def main():
                             cyclic_pred_idx=cyclic_pred_idx_list,
                             probe2_pred_idx=probe2_pred_idx_list,
                             full_pred_idx=full_pred_idx_list if full_enabled and len(full_pred_idx_list) == len(ideals) else None,
+                            cyclic_fractions=cyclic_fracs,
                         )
                         if cobj:
                             curve_objs_baseline.append(cobj)
@@ -3262,6 +3415,7 @@ def main():
                             # PRIDE+OURS (debiased probs) for the same p
                             if pride_enabled and pride_prior is not None:
                                 # Prefix는 Prior 구하기 '전' 순수 Cyclic 사용 (debias_pride.py와 동일)
+                                pride_fracs = [int(x) for x in perc_list if 0 <= x <= 100]
                                 cobj_pr = _compute_curves_for_one_percentile(
                                     subject=subject,
                                     tag="pride_mix",
@@ -3282,6 +3436,7 @@ def main():
                                     cyclic_pred_idx=cyclic_pred_idx_list,  # prefix용: Prior 미적용 원본
                                     probe2_pred_idx=probe2_pred_idx_list_pr,
                                     full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
+                                    cyclic_fractions=pride_fracs,  # Default+PRIDE curve fractions
                                 )
                                 if cobj_pr:
                                     curve_objs_pride.append(cobj_pr)
@@ -3625,45 +3780,8 @@ def main():
                                     pass
                                 return out
 
-                            # 1. Static Heuristics (division heuristic scaled by #choices)
-                            # th2 = th1 / sqrt(k)  (k=4 -> th1/2, k=5 -> th1/sqrt(5), ...)
+                            # OURS (th1/2, no PRIDE) — for three-curves plot
                             extra_pts.append(_get_static_pt(th1p, lambda x: x / 2.0, 'th1/2', '*', 'gray'))
-                            extra_pts.append(_get_static_pt(th1p, lambda x, kk=k: x / math.sqrt(float(kk)), 'th1/sqrt(k)', 'P', 'gray'))
-                            extra_pts.append(_get_static_pt(th1p, lambda x: x ** 2, 'th1^2', 's', 'gray'))
-                            extra_pts.append(_get_static_pt(th1p, lambda x: x ** 1.5, 'th1^1.5', '^', 'gray'))
-
-                            # 2. [ONLINE Sqrt] (with n_base, n_probe2, n_cyclic, recall_std)
-                            def _sqrt_pt(c_sqrt, a_sqrt, p_sqrt, st, label, marker):
-                                out = {'cost': c_sqrt, 'acc': a_sqrt, 'th2_p': float(p_sqrt), 'label': label, 'marker': marker, 'color': 'orange',
-                                       'n_base': int(st.get('n_base', 0)), 'n_probe2': int(st.get('n_probe2', 0)), 'n_cyclic': int(st.get('n_cyclic', 0))}
-                                return out
-                            c_sqrt, a_sqrt, p_sqrt, st_sqrt = _run_online_sqrt_policy_with_stats(
-                                default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1_percent=perc
-                            )
-                            sq_pt = _sqrt_pt(c_sqrt, a_sqrt, p_sqrt, st_sqrt, 'Online Sqrt (All)', 'D')
-                            try:
-                                _, _, preds_sqrt = _run_online_sqrt_policy_with_preds(
-                                    default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
-                                    labels_idx, k, perc, None
-                                )
-                                sq_pt['recall_std'] = float(_recall_std(labels_idx, preds_sqrt, k))
-                            except Exception:
-                                pass
-                            extra_pts.append(sq_pt)
-
-                            c_sqrt_lc, a_sqrt_lc, p_sqrt_lc, st_sqrt_lc = _run_online_sqrt_policy_lowconf_update_with_stats(
-                                default_conf, mean_conf, base_correct_list, cyclic_correct_list, arr_probe2_correct, k, th1_percent=perc
-                            )
-                            sq_lc_pt = _sqrt_pt(c_sqrt_lc, a_sqrt_lc, p_sqrt_lc, st_sqrt_lc, 'Online Sqrt (LowConf-only)', 'X')
-                            try:
-                                _, _, preds_sqrt_lc = _run_online_sqrt_policy_lowconf_update_with_preds(
-                                    default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
-                                    labels_idx, k, perc, None
-                                )
-                                sq_lc_pt['recall_std'] = float(_recall_std(labels_idx, preds_sqrt_lc, k))
-                            except Exception:
-                                pass
-                            extra_pts.append(sq_lc_pt)
 
                             # Save heuristic points into curve_obj for aggregate reporting (incl. n_base, n_probe2, n_cyclic, recall_std)
                             try:
@@ -3678,62 +3796,15 @@ def main():
                             except Exception:
                                 pass
 
-                            # PRIDE+OURS: attach heuristic points + overlay plot
+                            # PRIDE+OURS: OURS th1/2 — report only (no plot)
                             if pride_enabled and pride_prior is not None and 'cobj_pr' in locals() and cobj_pr:
                                 extra_pts_pr = []
                                 extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x: x / 2.0, 'th1/2', '*', 'gray'))
-                                extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x, kk=k: x / math.sqrt(float(kk)), 'th1/sqrt(k)', 'P', 'gray'))
-                                extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x: x ** 2, 'th1^2', 's', 'gray'))
-                                extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x: x ** 1.5, 'th1^1.5', '^', 'gray'))
-
-                                c_sqrt_pr, a_sqrt_pr, p_sqrt_pr, st_sqrt_pr = _run_online_sqrt_policy_with_stats(
-                                    default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list, arr_probe2_correct_pr,
-                                    k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set  # prefix용: Prior 미적용 원본
-                                )
-                                sq_pr_pt = _sqrt_pt(c_sqrt_pr, a_sqrt_pr, p_sqrt_pr, st_sqrt_pr, 'Online Sqrt (All)', 'D')
-                                try:
-                                    _, _, preds_sqrt_pr = _run_online_sqrt_policy_with_preds(
-                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list, probe2_pred_idx_list_pr,
-                                        labels_idx, k, perc, prefix_ids_set  # prefix용 cyclic_pred: Prior 미적용 원본
-                                    )
-                                    sq_pr_pt['recall_std'] = float(_recall_std(labels_idx, preds_sqrt_pr, k))
-                                except Exception:
-                                    pass
-                                extra_pts_pr.append(sq_pr_pt)
-
-                                c_sqrt_lc_pr, a_sqrt_lc_pr, p_sqrt_lc_pr, st_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update_with_stats(
-                                    default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list, arr_probe2_correct_pr,
-                                    k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set  # prefix용: Prior 미적용 원본
-                                )
-                                sq_lc_pr_pt = _sqrt_pt(c_sqrt_lc_pr, a_sqrt_lc_pr, p_sqrt_lc_pr, st_sqrt_lc_pr, 'Online Sqrt (LowConf-only)', 'X')
-                                try:
-                                    _, _, preds_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update_with_preds(
-                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list, probe2_pred_idx_list_pr,
-                                        labels_idx, k, perc, prefix_ids_set  # prefix용 cyclic_pred: Prior 미적용 원본
-                                    )
-                                    sq_lc_pr_pt['recall_std'] = float(_recall_std(labels_idx, preds_sqrt_lc_pr, k))
-                                except Exception:
-                                    pass
-                                extra_pts_pr.append(sq_lc_pr_pt)
 
                                 try:
                                     cobj_pr["heuristic_points"] = [_hp_entry(hp) for hp in (extra_pts_pr or [])]
                                 except Exception:
                                     pass
-
-                                out_cmp = os.path.join(curve_save_path, f"{subject}_{ptag}_baseline_vs_pride_points.png")
-                                _plot_baseline_vs_pride_points_scatter(
-                                    baseline_obj=cobj,
-                                    pride_obj=cobj_pr,
-                                    out_path=out_cmp,
-                                    title=f"{args.task} {subject} — Baseline vs PRIDE+OURS (REAL-WORLD online, {ptag})",
-                                )
-                                if wandb_ok and wandb_run is not None:
-                                    try:
-                                        import wandb
-                                        wandb_run.log({f"plots/{subject}/{ptag}/baseline_vs_pride_points": wandb.Image(out_cmp)})
-                                    except Exception:
-                                        pass
 
                             # [ADD] log heuristic point performances (cost, acc, n_base, n_probe2, n_cyclic, recall_std)
                             def _hp_log_line(hp):
@@ -4290,18 +4361,25 @@ def main():
             except Exception as ex:
                 logger.warning(f"Δacc from default plot failed: {ex}")
 
-        # Main figure: Cost vs Accuracy (SLM improvement)
+        # Three-curves: Cost vs Acc, Cost vs Recall_std (Cyclic / Default+PRIDE / OURS th1/2)
         if len(derived_records_by_p) > 0:
             try:
                 out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
                 if getattr(args, 'option_id_set', None):
                     out_dir += f"_id-{args.option_id_set}"
                 os.makedirs(out_dir, exist_ok=True)
-                main_fig_path = os.path.join(out_dir, f"{args.task}_main_figure_cost_vs_acc.png")
-                _plot_main_figure_cost_vs_acc(derived_records_by_p, main_fig_path, args.task)
-                logger.info(_purple(f"Saved main figure (cost vs acc): {main_fig_path}"))
+                cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
+                pride_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
+                _plot_three_curves_acc_recall_std(
+                    derived_records_by_p,
+                    derived_records_pride_by_p if len(derived_records_pride_by_p) > 0 else {},
+                    out_dir,
+                    args.task,
+                    cyclic_fractions=cyclic_fracs or [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                    pride_ours_fractions=pride_fracs or [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                )
             except Exception as ex:
-                logger.warning(f"Main figure plot failed: {ex}")
+                logger.warning(f"Three-curves plot failed: {ex}")
 
         # Aggregate PRIDE+OURS derived-policy summary (if enabled)
         if len(derived_records_pride_by_p) > 0:
