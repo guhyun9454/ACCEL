@@ -3261,13 +3261,14 @@ def main():
 
                             # PRIDE+OURS (debiased probs) for the same p
                             if pride_enabled and pride_prior is not None:
+                                # Prefix는 Prior 구하기 '전' 순수 Cyclic 사용 (debias_pride.py와 동일)
                                 cobj_pr = _compute_curves_for_one_percentile(
                                     subject=subject,
                                     tag="pride_mix",
                                     k=k,
                                     perm_list=perm_list,
                                     base_correct_list=base_correct_list_pr,
-                                    cyclic_correct_list=cyclic_correct_list_pr,
+                                    cyclic_correct_list=cyclic_correct_list,  # prefix용: Prior 미적용 원본
                                     full_correct_list=full_correct_list_pr if full_enabled else [],
                                     default_conf=default_conf_pr,
                                     mean_conf=mean_conf_pr,
@@ -3278,7 +3279,7 @@ def main():
                                     forced_cyclic_ids=prefix_ids_set,
                                     labels_idx=labels_idx_for_curves,
                                     base_pred_idx=base_pred_idx_list_pr,
-                                    cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                    cyclic_pred_idx=cyclic_pred_idx_list,  # prefix용: Prior 미적용 원본
                                     probe2_pred_idx=probe2_pred_idx_list_pr,
                                     full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
                                 )
@@ -3438,14 +3439,15 @@ def main():
 
                                 # PRIDE versions (if enabled)
                                 if pride_enabled and pride_prior is not None:
-                                    # PRIDE: default / cyclic (always)
+                                    # PRIDE default: prefix->cyclic(원본), postfix->base(prior)
+                                    default_pred_pr = [cyclic_pred_idx_list[i] if i in prefix_ids_set else base_pred_idx_list_pr[i] for i in range(len(labels_idx))]
                                     recall_std_vs_p_records.append({
                                         "subject": str(subject), "p": float(perc), "method": "default", "kind": "PRIDE+OURS",
-                                        "rstd": float(_recall_std(labels_idx, base_pred_idx_list_pr, k=k))
+                                        "rstd": float(_recall_std(labels_idx, default_pred_pr, k=k))
                                     })
                                     recall_std_vs_p_records.append({
                                         "subject": str(subject), "p": float(perc), "method": "cyclic", "kind": "PRIDE+OURS",
-                                        "rstd": float(_recall_std(labels_idx, cyclic_pred_idx_list_pr, k=k))
+                                        "rstd": float(_recall_std(labels_idx, cyclic_pred_idx_list, k=k))  # overwrite with BASELINE cyclic
                                     })
                                     if full_enabled and len(full_pred_idx_list_pr) == len(labels_idx):
                                         recall_std_vs_p_records.append({
@@ -3453,11 +3455,11 @@ def main():
                                             "rstd": float(_recall_std(labels_idx, full_pred_idx_list_pr, k=k))
                                         })
 
-                                    # PRIDE: switch_cyclic
+                                    # PRIDE: switch_cyclic (prefix->cyclic 원본)
                                     _, _, preds_sc_pr = _run_online_switch_cyclic_with_preds(
                                         default_conf=default_conf_pr,
                                         base_pred_idx=base_pred_idx_list_pr,
-                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list,
                                         labels_idx=labels_idx,
                                         k=k,
                                         th1_percent=float(perc),
@@ -3470,7 +3472,7 @@ def main():
                                         default_conf=default_conf_pr,
                                         mean_conf=mean_conf_pr,
                                         base_pred_idx=base_pred_idx_list_pr,
-                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list,
                                         probe2_pred_idx=probe2_pred_idx_list_pr,
                                         labels_idx=labels_idx,
                                         k=k,
@@ -3486,7 +3488,7 @@ def main():
                                         default_conf=default_conf_pr,
                                         mean_conf=mean_conf_pr,
                                         base_pred_idx=base_pred_idx_list_pr,
-                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list,
                                         probe2_pred_idx=probe2_pred_idx_list_pr,
                                         labels_idx=labels_idx,
                                         k=k,
@@ -3500,7 +3502,7 @@ def main():
                                         default_conf=default_conf_pr,
                                         mean_conf=mean_conf_pr,
                                         base_pred_idx=base_pred_idx_list_pr,
-                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list,
                                         probe2_pred_idx=probe2_pred_idx_list_pr,
                                         labels_idx=labels_idx,
                                         k=k,
@@ -3514,7 +3516,7 @@ def main():
                                         default_conf=default_conf_pr,
                                         mean_conf=mean_conf_pr,
                                         base_pred_idx=base_pred_idx_list_pr,
-                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list,
                                         probe2_pred_idx=probe2_pred_idx_list_pr,
                                         labels_idx=labels_idx,
                                         k=k,
@@ -3528,7 +3530,7 @@ def main():
                                         default_conf=default_conf_pr,
                                         mean_conf=mean_conf_pr,
                                         base_pred_idx=base_pred_idx_list_pr,
-                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list,
                                         probe2_pred_idx=probe2_pred_idx_list_pr,
                                         labels_idx=labels_idx,
                                         k=k,
@@ -3542,7 +3544,7 @@ def main():
                                         default_conf=default_conf_pr,
                                         mean_conf=mean_conf_pr,
                                         base_pred_idx=base_pred_idx_list_pr,
-                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list,
                                         probe2_pred_idx=probe2_pred_idx_list_pr,
                                         labels_idx=labels_idx,
                                         k=k,
@@ -3555,7 +3557,7 @@ def main():
                                         default_conf=default_conf_pr,
                                         mean_conf=mean_conf_pr,
                                         base_pred_idx=base_pred_idx_list_pr,
-                                        cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                        cyclic_pred_idx=cyclic_pred_idx_list,
                                         probe2_pred_idx=probe2_pred_idx_list_pr,
                                         labels_idx=labels_idx,
                                         k=k,
@@ -3604,7 +3606,7 @@ def main():
                                     default_conf=default_conf_pr,
                                     mean_conf=mean_conf_pr,
                                     base_correct=base_correct_list_pr,
-                                    cyclic_correct=cyclic_correct_list_pr,
+                                    cyclic_correct=cyclic_correct_list,  # prefix용: Prior 미적용 원본
                                     probe2_correct=arr_probe2_correct_pr,
                                     k=k,
                                     th1_percent=float(th1_p),
@@ -3615,7 +3617,7 @@ def main():
                                        'n_base': int(st.get('n_base', 0)), 'n_probe2': int(st.get('n_probe2', 0)), 'n_cyclic': int(st.get('n_cyclic', 0))}
                                 try:
                                     _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
-                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr, probe2_pred_idx_list_pr,
+                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list, probe2_pred_idx_list_pr,
                                         labels_idx, k, float(th1_p), rule_func, prefix_ids_set
                                     )
                                     out['recall_std'] = float(_recall_std(labels_idx, preds, k))
@@ -3685,14 +3687,14 @@ def main():
                                 extra_pts_pr.append(_get_static_pt_pride(th1p, lambda x: x ** 1.5, 'th1^1.5', '^', 'gray'))
 
                                 c_sqrt_pr, a_sqrt_pr, p_sqrt_pr, st_sqrt_pr = _run_online_sqrt_policy_with_stats(
-                                    default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr, arr_probe2_correct_pr,
-                                    k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set
+                                    default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list, arr_probe2_correct_pr,
+                                    k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set  # prefix용: Prior 미적용 원본
                                 )
                                 sq_pr_pt = _sqrt_pt(c_sqrt_pr, a_sqrt_pr, p_sqrt_pr, st_sqrt_pr, 'Online Sqrt (All)', 'D')
                                 try:
                                     _, _, preds_sqrt_pr = _run_online_sqrt_policy_with_preds(
-                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr, probe2_pred_idx_list_pr,
-                                        labels_idx, k, perc, prefix_ids_set
+                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list, probe2_pred_idx_list_pr,
+                                        labels_idx, k, perc, prefix_ids_set  # prefix용 cyclic_pred: Prior 미적용 원본
                                     )
                                     sq_pr_pt['recall_std'] = float(_recall_std(labels_idx, preds_sqrt_pr, k))
                                 except Exception:
@@ -3700,14 +3702,14 @@ def main():
                                 extra_pts_pr.append(sq_pr_pt)
 
                                 c_sqrt_lc_pr, a_sqrt_lc_pr, p_sqrt_lc_pr, st_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update_with_stats(
-                                    default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr, arr_probe2_correct_pr,
-                                    k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set
+                                    default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list, arr_probe2_correct_pr,
+                                    k, th1_percent=perc, forced_cyclic_ids=prefix_ids_set  # prefix용: Prior 미적용 원본
                                 )
                                 sq_lc_pr_pt = _sqrt_pt(c_sqrt_lc_pr, a_sqrt_lc_pr, p_sqrt_lc_pr, st_sqrt_lc_pr, 'Online Sqrt (LowConf-only)', 'X')
                                 try:
                                     _, _, preds_sqrt_lc_pr = _run_online_sqrt_policy_lowconf_update_with_preds(
-                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr, probe2_pred_idx_list_pr,
-                                        labels_idx, k, perc, prefix_ids_set
+                                        default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list, probe2_pred_idx_list_pr,
+                                        labels_idx, k, perc, prefix_ids_set  # prefix용 cyclic_pred: Prior 미적용 원본
                                     )
                                     sq_lc_pr_pt['recall_std'] = float(_recall_std(labels_idx, preds_sqrt_lc_pr, k))
                                 except Exception:
@@ -3870,7 +3872,7 @@ def main():
                                 default_conf=default_conf_pr,
                                 mean_conf=mean_conf_pr,
                                 base_correct_list=base_correct_list_pr,
-                                cyclic_correct_list=cyclic_correct_list_pr,
+                                cyclic_correct_list=cyclic_correct_list,  # prefix용: Prior 미적용 원본
                                 arr_probe2_correct=arr_probe2_correct_pr,
                                 k=k,
                                 args=args,
@@ -3892,7 +3894,7 @@ def main():
                                 default_conf_pr=default_conf_pr,
                                 mean_conf_pr=mean_conf_pr,
                                 base_correct_pr=base_correct_list_pr,
-                                cyclic_correct_pr=cyclic_correct_list_pr,
+                                cyclic_correct_pr=cyclic_correct_list,  # prefix용: Prior 미적용 원본
                                 probe2_correct_pr=arr_probe2_correct_pr,
                                 k=k,
                                 args=args,
