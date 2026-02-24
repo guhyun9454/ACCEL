@@ -3076,6 +3076,10 @@ def main():
         n_runs = max(1, int(getattr(args, "n_runs", 1)))
         skip_per_subject_plots = (args.task == "mmlu" and len(subjects) > 1)
 
+        # 논문 테이블용 Base T/F 기준 트랜지션 기록 (Cyclic & Full)
+        transition_records_cyclic: List[dict] = []
+        transition_records_full: List[dict] = []
+
         for subject in subjects[::1]:
             cached_path = f'{args.save_path}/{subject}.jsonl'
             use_cached = (not bool(getattr(args, 'force', False))) and os.path.exists(cached_path)
@@ -3352,6 +3356,46 @@ def main():
                     mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
                     arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
                     arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
+
+                    # Base T/F 그룹별 Gap 및 트랜지션 카운트 수집 (Cyclic & Full)
+                    base_t_gaps_cyc, base_f_gaps_cyc = [], []
+                    t_to_f_count_cyc, f_to_t_count_cyc = 0, 0
+                    for bc, cc, conf in zip(base_correct_list, cyclic_correct_list, default_conf):
+                        if bc:
+                            base_t_gaps_cyc.append(float(conf))
+                            if not cc:
+                                t_to_f_count_cyc += 1
+                        else:
+                            base_f_gaps_cyc.append(float(conf))
+                            if cc:
+                                f_to_t_count_cyc += 1
+                    transition_records_cyclic.append({
+                        "subject": str(subject),
+                        "base_t_gaps": base_t_gaps_cyc,
+                        "base_f_gaps": base_f_gaps_cyc,
+                        "t_to_f_count": t_to_f_count_cyc,
+                        "f_to_t_count": f_to_t_count_cyc,
+                    })
+
+                    if full_enabled and len(full_correct_list) == len(base_correct_list):
+                        base_t_gaps_full, base_f_gaps_full = [], []
+                        t_to_f_count_full, f_to_t_count_full = 0, 0
+                        for bc, fc, conf in zip(base_correct_list, full_correct_list, default_conf):
+                            if bc:
+                                base_t_gaps_full.append(float(conf))
+                                if not fc:
+                                    t_to_f_count_full += 1
+                            else:
+                                base_f_gaps_full.append(float(conf))
+                                if fc:
+                                    f_to_t_count_full += 1
+                        transition_records_full.append({
+                            "subject": str(subject),
+                            "base_t_gaps": base_t_gaps_full,
+                            "base_f_gaps": base_f_gaps_full,
+                            "t_to_f_count": t_to_f_count_full,
+                            "f_to_t_count": f_to_t_count_full,
+                        })
 
                     # ---------- optional: PRIDE debiasing + n_runs averaging (like debiase_pride.py) ----------
                     pride_enabled = bool(getattr(args, "pride_mix", False))
@@ -3668,6 +3712,54 @@ def main():
             for p in cyclic_fracs:
                 cost, acc, rstd = get_cyclic_stats(base_any_cobjs, p)
                 logger.info(f"cyclic_{p:03d}% : cost={cost:.3f}, acc={acc:.4f}, recall_std={rstd:.4f}")
+
+        # 논문 작성용 Empirical Analysis 결과 출력 (Cyclic & Full)
+        # MMLU 57과목 등 다중 subject일 때: 과목별 비율의 macro 평균
+        def _print_transition_analysis(records, name):
+            if not records:
+                return
+            all_base_t_gaps, all_base_f_gaps = [], []
+            tot_t_to_f, tot_f_to_t = 0, 0
+            t_to_f_ratios_per_subj, f_to_t_ratios_per_subj = [], []
+            for rec in records:
+                base_t = len(rec["base_t_gaps"])
+                base_f = len(rec["base_f_gaps"])
+                t_to_f = rec["t_to_f_count"]
+                f_to_t = rec["f_to_t_count"]
+                all_base_t_gaps.extend(rec["base_t_gaps"])
+                all_base_f_gaps.extend(rec["base_f_gaps"])
+                tot_t_to_f += t_to_f
+                tot_f_to_t += f_to_t
+                if base_t > 0:
+                    t_to_f_ratios_per_subj.append(t_to_f / base_t * 100.0)
+                if base_f > 0:
+                    f_to_t_ratios_per_subj.append(f_to_t / base_f * 100.0)
+            tot_base_t = len(all_base_t_gaps)
+            tot_base_f = len(all_base_f_gaps)
+            n_subjects = len(records)
+            avg_gap_t = float(np.mean(all_base_t_gaps)) if tot_base_t > 0 else 0.0
+            avg_gap_f = float(np.mean(all_base_f_gaps)) if tot_base_f > 0 else 0.0
+            if n_subjects > 1:
+                t_to_f_ratio = float(np.mean(t_to_f_ratios_per_subj)) if t_to_f_ratios_per_subj else 0.0
+                f_to_t_ratio = float(np.mean(f_to_t_ratios_per_subj)) if f_to_t_ratios_per_subj else 0.0
+                ratio_note = f" (macro avg over {n_subjects} subjects)"
+            else:
+                t_to_f_ratio = (tot_t_to_f / tot_base_t * 100.0) if tot_base_t > 0 else 0.0
+                f_to_t_ratio = (tot_f_to_t / tot_base_f * 100.0) if tot_base_f > 0 else 0.0
+                ratio_note = ""
+            logger.info(_purple(f"\n==== EMPIRICAL ANALYSIS: {name} Permutation ===="))
+            logger.info(f"[Initial Prediction: TRUE (원본 정답 그룹)]")
+            logger.info(f" - Total Samples : {tot_base_t}")
+            logger.info(f" - Avg Confidence: {avg_gap_t:.4f} (High Confidence)")
+            logger.info(f" - Effect : T -> F (훼손) = {tot_t_to_f} / {tot_base_t} ({t_to_f_ratio:.2f}%{ratio_note})")
+            logger.info(f"\n[Initial Prediction: FALSE (원본 오답 그룹)]")
+            logger.info(f" - Total Samples : {tot_base_f}")
+            logger.info(f" - Avg Confidence: {avg_gap_f:.4f} (Low Confidence)")
+            logger.info(f" - Effect : F -> T (교정) = {tot_f_to_t} / {tot_base_f} ({f_to_t_ratio:.2f}%{ratio_note})")
+            logger.info("======================================================\n")
+
+        _print_transition_analysis(transition_records_cyclic, "Cyclic")
+        _print_transition_analysis(transition_records_full, "Full")
 
     # -------- finalize W&B --------
     try:
