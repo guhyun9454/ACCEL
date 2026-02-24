@@ -9,6 +9,8 @@ import copy
 import logging
 import random
 import math
+import time
+import atexit
 from collections import defaultdict
 from typing import List, Optional, Tuple, Dict, Any
 
@@ -3022,6 +3024,9 @@ def main():
     wandb_ok = False
     if bool(getattr(args, "wandb", False)):
         try:
+            if getattr(args, "wandb_offline", False):
+                os.environ["WANDB_MODE"] = "offline"
+                logger.info(_blue("W&B offline mode: logs saved locally. Sync later with 'wandb sync wandb/offline-run-*'"))
             import wandb
             wandb_ok = True
             project = getattr(args, "wandb_project", None) or "eval_clm"
@@ -3773,10 +3778,25 @@ def main():
         _print_transition_analysis(transition_records_full, "Full")
 
     # -------- finalize W&B --------
-    try:
-        if wandb_ok and wandb_run is not None:
+    _wandb_done = {"done": False}
+    def _wandb_finish():
+        if _wandb_done["done"] or not wandb_ok or wandb_run is None:
+            return
+        try:
             import wandb
+            logger.info(_blue("W&B: syncing and finishing run..."))
             wandb.finish()
+            time.sleep(3)  # 업로드 스레드가 완료될 시간 확보 (업로드 중 프로세스 죽는 문제 완화)
+            logger.info(_blue("W&B: run finished."))
+        except Exception as e:
+            logger.warning(f"W&B finish failed: {e}")
+        finally:
+            _wandb_done["done"] = True
+
+    if wandb_ok and wandb_run is not None:
+        atexit.register(_wandb_finish)
+    try:
+        _wandb_finish()
     except Exception:
         pass
 
