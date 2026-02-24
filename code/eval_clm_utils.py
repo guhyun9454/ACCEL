@@ -90,6 +90,8 @@ def parse_arguments():
                         help="Use cyclic instead of full permutations when setting=full (e.g., MMLU 4-choice: 4x instead of 24x).")
     parser.add_argument("--pride_seed", type=int, default=0,
                         help="Seed for PRIDE random prefix sampling (default=0).")
+    parser.add_argument("--n_runs", type=int, default=1,
+                        help="Number of runs for derived policies (PRIDE prior, cyclic_random). Results averaged over runs, like debiase_pride.py (default=1).")
 
     # Three-curves plot: fraction lists (modify to change number of points)
     parser.add_argument("--plot_cyclic_fractions", type=str, default="0,10,20,30,40,50,60,70,80,90,100",
