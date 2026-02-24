@@ -65,8 +65,6 @@ def parse_arguments():
                         help="W&B run name")
     parser.add_argument("--wandb_sample_idx", type=int, default=None,
                         help="Sample idx to log detailed prompts/probs; default: first sample")
-    parser.add_argument("--wandb_offline", action="store_true",
-                        help="W&B offline mode: save locally, sync later with 'wandb sync wandb/offline-run-*'")
 
     # Ours method hyperparameters (existing)
     parser.add_argument("--ours_low_conf_percent", type=float, default=30.0,

@@ -3024,9 +3024,6 @@ def main():
     wandb_ok = False
     if bool(getattr(args, "wandb", False)):
         try:
-            if getattr(args, "wandb_offline", False):
-                os.environ["WANDB_MODE"] = "offline"
-                logger.info(_blue("W&B offline mode: logs saved locally. Sync later with 'wandb sync wandb/offline-run-*'"))
             import wandb
             wandb_ok = True
             project = getattr(args, "wandb_project", None) or "eval_clm"
@@ -3624,6 +3621,53 @@ def main():
 
             logging_cuda_memory_usage()
 
+        # 논문 작성용 T->F/F->T Empirical Analysis (이미지 업로드 전에 먼저 출력)
+        def _print_transition_analysis(records, name):
+            if not records:
+                return
+            all_base_t_gaps, all_base_f_gaps = [], []
+            tot_t_to_f, tot_f_to_t = 0, 0
+            t_to_f_ratios_per_subj, f_to_t_ratios_per_subj = [], []
+            for rec in records:
+                base_t = len(rec["base_t_gaps"])
+                base_f = len(rec["base_f_gaps"])
+                t_to_f = rec["t_to_f_count"]
+                f_to_t = rec["f_to_t_count"]
+                all_base_t_gaps.extend(rec["base_t_gaps"])
+                all_base_f_gaps.extend(rec["base_f_gaps"])
+                tot_t_to_f += t_to_f
+                tot_f_to_t += f_to_t
+                if base_t > 0:
+                    t_to_f_ratios_per_subj.append(t_to_f / base_t * 100.0)
+                if base_f > 0:
+                    f_to_t_ratios_per_subj.append(f_to_t / base_f * 100.0)
+            tot_base_t = len(all_base_t_gaps)
+            tot_base_f = len(all_base_f_gaps)
+            n_subjects = len(records)
+            avg_gap_t = float(np.mean(all_base_t_gaps)) if tot_base_t > 0 else 0.0
+            avg_gap_f = float(np.mean(all_base_f_gaps)) if tot_base_f > 0 else 0.0
+            if n_subjects > 1:
+                t_to_f_ratio = float(np.mean(t_to_f_ratios_per_subj)) if t_to_f_ratios_per_subj else 0.0
+                f_to_t_ratio = float(np.mean(f_to_t_ratios_per_subj)) if f_to_t_ratios_per_subj else 0.0
+                ratio_note = f" (macro avg over {n_subjects} subjects)"
+            else:
+                t_to_f_ratio = (tot_t_to_f / tot_base_t * 100.0) if tot_base_t > 0 else 0.0
+                f_to_t_ratio = (tot_f_to_t / tot_base_f * 100.0) if tot_base_f > 0 else 0.0
+                ratio_note = ""
+            logger.info(_purple(f"\n==== EMPIRICAL ANALYSIS: {name} Permutation ===="))
+            logger.info(f"[Initial Prediction: TRUE (원본 정답 그룹)]")
+            logger.info(f" - Total Samples : {tot_base_t}")
+            logger.info(f" - Avg Confidence: {avg_gap_t:.4f} (High Confidence)")
+            logger.info(f" - Effect : T -> F (훼손) = {tot_t_to_f} / {tot_base_t} ({t_to_f_ratio:.2f}%{ratio_note})")
+            logger.info(f"\n[Initial Prediction: FALSE (원본 오답 그룹)]")
+            logger.info(f" - Total Samples : {tot_base_f}")
+            logger.info(f" - Avg Confidence: {avg_gap_f:.4f} (Low Confidence)")
+            logger.info(f" - Effect : F -> T (교정) = {tot_f_to_t} / {tot_base_f} ({f_to_t_ratio:.2f}%{ratio_note})")
+            logger.info("======================================================\n")
+
+        _print_transition_analysis(transition_records_cyclic, "Cyclic")
+        _print_transition_analysis(transition_records_full, "Full")
+
         # Three-curves: Cost vs Acc, Cost vs Recall_std (Cyclic / Default+PRIDE / OURS th1/2)
         if len(derived_records_by_p) > 0:
             try:
@@ -3729,54 +3773,6 @@ def main():
                 cost, acc, rstd = get_cyclic_stats(base_any_cobjs, p)
                 logger.info(f"cyclic_{p:03d}% : cost={cost:.3f}, acc={acc:.4f}, recall_std={rstd:.4f}")
 
-        # 논문 작성용 Empirical Analysis 결과 출력 (Cyclic & Full)
-        # MMLU 57과목 등 다중 subject일 때: 과목별 비율의 macro 평균
-        def _print_transition_analysis(records, name):
-            if not records:
-                return
-            all_base_t_gaps, all_base_f_gaps = [], []
-            tot_t_to_f, tot_f_to_t = 0, 0
-            t_to_f_ratios_per_subj, f_to_t_ratios_per_subj = [], []
-            for rec in records:
-                base_t = len(rec["base_t_gaps"])
-                base_f = len(rec["base_f_gaps"])
-                t_to_f = rec["t_to_f_count"]
-                f_to_t = rec["f_to_t_count"]
-                all_base_t_gaps.extend(rec["base_t_gaps"])
-                all_base_f_gaps.extend(rec["base_f_gaps"])
-                tot_t_to_f += t_to_f
-                tot_f_to_t += f_to_t
-                if base_t > 0:
-                    t_to_f_ratios_per_subj.append(t_to_f / base_t * 100.0)
-                if base_f > 0:
-                    f_to_t_ratios_per_subj.append(f_to_t / base_f * 100.0)
-            tot_base_t = len(all_base_t_gaps)
-            tot_base_f = len(all_base_f_gaps)
-            n_subjects = len(records)
-            avg_gap_t = float(np.mean(all_base_t_gaps)) if tot_base_t > 0 else 0.0
-            avg_gap_f = float(np.mean(all_base_f_gaps)) if tot_base_f > 0 else 0.0
-            if n_subjects > 1:
-                t_to_f_ratio = float(np.mean(t_to_f_ratios_per_subj)) if t_to_f_ratios_per_subj else 0.0
-                f_to_t_ratio = float(np.mean(f_to_t_ratios_per_subj)) if f_to_t_ratios_per_subj else 0.0
-                ratio_note = f" (macro avg over {n_subjects} subjects)"
-            else:
-                t_to_f_ratio = (tot_t_to_f / tot_base_t * 100.0) if tot_base_t > 0 else 0.0
-                f_to_t_ratio = (tot_f_to_t / tot_base_f * 100.0) if tot_base_f > 0 else 0.0
-                ratio_note = ""
-            logger.info(_purple(f"\n==== EMPIRICAL ANALYSIS: {name} Permutation ===="))
-            logger.info(f"[Initial Prediction: TRUE (원본 정답 그룹)]")
-            logger.info(f" - Total Samples : {tot_base_t}")
-            logger.info(f" - Avg Confidence: {avg_gap_t:.4f} (High Confidence)")
-            logger.info(f" - Effect : T -> F (훼손) = {tot_t_to_f} / {tot_base_t} ({t_to_f_ratio:.2f}%{ratio_note})")
-            logger.info(f"\n[Initial Prediction: FALSE (원본 오답 그룹)]")
-            logger.info(f" - Total Samples : {tot_base_f}")
-            logger.info(f" - Avg Confidence: {avg_gap_f:.4f} (Low Confidence)")
-            logger.info(f" - Effect : F -> T (교정) = {tot_f_to_t} / {tot_base_f} ({f_to_t_ratio:.2f}%{ratio_note})")
-            logger.info("======================================================\n")
-
-        _print_transition_analysis(transition_records_cyclic, "Cyclic")
-        _print_transition_analysis(transition_records_full, "Full")
-
     # -------- finalize W&B --------
     _wandb_done = {"done": False}
     def _wandb_finish():
@@ -3786,7 +3782,7 @@ def main():
             import wandb
             logger.info(_blue("W&B: syncing and finishing run..."))
             wandb.finish()
-            time.sleep(3)  # 업로드 스레드가 완료될 시간 확보 (업로드 중 프로세스 죽는 문제 완화)
+            time.sleep(5)  # 업로드 스레드 완료 대기 (업로드 중 프로세스 죽는 문제 완화)
             logger.info(_blue("W&B: run finished."))
         except Exception as e:
             logger.warning(f"W&B finish failed: {e}")
