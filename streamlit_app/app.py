@@ -151,11 +151,28 @@ def _fetch_run_record(run_path: str) -> Tuple[Optional[RunRecord], Optional[str]
         return None, f"run 로드 실패: `{run_path}` ({e})"
 
 
+def _get_default_baseline(payload: dict, curves: dict, key: str) -> float:
+    """key in ('acc', 'recall_std'). V1 payload: infer from cyclic[0]. V2: use payload.default_*."""
+    default = payload.get(f"default_{key}", float("nan"))
+    if np.isfinite(default):
+        return float(default)
+    cyc = curves.get("cyclic", {}) or {}
+    vals = cyc.get("acc" if key == "acc" else "recall_std", []) or []
+    if vals:
+        try:
+            v = float(vals[0])
+            if np.isfinite(v):
+                return v
+        except Exception:
+            pass
+    return float("nan")
+
+
 def _curve_series_from_payload(payload: dict, curve_key: str, y_key: str) -> Dict[float, Dict[str, float]]:
     """
     Returns: x(p or fraction) -> {'cost': float, 'y': float}
     y_key: 'acc'|'recall_std'|'delta_acc'|'delta_recall_std'
-    For delta_*, prefers stored delta; falls back to computing from acc/recall_std - default if payload has default_*.
+    For delta_*: uses stored delta or computes (acc-default_acc) / (default_recall_std-recall_std) for aggregation.
     """
     if not isinstance(payload, dict):
         return {}
@@ -165,32 +182,34 @@ def _curve_series_from_payload(payload: dict, curve_key: str, y_key: str) -> Dic
 
     xs = curve.get(x_key, []) or []
     costs = curve.get("cost", []) or []
-    # Prefer delta_* when y_key requests it (streamlit aggregation uses delta)
     if y_key == "delta_acc":
         ys = curve.get("delta_acc", []) or []
-        default = payload.get("default_acc", float("nan"))
-        if not ys and np.isfinite(default):
+        default = _get_default_baseline(payload, curves, "acc")
+        if not ys or (len(ys) != len(xs) and np.isfinite(default)):
             accs = curve.get("acc", []) or []
-            ys = [float(a) - float(default) if np.isfinite(a) else float("nan") for a in accs]
-        elif not ys:
-            ys = curve.get("acc", []) or []  # backward compat: use raw acc
+            if len(accs) == len(xs):
+                ys = [float(a) - float(default) if np.isfinite(a) else float("nan") for a in accs]
+        if not ys or len(ys) != len(xs):
+            ys = curve.get("acc", []) or []
     elif y_key == "delta_recall_std":
         ys = curve.get("delta_recall_std", []) or []
-        default = payload.get("default_recall_std", float("nan"))
-        if not ys and np.isfinite(default):
+        default = _get_default_baseline(payload, curves, "recall_std")
+        if not ys or (len(ys) != len(xs) and np.isfinite(default)):
             rstds = curve.get("recall_std", []) or []
-            ys = [float(default) - float(r) if np.isfinite(r) else float("nan") for r in rstds]
-        elif not ys:
-            ys = curve.get("recall_std", []) or []  # backward compat
+            if len(rstds) == len(xs):
+                ys = [float(default) - float(r) if np.isfinite(r) else float("nan") for r in rstds]
+        if not ys or len(ys) != len(xs):
+            ys = curve.get("recall_std", []) or []
     else:
         ys = curve.get(y_key, []) or []
 
     out: Dict[float, Dict[str, float]] = {}
-    for x, c, y in zip(xs, costs, ys):
+    n = min(len(xs), len(costs), len(ys))
+    for i in range(n):
         try:
-            xf = float(x)
-            cf = float(c)
-            yf = float(y)
+            xf = float(xs[i])
+            cf = float(costs[i])
+            yf = float(ys[i])
         except Exception:
             continue
         out[xf] = {"cost": cf, "y": yf}
@@ -209,9 +228,11 @@ def _nanstd(xs: List[float]) -> float:
 
 def _aggregate_series(series_list: List[Dict[float, Dict[str, float]]]) -> Dict[float, Dict[str, float]]:
     """
-    Aggregates multiple series into a mean series over matching x keys.
+    여러 run의 시리즈를 x 키로 맞춰서 평균. (delta 값들 + 형태로 합쳐서 평균)
     Returns: x -> {'cost_mean':..., 'y_mean':..., 'y_std':...}
     """
+    if not series_list:
+        return {}
     xs_all = sorted(set().union(*[set(s.keys()) for s in series_list if isinstance(s, dict)]))
     out: Dict[float, Dict[str, float]] = {}
     for x in xs_all:
@@ -223,12 +244,14 @@ def _aggregate_series(series_list: List[Dict[float, Dict[str, float]]]) -> Dict[
             c = s[x].get("cost")
             y = s[x].get("y")
             try:
-                c = float(c)
-                y = float(y)
-            except Exception:
+                cf = float(c)
+                yf = float(y)
+            except (TypeError, ValueError):
                 continue
-            costs.append(c)
-            ys.append(y)
+            costs.append(cf)
+            ys.append(yf)
+        if not costs or not ys:
+            continue
         out[float(x)] = {
             "cost_mean": _nanmean(costs),
             "y_mean": _nanmean(ys),
@@ -463,7 +486,7 @@ for rp in selected_runs:
     group_payloads[str(prefix)] = [payload]
 
 st.subheader("그래프 옵션")
-st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. delta는 default 대비 차이.")
+st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 여러 run 선택 시 '각각 + 평균' 또는 '평균만'으로 delta 값들이 합쳐져 평균 곡선이 그려집니다.")
 
 curve_keys = st.multiselect(
     "그릴 곡선",

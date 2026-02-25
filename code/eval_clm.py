@@ -962,6 +962,12 @@ def _plot_three_curves_acc_recall_std(
     fig2.savefig(out_rstd, bbox_inches="tight")
     plt.close(fig2)
     logger.info(_purple(f"Saved three-curves delta recall_std: {out_rstd}"))
+    if wandb_ok and wandb_run is not None:
+        try:
+            import wandb
+            wandb_run.log({f"plots/{task}/three_curves_recall_std": wandb.Image(out_rstd)})
+        except Exception:
+            pass
 
     # Plot 3-4: Ours vs Ours+PRIDE only (delta acc, delta recall_std)
     fig3, ax3 = plt.subplots(figsize=(10, 6.5), dpi=160)
