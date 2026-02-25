@@ -898,6 +898,22 @@ def _plot_three_curves_acc_recall_std(
     cobjs_p = derived_records_pride_by_p if derived_records_pride_by_p else {}
     cost_pride, acc_pride, rstd_pride = _agg_pride_default(cobjs_p, pride_ours_fractions) if cobjs_p else ([float("nan")] * len(pride_ours_fractions), [float("nan")] * len(pride_ours_fractions), [float("nan")] * len(pride_ours_fractions))
     cost_ours, acc_ours, rstd_ours = _agg_heur(derived_records_by_p, "th1/2", pride_ours_fractions)
+    cost_ours_pride, acc_ours_pride, rstd_ours_pride = _agg_heur(cobjs_p, "th1/2", pride_ours_fractions) if cobjs_p else ([float("nan")] * len(pride_ours_fractions), [float("nan")] * len(pride_ours_fractions), [float("nan")] * len(pride_ours_fractions))
+
+    # Baseline = cyclic at fraction 0 (default, cost~1.0)
+    default_acc = float(acc_cyc[0]) if acc_cyc and np.isfinite(acc_cyc[0]) else float("nan")
+    default_recall_std = float(rstd_cyc[0]) if rstd_cyc and np.isfinite(rstd_cyc[0]) else float("nan")
+
+    # Delta for plots: acc - default; recall_std: default - method (higher = better)
+    delta_acc_cyc = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_cyc]
+    delta_acc_pride = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_pride]
+    delta_acc_ours = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours]
+    delta_acc_ours_pride = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours_pride]
+
+    delta_rstd_cyc = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_cyc]
+    delta_rstd_pride = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_pride]
+    delta_rstd_ours = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours]
+    delta_rstd_ours_pride = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours_pride]
 
     def _plot_curve(ax, costs, yvals, marker, color, linestyle, label):
         valid = [(c, y) for c, y in zip(costs, yvals) if np.isfinite(c) and np.isfinite(y)]
@@ -907,20 +923,22 @@ def _plot_three_curves_acc_recall_std(
         ax.plot(xs, ys, marker=marker, color=color, linestyle=linestyle, linewidth=2, markersize=8, label=label)
 
     os.makedirs(out_dir, exist_ok=True)
+    # Plot 1: Delta Accuracy (cyclic, default_pride, ours)
     fig, ax = plt.subplots(figsize=(10, 6.5), dpi=160)
-    _plot_curve(ax, cost_cyc, acc_cyc, "o", color_cyclic, "-", "Cyclic (no PRIDE)")
-    _plot_curve(ax, cost_pride, acc_pride, "s", color_pride, "--", "Default+PRIDE")
-    _plot_curve(ax, cost_ours, acc_ours, "^", color_ours, "-.", "OURS (th1/2, no PRIDE)")
+    _plot_curve(ax, cost_cyc, delta_acc_cyc, "o", color_cyclic, "-", "Cyclic")
+    _plot_curve(ax, cost_pride, delta_acc_pride, "s", color_pride, "--", "PriDe")
+    _plot_curve(ax, cost_ours, delta_acc_ours, "^", color_ours, "-.", "Ours")
+    ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
-    ax.set_ylabel("Accuracy (%)", fontsize=11)
-    ax.set_title(f"{task} — Accuracy{macro_note}", fontsize=12)
+    ax.set_ylabel("Δ Accuracy (%)", fontsize=11)
+    ax.set_title(f"{task} — Δ Accuracy{macro_note}", fontsize=12)
     ax.legend(loc="best", fontsize=9)
     ax.grid(True, linestyle="--", alpha=0.4)
     fig.tight_layout()
     out_acc = os.path.join(out_dir, f"{task}_three_curves_acc.png")
     fig.savefig(out_acc, bbox_inches="tight")
     plt.close(fig)
-    logger.info(_purple(f"Saved three-curves acc: {out_acc}"))
+    logger.info(_purple(f"Saved three-curves delta acc: {out_acc}"))
     if wandb_ok and wandb_run is not None:
         try:
             import wandb
@@ -928,24 +946,63 @@ def _plot_three_curves_acc_recall_std(
         except Exception:
             pass
 
+    # Plot 2: Delta Recall std (default - method, higher = better)
     fig2, ax2 = plt.subplots(figsize=(10, 6.5), dpi=160)
-    _plot_curve(ax2, cost_cyc, rstd_cyc, "o", color_cyclic, "-", "Cyclic (no PRIDE)")
-    _plot_curve(ax2, cost_pride, rstd_pride, "s", color_pride, "--", "Default+PRIDE")
-    _plot_curve(ax2, cost_ours, rstd_ours, "^", color_ours, "-.", "OURS (th1/2, no PRIDE)")
+    _plot_curve(ax2, cost_cyc, delta_rstd_cyc, "o", color_cyclic, "-", "Cyclic")
+    _plot_curve(ax2, cost_pride, delta_rstd_pride, "s", color_pride, "--", "PriDe")
+    _plot_curve(ax2, cost_ours, delta_rstd_ours, "^", color_ours, "-.", "Ours")
+    ax2.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax2.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
-    ax2.set_ylabel("Recall std", fontsize=11)
-    ax2.set_title(f"{task} — Recall std{macro_note}", fontsize=12)
+    ax2.set_ylabel("Δ Recall std", fontsize=11)
+    ax2.set_title(f"{task} — Δ Recall std{macro_note}", fontsize=12)
     ax2.legend(loc="best", fontsize=9)
     ax2.grid(True, linestyle="--", alpha=0.4)
     fig2.tight_layout()
     out_rstd = os.path.join(out_dir, f"{task}_three_curves_recall_std.png")
     fig2.savefig(out_rstd, bbox_inches="tight")
     plt.close(fig2)
-    logger.info(_purple(f"Saved three-curves recall_std: {out_rstd}"))
+    logger.info(_purple(f"Saved three-curves delta recall_std: {out_rstd}"))
+
+    # Plot 3-4: Ours vs Ours+PRIDE only (delta acc, delta recall_std)
+    fig3, ax3 = plt.subplots(figsize=(10, 6.5), dpi=160)
+    _plot_curve(ax3, cost_ours, delta_acc_ours, "^", color_ours, "-.", "Ours")
+    _plot_curve(ax3, cost_ours_pride, delta_acc_ours_pride, "D", color_pride, "--", "Ours (with PriDe)")
+    ax3.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
+    ax3.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
+    ax3.set_ylabel("Δ Accuracy (%)", fontsize=11)
+    ax3.set_title(f"{task} — Ours vs Ours+PRIDE Δ Accuracy{macro_note}", fontsize=12)
+    ax3.legend(loc="best", fontsize=9)
+    ax3.grid(True, linestyle="--", alpha=0.4)
+    fig3.tight_layout()
+    out_ours_acc = os.path.join(out_dir, f"{task}_ours_vs_ours_pride_acc.png")
+    fig3.savefig(out_ours_acc, bbox_inches="tight")
+    plt.close(fig3)
+    logger.info(_purple(f"Saved ours vs ours_pride delta acc: {out_ours_acc}"))
     if wandb_ok and wandb_run is not None:
         try:
             import wandb
-            wandb_run.log({f"plots/{task}/three_curves_recall_std": wandb.Image(out_rstd)})
+            wandb_run.log({f"plots/{task}/ours_vs_ours_pride_acc": wandb.Image(out_ours_acc)})
+        except Exception:
+            pass
+
+    fig4, ax4 = plt.subplots(figsize=(10, 6.5), dpi=160)
+    _plot_curve(ax4, cost_ours, delta_rstd_ours, "^", color_ours, "-.", "Ours")
+    _plot_curve(ax4, cost_ours_pride, delta_rstd_ours_pride, "D", color_pride, "--", "Ours (with PriDe)")
+    ax4.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
+    ax4.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
+    ax4.set_ylabel("Δ Recall std", fontsize=11)
+    ax4.set_title(f"{task} — Ours vs Ours+PRIDE Δ Recall std{macro_note}", fontsize=12)
+    ax4.legend(loc="best", fontsize=9)
+    ax4.grid(True, linestyle="--", alpha=0.4)
+    fig4.tight_layout()
+    out_ours_rstd = os.path.join(out_dir, f"{task}_ours_vs_ours_pride_recall_std.png")
+    fig4.savefig(out_ours_rstd, bbox_inches="tight")
+    plt.close(fig4)
+    logger.info(_purple(f"Saved ours vs ours_pride delta recall_std: {out_ours_rstd}"))
+    if wandb_ok and wandb_run is not None:
+        try:
+            import wandb
+            wandb_run.log({f"plots/{task}/ours_vs_ours_pride_recall_std": wandb.Image(out_ours_rstd)})
         except Exception:
             pass
 
@@ -953,29 +1010,44 @@ def _plot_three_curves_acc_recall_std(
     try:
         points_path = os.path.join(out_dir, f"{task}_three_curves_points.json")
         payload = {
-            "version": 1,
+            "version": 2,
             "task": str(task),
+            "default_acc": float(default_acc),
+            "default_recall_std": float(default_recall_std),
             "cyclic_fractions": [int(x) for x in cyclic_fractions],
             "pride_ours_fractions": [int(x) for x in pride_ours_fractions],
             "curves": {
-                # x key differs by curve to keep semantics explicit
                 "cyclic": {
                     "fraction": [int(x) for x in cyclic_fractions],
                     "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_cyc],
-                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_cyc],  # (%)
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_cyc],
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_cyc],
+                    "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_cyc],
+                    "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_cyc],
                 },
                 "default_pride": {
                     "p": [int(x) for x in pride_ours_fractions],
                     "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_pride],
-                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_pride],  # (%)
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_pride],
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_pride],
+                    "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_pride],
+                    "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_pride],
                 },
                 "ours": {
                     "p": [int(x) for x in pride_ours_fractions],
                     "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours],
-                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours],  # (%)
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours],
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours],
+                    "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_ours],
+                    "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_ours],
+                },
+                "ours_pride": {
+                    "p": [int(x) for x in pride_ours_fractions],
+                    "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours_pride],
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours_pride],
+                    "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours_pride],
+                    "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_ours_pride],
+                    "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_ours_pride],
                 },
             },
         }

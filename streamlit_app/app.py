@@ -18,24 +18,31 @@ st.set_page_config(page_title="LLM-MCQ-Bias • W&B Curve Averager", layout="wid
 CURVE_DEFS = {
     "cyclic": {
         "x_key": "fraction",
-        "label": "Cyclic (no PRIDE)",
+        "label": "Cyclic",
         "color": "#F39C12",
         "linestyle": "-",
         "marker": "o",
     },
     "default_pride": {
         "x_key": "p",
-        "label": "Default+PRIDE",
+        "label": "PriDe",
         "color": "#27AE60",
         "linestyle": "--",
         "marker": "s",
     },
     "ours": {
         "x_key": "p",
-        "label": "OURS (th1/2, no PRIDE)",
+        "label": "Ours",
         "color": "#5DADE2",
         "linestyle": "-.",
         "marker": "^",
+    },
+    "ours_pride": {
+        "x_key": "p",
+        "label": "Ours (with PriDe)",
+        "color": "#27AE60",
+        "linestyle": "--",
+        "marker": "D",
     },
 }
 
@@ -147,6 +154,8 @@ def _fetch_run_record(run_path: str) -> Tuple[Optional[RunRecord], Optional[str]
 def _curve_series_from_payload(payload: dict, curve_key: str, y_key: str) -> Dict[float, Dict[str, float]]:
     """
     Returns: x(p or fraction) -> {'cost': float, 'y': float}
+    y_key: 'acc'|'recall_std'|'delta_acc'|'delta_recall_std'
+    For delta_*, prefers stored delta; falls back to computing from acc/recall_std - default if payload has default_*.
     """
     if not isinstance(payload, dict):
         return {}
@@ -156,7 +165,25 @@ def _curve_series_from_payload(payload: dict, curve_key: str, y_key: str) -> Dic
 
     xs = curve.get(x_key, []) or []
     costs = curve.get("cost", []) or []
-    ys = curve.get(y_key, []) or []
+    # Prefer delta_* when y_key requests it (streamlit aggregation uses delta)
+    if y_key == "delta_acc":
+        ys = curve.get("delta_acc", []) or []
+        default = payload.get("default_acc", float("nan"))
+        if not ys and np.isfinite(default):
+            accs = curve.get("acc", []) or []
+            ys = [float(a) - float(default) if np.isfinite(a) else float("nan") for a in accs]
+        elif not ys:
+            ys = curve.get("acc", []) or []  # backward compat: use raw acc
+    elif y_key == "delta_recall_std":
+        ys = curve.get("delta_recall_std", []) or []
+        default = payload.get("default_recall_std", float("nan"))
+        if not ys and np.isfinite(default):
+            rstds = curve.get("recall_std", []) or []
+            ys = [float(default) - float(r) if np.isfinite(r) else float("nan") for r in rstds]
+        elif not ys:
+            ys = curve.get("recall_std", []) or []  # backward compat
+    else:
+        ys = curve.get(y_key, []) or []
 
     out: Dict[float, Dict[str, float]] = {}
     for x, c, y in zip(xs, costs, ys):
@@ -311,9 +338,13 @@ def _plot_groups(
                 linewidth=0,
             )
 
+    _y_labels = {"acc": "Accuracy (%)", "delta_acc": "Δ Accuracy (%)", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
+    _y_titles = {"acc": "Accuracy", "delta_acc": "Δ Accuracy", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
     ax.set_xlabel("Computational Cost (× of default)", fontsize=11)
-    ax.set_ylabel("Accuracy (%)" if y_key == "acc" else "Recall std", fontsize=11)
-    ax.set_title(f"{task} — {'Accuracy' if y_key == 'acc' else 'Recall std'}", fontsize=12)
+    ax.set_ylabel(_y_labels.get(y_key, y_key), fontsize=11)
+    ax.set_title(f"{task} — {_y_titles.get(y_key, y_key)}", fontsize=12)
+    if y_key in ("delta_acc", "delta_recall_std"):
+        ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax.grid(True, linestyle="--", alpha=0.35)
     ax.legend(loc="best", fontsize=8, ncol=1)
     fig.tight_layout()
@@ -432,7 +463,7 @@ for rp in selected_runs:
     group_payloads[str(prefix)] = [payload]
 
 st.subheader("그래프 옵션")
-st.caption("Accuracy(왼쪽)와 Recall std(오른쪽)를 동시에 그리며, X축은 Cost로 고정합니다.")
+st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. delta는 default 대비 차이.")
 
 curve_keys = st.multiselect(
     "그릴 곡선",
@@ -455,7 +486,7 @@ overall_mode_key = "flatten_equal_run_weight" if display_mode in ("each_plus_mea
 st.subheader("라벨(범례) 설정")
 st.caption("범례에 표시되는 곡선 이름/Overall 이름을 원하는 대로 바꿀 수 있어요.")
 
-col_a, col_b, col_c, col_d = st.columns([1, 1, 1, 1])
+col_a, col_b, col_c, col_d, col_e = st.columns([1, 1, 1, 1, 1])
 with col_a:
     overall_label = st.text_input("Overall 라벨", value="Overall mean")
 with col_b:
@@ -464,11 +495,14 @@ with col_c:
     lab_pride = st.text_input("Default+PRIDE 라벨", value=CURVE_DEFS["default_pride"]["label"])
 with col_d:
     lab_ours = st.text_input("OURS 라벨", value=CURVE_DEFS["ours"]["label"])
+with col_e:
+    lab_ours_pride = st.text_input("OURS+PRIDE 라벨", value=CURVE_DEFS["ours_pride"]["label"])
 
 curve_label_overrides = {
     "cyclic": lab_cyclic,
     "default_pride": lab_pride,
     "ours": lab_ours,
+    "ours_pride": lab_ours_pride,
 }
 
 plot_clicked = st.button("그래프 그리기", type="primary", use_container_width=True)
@@ -488,7 +522,7 @@ if plot_clicked:
             group_payloads=nonempty,
             task=str(task),
             curve_keys=curve_keys,
-            y_key="acc",
+            y_key="delta_acc",
             show_group_std=False,
             overall_mode=overall_mode_key,
             overall_curve_label=str(overall_label or "Overall mean"),
@@ -501,7 +535,7 @@ if plot_clicked:
             group_payloads=nonempty,
             task=str(task),
             curve_keys=curve_keys,
-            y_key="recall_std",
+            y_key="delta_recall_std",
             show_group_std=False,
             overall_mode=overall_mode_key,
             overall_curve_label=str(overall_label or "Overall mean"),
