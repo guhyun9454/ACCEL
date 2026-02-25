@@ -3097,6 +3097,10 @@ def main():
                 logger.info(_blue(f"Preparing: {subject}" + (f" [run {run_idx+1}/{n_runs}]" if use_run_suffix else "")))
                 few_shot_samples = prepare_few_shot_samples(subject, few_shot_seed=few_shot_seed)
                 eval_samples = prepare_eval_samples(subject)
+                # n_runs > 1: 매 run마다 데이터 순서를 다르게 shuffle (재현 가능한 시드)
+                if n_runs > 1:
+                    shuffler = random.Random(int(run_idx) + 42)
+                    shuffler.shuffle(eval_samples)
                 eval_fn = prepare_eval_fn(model, toker, few_shot_samples)
 
                 if use_cached:
@@ -3643,26 +3647,32 @@ def main():
                     f_to_t_ratios_per_subj.append(f_to_t / base_f * 100.0)
             tot_base_t = len(all_base_t_gaps)
             tot_base_f = len(all_base_f_gaps)
-            n_subjects = len(records)
+            n_records = len(records)
             avg_gap_t = float(np.mean(all_base_t_gaps)) if tot_base_t > 0 else 0.0
             avg_gap_f = float(np.mean(all_base_f_gaps)) if tot_base_f > 0 else 0.0
-            if n_subjects > 1:
+            if n_records > 1 or len(t_to_f_ratios_per_subj) > 1 or len(f_to_t_ratios_per_subj) > 1:
                 t_to_f_ratio = float(np.mean(t_to_f_ratios_per_subj)) if t_to_f_ratios_per_subj else 0.0
                 f_to_t_ratio = float(np.mean(f_to_t_ratios_per_subj)) if f_to_t_ratios_per_subj else 0.0
-                ratio_note = f" (macro avg over {n_subjects} subjects)"
+                t_to_f_std = float(np.std(t_to_f_ratios_per_subj)) if len(t_to_f_ratios_per_subj) > 1 else 0.0
+                f_to_t_std = float(np.std(f_to_t_ratios_per_subj)) if len(f_to_t_ratios_per_subj) > 1 else 0.0
+                ratio_note = f" (macro avg over {n_records} records)"
+                ratio_std = f" ± {t_to_f_std:.2f}" if t_to_f_std > 0 else ""
+                ratio_std_ft = f" ± {f_to_t_std:.2f}" if f_to_t_std > 0 else ""
             else:
                 t_to_f_ratio = (tot_t_to_f / tot_base_t * 100.0) if tot_base_t > 0 else 0.0
                 f_to_t_ratio = (tot_f_to_t / tot_base_f * 100.0) if tot_base_f > 0 else 0.0
                 ratio_note = ""
+                ratio_std = ""
+                ratio_std_ft = ""
             logger.info(_purple(f"\n==== EMPIRICAL ANALYSIS: {name} Permutation ===="))
             logger.info(f"[Initial Prediction: TRUE (원본 정답 그룹)]")
             logger.info(f" - Total Samples : {tot_base_t}")
             logger.info(f" - Avg Confidence: {avg_gap_t:.4f} (High Confidence)")
-            logger.info(f" - Effect : T -> F (훼손) = {tot_t_to_f} / {tot_base_t} ({t_to_f_ratio:.2f}%{ratio_note})")
+            logger.info(f" - Effect : T -> F (훼손) = {tot_t_to_f} / {tot_base_t} ({t_to_f_ratio:.2f}%{ratio_std}{ratio_note})")
             logger.info(f"\n[Initial Prediction: FALSE (원본 오답 그룹)]")
             logger.info(f" - Total Samples : {tot_base_f}")
             logger.info(f" - Avg Confidence: {avg_gap_f:.4f} (Low Confidence)")
-            logger.info(f" - Effect : F -> T (교정) = {tot_f_to_t} / {tot_base_f} ({f_to_t_ratio:.2f}%{ratio_note})")
+            logger.info(f" - Effect : F -> T (교정) = {tot_f_to_t} / {tot_base_f} ({f_to_t_ratio:.2f}%{ratio_std_ft}{ratio_note})")
             logger.info("======================================================\n")
 
         _print_transition_analysis(transition_records_cyclic, "Cyclic")
@@ -3695,6 +3705,24 @@ def main():
         # =========================================================
         if len(derived_records_by_p) > 0:
             logger.info(_purple("==== FINAL CONDENSED REPORT ===="))
+            n_subjects = len(subjects)
+
+            def _macro_mean_std_over_runs(vals_list, n_subj, n_run):
+                """57개 과목 macro 평균 → 5 run에 대해 mean ± std (MMLU 스타일)"""
+                if n_subj <= 1 or n_run <= 1 or len(vals_list) != n_subj * n_run:
+                    m = float(np.mean(vals_list)) if vals_list else float("nan")
+                    s = float(np.std(vals_list)) if len(vals_list) > 1 else float("nan")
+                    return m, s
+                # cobjs 순서: s0r0,s0r1,...,s0r(n_run-1), s1r0,..., s(n_subj-1)r(n_run-1)
+                run_means = []
+                for r in range(n_run):
+                    run_vals = [vals_list[r + i * n_run] for i in range(n_subj)]
+                    run_vals = [x for x in run_vals if np.isfinite(x)]
+                    run_means.append(float(np.mean(run_vals)) if run_vals else float("nan"))
+                run_means = [x for x in run_means if np.isfinite(x)]
+                mean = float(np.mean(run_means)) if run_means else float("nan")
+                std = float(np.std(run_means)) if len(run_means) > 1 else float("nan")
+                return mean, std
 
             def get_cyclic_stats(cobjs, p):
                 key = f"cyclic_random_{int(p)}"
@@ -3707,12 +3735,11 @@ def main():
                     if rk in c:
                         rstds.append(c[rk])
                 if not accs:
-                    return float("nan"), float("nan"), float("nan")
-                return (
-                    float(np.mean(costs)) if costs else float("nan"),
-                    float(np.mean(accs)),
-                    float(np.nanmean(rstds)) if rstds else float("nan"),
-                )
+                    return float("nan"), float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
+                mean_c, std_c = _macro_mean_std_over_runs(costs, n_subjects, n_runs)
+                mean_a, std_a = _macro_mean_std_over_runs(accs, n_subjects, n_runs)
+                mean_r, std_r = _macro_mean_std_over_runs(rstds, n_subjects, n_runs)
+                return mean_c, mean_a, mean_r, std_c, std_a, std_r
 
             def get_heur_stats(cobjs, label="th1/2"):
                 costs, accs, rstds, nb, np2, nc = [], [], [], [], [], []
@@ -3732,46 +3759,48 @@ def main():
                         if "n_cyclic" in h:
                             nc.append(h["n_cyclic"])
                 if not accs:
-                    return float("nan"), float("nan"), float("nan"), 0.0, 0.0, 0.0
-                return (
-                    float(np.mean(costs)) if costs else float("nan"),
-                    float(np.mean(accs)),
-                    float(np.nanmean(rstds)) if rstds else float("nan"),
-                    float(np.mean(nb)) if nb else 0.0,
-                    float(np.mean(np2)) if np2 else 0.0,
-                    float(np.mean(nc)) if nc else 0.0,
-                )
+                    return float("nan"), float("nan"), float("nan"), 0.0, 0.0, 0.0, float("nan"), float("nan"), float("nan")
+                mean_c, std_c = _macro_mean_std_over_runs(costs, n_subjects, n_runs)
+                mean_a, std_a = _macro_mean_std_over_runs(accs, n_subjects, n_runs)
+                mean_r, std_r = _macro_mean_std_over_runs(rstds, n_subjects, n_runs)
+                mean_nb = float(np.mean(nb)) if nb else 0.0
+                mean_np2 = float(np.mean(np2)) if np2 else 0.0
+                mean_nc = float(np.mean(nc)) if nc else 0.0
+                return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
 
             pride_fracs = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
             cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+
+            _fmt = (lambda m, s: f"{m:.3f}±{s:.3f}" if np.isfinite(s) and s > 0 else f"{m:.3f}") if n_runs > 1 else (lambda m, s: f"{m:.3f}")
+            _fmt4 = (lambda m, s: f"{m:.4f}±{s:.4f}" if np.isfinite(s) and s > 0 else f"{m:.4f}") if n_runs > 1 else (lambda m, s: f"{m:.4f}")
 
             # 1. default + pride
             logger.info("---- default + pride ----")
             for p in pride_fracs:
                 if float(p) in derived_records_pride_by_p:
-                    cost, acc, rstd = get_cyclic_stats(derived_records_pride_by_p[float(p)], p)
-                    logger.info(f"default_pride_{p:03d}% : cost={cost:.3f}, acc={acc:.4f}, recall_std={rstd:.4f}")
+                    cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(derived_records_pride_by_p[float(p)], p)
+                    logger.info(f"default_pride_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
 
             # 2. ours + pride
             logger.info("---- ours + pride ----")
             for p in pride_fracs:
                 if float(p) in derived_records_pride_by_p:
-                    cost, acc, rstd, nb, np2, nc = get_heur_stats(derived_records_pride_by_p[float(p)], "th1/2")
-                    logger.info(f"ours_pride_{p:03d}% : cost={cost:.3f}, acc={acc:.4f}, recall_std={rstd:.4f}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_pride_by_p[float(p)], "th1/2")
+                    logger.info(f"ours_pride_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 3. ours
             logger.info("---- ours ----")
             for p in pride_fracs:
                 if float(p) in derived_records_by_p:
-                    cost, acc, rstd, nb, np2, nc = get_heur_stats(derived_records_by_p[float(p)], "th1/2")
-                    logger.info(f"ours_{p:03d}% : cost={cost:.3f}, acc={acc:.4f}, recall_std={rstd:.4f}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], "th1/2")
+                    logger.info(f"ours_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 4. cyclic
             logger.info("---- cyclic ----")
             base_any_cobjs = next(iter(derived_records_by_p.values()), []) if derived_records_by_p else []
             for p in cyclic_fracs:
-                cost, acc, rstd = get_cyclic_stats(base_any_cobjs, p)
-                logger.info(f"cyclic_{p:03d}% : cost={cost:.3f}, acc={acc:.4f}, recall_std={rstd:.4f}")
+                cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(base_any_cobjs, p)
+                logger.info(f"cyclic_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
 
     # -------- finalize W&B --------
     _wandb_done = {"done": False}
