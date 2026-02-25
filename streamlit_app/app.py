@@ -276,6 +276,15 @@ def _series_to_xy(agg: Dict[float, Dict[str, float]]) -> Tuple[np.ndarray, np.nd
     return np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64), np.asarray(ystd, dtype=np.float64)
 
 
+def _filter_series_by_max_pct(
+    series: Dict[float, Dict[str, float]], max_pct: Optional[float]
+) -> Dict[float, Dict[str, float]]:
+    """퍼센타일 상한(max_pct)까지만 잘라냄. Cyclic: 0~100, PriDe/Ours: 2~100"""
+    if max_pct is None or max_pct >= 100:
+        return series
+    return {k: v for k, v in (series or {}).items() if k <= max_pct}
+
+
 def _plot_groups(
     group_payloads: Dict[str, List[dict]],
     task: str,
@@ -286,6 +295,7 @@ def _plot_groups(
     overall_curve_label: str = "Overall mean",
     curve_label_overrides: Optional[Dict[str, str]] = None,
     plot_individual: bool = True,
+    max_pct: Optional[float] = None,
 ):
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=160)
 
@@ -296,6 +306,7 @@ def _plot_groups(
                 continue
             for ck in curve_keys:
                 series_list = [_curve_series_from_payload(p, ck, y_key) for p in payloads]
+                series_list = [_filter_series_by_max_pct(s, max_pct) for s in series_list if s]
                 series_list = [s for s in series_list if s]
                 if not series_list:
                     continue
@@ -335,6 +346,7 @@ def _plot_groups(
             for payloads in group_payloads.values():
                 for p in payloads:
                     s = _curve_series_from_payload(p, ck, y_key)
+                    s = _filter_series_by_max_pct(s, max_pct) if s else {}
                     if s:
                         all_series.append(s)
             agg_all = _aggregate_series(all_series) if all_series else {}
@@ -494,6 +506,15 @@ curve_keys = st.multiselect(
     default=["cyclic", "default_pride", "ours"],
 )
 
+max_pct_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+max_pct_val = st.selectbox(
+    "퍼센타일 상한 (이 퍼센트까지만 표시)",
+    options=max_pct_options,
+    index=len(max_pct_options) - 1,
+    format_func=lambda x: f"{x}%까지" if x < 100 else "100% (전체)",
+    help="Cyclic: 0/10/…/100, PriDe/Ours: 2/5/10/…/100. 선택한 숫자 이하만 보임.",
+)
+
 overall_mode = st.radio(
     "표시 방식",
     options=[
@@ -539,6 +560,8 @@ if plot_clicked:
         st.error("그릴 곡선을 최소 1개 선택하세요.")
         st.stop()
 
+    max_pct_float = float(max_pct_val)
+
     c_left, c_right = st.columns(2)
     with c_left:
         fig_acc = _plot_groups(
@@ -551,6 +574,7 @@ if plot_clicked:
             overall_curve_label=str(overall_label or "Overall mean"),
             curve_label_overrides=curve_label_overrides,
             plot_individual=(display_mode in ("each", "each_plus_mean")),
+            max_pct=max_pct_float,
         )
         st.pyplot(fig_acc, use_container_width=True)
     with c_right:
@@ -564,5 +588,6 @@ if plot_clicked:
             overall_curve_label=str(overall_label or "Overall mean"),
             curve_label_overrides=curve_label_overrides,
             plot_individual=(display_mode in ("each", "each_plus_mean")),
+            max_pct=max_pct_float,
         )
         st.pyplot(fig_rstd, use_container_width=True)
