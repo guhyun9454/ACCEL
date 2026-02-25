@@ -4058,35 +4058,6 @@ def main():
                 cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(base_any_cobjs, p)
                 logger.info(f"cyclic_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
 
-            # 5. Cyclic vs Ours (Adaptive) 비교 [논문 Experiments/Analysis용]
-            def _agg_transition(records):
-                if not records:
-                    return float("nan"), float("nan"), 0, 0
-                all_t, all_f, tot_t2f, tot_f2t = [], [], 0, 0
-                for r in records:
-                    all_t.extend(r.get("base_t_gaps", []))
-                    all_f.extend(r.get("base_f_gaps", []))
-                    tot_t2f += r.get("t_to_f_count", 0)
-                    tot_f2t += r.get("f_to_t_count", 0)
-                nt, nf = len(all_t), len(all_f)
-                t2f_pct = (tot_t2f / nt * 100.0) if nt > 0 else float("nan")
-                f2t_pct = (tot_f2t / nf * 100.0) if nf > 0 else float("nan")
-                return t2f_pct, f2t_pct, tot_t2f, tot_f2t
-
-            logger.info(_purple("\n==== Cyclic vs Ours (Adaptive) 비교 [논문 Experiments/Analysis용] ===="))
-            t2f_cyc, f2t_cyc, _, _ = _agg_transition(transition_records_cyclic)
-            cost_cyc, _, _ = get_cyclic_stats(base_any_cobjs, 100) if base_any_cobjs else (float("nan"), float("nan"), float("nan"))
-            ours_perc_key = 30.0 if 30.0 in derived_records_by_p else next((p for p in [20.0, 10.0, 40.0, 50.0] if p in derived_records_by_p), None)
-            cost_our = float("nan")
-            if ours_perc_key is not None:
-                cost_our, _, _, _, _, _ = get_heur_stats(derived_records_by_p[ours_perc_key], "th1/2")[:6]
-            recs_ours = transition_records_ours_by_p.get(ours_perc_key, []) if ours_perc_key else []
-            t2f_our, f2t_our, _, _ = _agg_transition(recs_ours)
-            logger.info(f"| Method | T→F (훼손) % | F→T (교정) % | Cost |")
-            logger.info(f"| Cyclic | {t2f_cyc:.2f} | {f2t_cyc:.2f} | {cost_cyc:.3f} |")
-            logger.info(f"| Ours (Adaptive) | {t2f_our:.2f} | {f2t_our:.2f} | {cost_our:.3f} |")
-            logger.info("======================================================\n")
-
     # -------- finalize W&B --------
     _wandb_done = {"done": False}
     def _wandb_finish():
