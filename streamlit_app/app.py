@@ -277,12 +277,17 @@ def _series_to_xy(agg: Dict[float, Dict[str, float]]) -> Tuple[np.ndarray, np.nd
 
 
 def _filter_series_by_max_pct(
-    series: Dict[float, Dict[str, float]], max_pct: Optional[float]
+    series: Dict[float, Dict[str, float]],
+    max_pct: Optional[float],
+    curve_key: str,
 ) -> Dict[float, Dict[str, float]]:
-    """퍼센타일 상한(max_pct)까지만 잘라냄. Cyclic: 0~100, PriDe/Ours: 2~100"""
-    if max_pct is None or max_pct >= 100:
+    """퍼센타일 상한(max_pct)까지만 잘라냄. curve_key별로 따로 적용"""
+    if max_pct is None:
         return series
-    return {k: v for k, v in (series or {}).items() if k <= max_pct}
+    pct_limit = float(max_pct)
+    if pct_limit >= 100:
+        return series
+    return {k: v for k, v in (series or {}).items() if k <= pct_limit}
 
 
 def _plot_groups(
@@ -295,18 +300,21 @@ def _plot_groups(
     overall_curve_label: str = "Overall mean",
     curve_label_overrides: Optional[Dict[str, str]] = None,
     plot_individual: bool = True,
-    max_pct: Optional[float] = None,
+    max_pct_by_curve: Optional[Dict[str, float]] = None,
 ):
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=160)
 
     # plot per-model lines (each selected run is a "group" with a single payload)
+    max_by = max_pct_by_curve or {}
+
     if plot_individual:
         for gname, payloads in group_payloads.items():
             if not payloads:
                 continue
             for ck in curve_keys:
                 series_list = [_curve_series_from_payload(p, ck, y_key) for p in payloads]
-                series_list = [_filter_series_by_max_pct(s, max_pct) for s in series_list if s]
+                m = max_by.get(ck)
+                series_list = [_filter_series_by_max_pct(s, m, ck) for s in series_list if s]
                 series_list = [s for s in series_list if s]
                 if not series_list:
                     continue
@@ -324,7 +332,7 @@ def _plot_groups(
                     linestyle=cd["linestyle"],
                     marker=cd["marker"],
                     linewidth=2.0,
-                    markersize=6,
+                    markersize=8,
                     alpha=0.90,
                     label=label,
                 )
@@ -346,7 +354,8 @@ def _plot_groups(
             for payloads in group_payloads.values():
                 for p in payloads:
                     s = _curve_series_from_payload(p, ck, y_key)
-                    s = _filter_series_by_max_pct(s, max_pct) if s else {}
+                    m = max_by.get(ck)
+                    s = _filter_series_by_max_pct(s, m, ck) if s else {}
                     if s:
                         all_series.append(s)
             agg_all = _aggregate_series(all_series) if all_series else {}
@@ -360,7 +369,9 @@ def _plot_groups(
                 x, y,
                 color=cd["color"],
                 linestyle=":",
-                linewidth=3.0,
+                marker=cd["marker"],
+                linewidth=2.5,
+                markersize=8,
                 alpha=0.95,
                 label=f"{overall_curve_label} • {base_lab}",
             )
@@ -506,14 +517,49 @@ curve_keys = st.multiselect(
     default=["cyclic", "default_pride", "ours"],
 )
 
-max_pct_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-max_pct_val = st.selectbox(
-    "퍼센타일 상한 (이 퍼센트까지만 표시)",
-    options=max_pct_options,
-    index=len(max_pct_options) - 1,
-    format_func=lambda x: f"{x}%까지" if x < 100 else "100% (전체)",
-    help="Cyclic: 0/10/…/100, PriDe/Ours: 2/5/10/…/100. 선택한 숫자 이하만 보임.",
-)
+st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
+cyclic_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+pride_ours_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+with col_p1:
+    max_pct_cyclic = st.selectbox(
+        "Cyclic 상한",
+        options=cyclic_options,
+        index=len(cyclic_options) - 1,
+        format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
+        key="max_cyclic",
+    )
+with col_p2:
+    max_pct_pride = st.selectbox(
+        "PriDe 상한",
+        options=pride_ours_options,
+        index=len(pride_ours_options) - 1,
+        format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
+        key="max_pride",
+    )
+with col_p3:
+    max_pct_ours = st.selectbox(
+        "Ours 상한",
+        options=pride_ours_options,
+        index=len(pride_ours_options) - 1,
+        format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
+        key="max_ours",
+    )
+with col_p4:
+    max_pct_ours_pride = st.selectbox(
+        "Ours (with PriDe) 상한",
+        options=pride_ours_options,
+        index=len(pride_ours_options) - 1,
+        format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
+        key="max_ours_pride",
+    )
+
+max_pct_by_curve = {
+    "cyclic": float(max_pct_cyclic),
+    "default_pride": float(max_pct_pride),
+    "ours": float(max_pct_ours),
+    "ours_pride": float(max_pct_ours_pride),
+}
 
 overall_mode = st.radio(
     "표시 방식",
@@ -560,8 +606,6 @@ if plot_clicked:
         st.error("그릴 곡선을 최소 1개 선택하세요.")
         st.stop()
 
-    max_pct_float = float(max_pct_val)
-
     c_left, c_right = st.columns(2)
     with c_left:
         fig_acc = _plot_groups(
@@ -574,7 +618,7 @@ if plot_clicked:
             overall_curve_label=str(overall_label or "Overall mean"),
             curve_label_overrides=curve_label_overrides,
             plot_individual=(display_mode in ("each", "each_plus_mean")),
-            max_pct=max_pct_float,
+            max_pct_by_curve=max_pct_by_curve,
         )
         st.pyplot(fig_acc, use_container_width=True)
     with c_right:
@@ -588,6 +632,6 @@ if plot_clicked:
             overall_curve_label=str(overall_label or "Overall mean"),
             curve_label_overrides=curve_label_overrides,
             plot_individual=(display_mode in ("each", "each_plus_mean")),
-            max_pct=max_pct_float,
+            max_pct_by_curve=max_pct_by_curve,
         )
         st.pyplot(fig_rstd, use_container_width=True)
