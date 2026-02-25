@@ -3081,6 +3081,30 @@ def main():
         # 논문 테이블용 Base T/F 기준 트랜지션 기록 (Cyclic & Full)
         transition_records_cyclic: List[dict] = []
         transition_records_full: List[dict] = []
+        # Default+PRIDE, Ours+PRIDE, Ours (per perc 2~100) - 논문 Experiments/Analysis용
+        transition_records_default_pride_by_p: Dict[float, List[dict]] = {}
+        transition_records_ours_pride_by_p: Dict[float, List[dict]] = {}
+        transition_records_ours_by_p: Dict[float, List[dict]] = {}
+
+        def _make_transition_record_from_preds(base_correct, pred_idx, labels_idx, conf_arr, subject):
+            """base_correct: List[bool], pred_idx: List[int], labels_idx: List[int], conf_arr: np.ndarray"""
+            N = len(base_correct)
+            pred_correct = [int(pred_idx[i]) == int(labels_idx[i]) for i in range(N)]
+            base_t_gaps, base_f_gaps = [], []
+            t_to_f, f_to_t = 0, 0
+            conf_flat = np.asarray(conf_arr, dtype=np.float64).ravel()
+            for i in range(N):
+                c = float(conf_flat[i]) if i < len(conf_flat) else 0.0
+                if base_correct[i]:
+                    base_t_gaps.append(c)
+                    if not pred_correct[i]:
+                        t_to_f += 1
+                else:
+                    base_f_gaps.append(c)
+                    if pred_correct[i]:
+                        f_to_t += 1
+            return {"subject": str(subject), "base_t_gaps": base_t_gaps, "base_f_gaps": base_f_gaps,
+                    "t_to_f_count": t_to_f, "f_to_t_count": f_to_t}
 
         for subject in subjects[::1]:
             # n_runs > 1이면 run별 다른 seed로 평가 (few-shot, run_seed 고정 해제)
@@ -3461,6 +3485,17 @@ def main():
                                     if "heuristic_points" not in cobj:
                                         cobj["heuristic_points"] = [_get_static_pt(perc, lambda x: x / 2.0)]
 
+                                    # Ours (baseline) transition 기록
+                                    try:
+                                        _, _, _, preds_ours = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                            default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list,
+                                            probe2_pred_idx_list, labels_idx_for_curves, k, perc, lambda x: x / 2.0, None)
+                                        rec = _make_transition_record_from_preds(
+                                            base_correct_list, preds_ours, labels_idx_for_curves, default_conf, subject)
+                                        transition_records_ours_by_p.setdefault(perc, []).append(rec)
+                                    except Exception:
+                                        pass
+
                                 # --- 2) PRIDE Curves 계산 (고정 0.02 대신 perc/100.0 적용) ---
                                 if pride_enabled:
                                     seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)) + run_idx_inner)
@@ -3568,6 +3603,29 @@ def main():
                                             return out
                                         if "heuristic_points" not in cobj_pr:
                                             cobj_pr["heuristic_points"] = [_get_static_pt_pride(perc, lambda x: x / 2.0)]
+
+                                    # Default+PRIDE transition (cyclic_random at perc)
+                                    try:
+                                        seed_cyc = _stable_u32_seed(str(subject), int(run_idx_inner)) + int(perc)
+                                        _, _, preds_dp = _run_cyclic_random_fraction_with_preds(
+                                            base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
+                                            labels_idx_for_curves, k, int(perc), seed_cyc)
+                                        rec_dp = _make_transition_record_from_preds(
+                                            base_correct_list_pr, preds_dp, labels_idx_for_curves, default_conf_pr, subject)
+                                        transition_records_default_pride_by_p.setdefault(perc, []).append(rec_dp)
+                                    except Exception:
+                                        pass
+
+                                    # Ours+PRIDE transition
+                                    try:
+                                        _, _, _, preds_op = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                            default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
+                                            probe2_pred_idx_list_pr, labels_idx_for_curves, k, perc, lambda x: x / 2.0, prefix_ids_set)
+                                        rec_op = _make_transition_record_from_preds(
+                                            base_correct_list_pr, preds_op, labels_idx_for_curves, default_conf_pr, subject)
+                                        transition_records_ours_pride_by_p.setdefault(perc, []).append(rec_op)
+                                    except Exception:
+                                        pass
 
                         # Merge over runs and append to derived_records
                         perc_list = _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", None) or "2,5,10,20,30,40,50,60,70,80,90,100")
@@ -3677,6 +3735,38 @@ def main():
 
         _print_transition_analysis(transition_records_cyclic, "Cyclic")
         _print_transition_analysis(transition_records_full, "Full")
+
+        # 논문 Experiments/Analysis: Default+PRIDE, Ours+PRIDE, Ours (per perc 2~100) — 정답/오답 avg conf, T→F, F→T
+        def _print_transition_analysis_by_perc(records_by_p: Dict[float, List[dict]], method_name: str):
+            if not records_by_p:
+                return
+            pride_fracs_sorted = sorted([p for p in records_by_p.keys() if isinstance(p, (int, float))])
+            logger.info(_purple(f"\n==== EMPIRICAL ANALYSIS: {method_name} (per perc) [{args.task}] ===="))
+            logger.info("perc | avg_conf_T(정답) | avg_conf_F(오답) | T→F(훼손) | F→T(교정) | T→F% | F→T%")
+            for p in pride_fracs_sorted:
+                recs = records_by_p.get(float(p), [])
+                if not recs:
+                    continue
+                all_t, all_f, tot_t_to_f, tot_f_to_t = [], [], 0, 0
+                for r in recs:
+                    all_t.extend(r.get("base_t_gaps", []))
+                    all_f.extend(r.get("base_f_gaps", []))
+                    tot_t_to_f += r.get("t_to_f_count", 0)
+                    tot_f_to_t += r.get("f_to_t_count", 0)
+                nt, nf = len(all_t), len(all_f)
+                avg_t = float(np.mean(all_t)) if nt > 0 else float("nan")
+                avg_f = float(np.mean(all_f)) if nf > 0 else float("nan")
+                t_to_f_pct = (tot_t_to_f / nt * 100.0) if nt > 0 else 0.0
+                f_to_t_pct = (tot_f_to_t / nf * 100.0) if nf > 0 else 0.0
+                logger.info(f"{int(p):3d}% | {avg_t:.4f} | {avg_f:.4f} | {tot_t_to_f} | {tot_f_to_t} | {t_to_f_pct:.2f}% | {f_to_t_pct:.2f}%")
+            logger.info("======================================================\n")
+
+        if transition_records_default_pride_by_p:
+            _print_transition_analysis_by_perc(transition_records_default_pride_by_p, "Default+PRIDE")
+        if transition_records_ours_pride_by_p:
+            _print_transition_analysis_by_perc(transition_records_ours_pride_by_p, "Ours+PRIDE")
+        if transition_records_ours_by_p:
+            _print_transition_analysis_by_perc(transition_records_ours_by_p, "Ours")
 
         # Three-curves: Cost vs Acc, Cost vs Recall_std (Cyclic / Default+PRIDE / OURS th1/2)
         if len(derived_records_by_p) > 0:
@@ -3801,6 +3891,35 @@ def main():
             for p in cyclic_fracs:
                 cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(base_any_cobjs, p)
                 logger.info(f"cyclic_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
+
+            # 5. Cyclic vs Ours (Adaptive) 비교 [논문 Experiments/Analysis용]
+            def _agg_transition(records):
+                if not records:
+                    return float("nan"), float("nan"), 0, 0
+                all_t, all_f, tot_t2f, tot_f2t = [], [], 0, 0
+                for r in records:
+                    all_t.extend(r.get("base_t_gaps", []))
+                    all_f.extend(r.get("base_f_gaps", []))
+                    tot_t2f += r.get("t_to_f_count", 0)
+                    tot_f2t += r.get("f_to_t_count", 0)
+                nt, nf = len(all_t), len(all_f)
+                t2f_pct = (tot_t2f / nt * 100.0) if nt > 0 else float("nan")
+                f2t_pct = (tot_f2t / nf * 100.0) if nf > 0 else float("nan")
+                return t2f_pct, f2t_pct, tot_t2f, tot_f2t
+
+            logger.info(_purple("\n==== Cyclic vs Ours (Adaptive) 비교 [논문 Experiments/Analysis용] ===="))
+            t2f_cyc, f2t_cyc, _, _ = _agg_transition(transition_records_cyclic)
+            cost_cyc, _, _ = get_cyclic_stats(base_any_cobjs, 100) if base_any_cobjs else (float("nan"), float("nan"), float("nan"))
+            ours_perc_key = 30.0 if 30.0 in derived_records_by_p else next((p for p in [20.0, 10.0, 40.0, 50.0] if p in derived_records_by_p), None)
+            cost_our = float("nan")
+            if ours_perc_key is not None:
+                cost_our, _, _, _, _, _ = get_heur_stats(derived_records_by_p[ours_perc_key], "th1/2")[:6]
+            recs_ours = transition_records_ours_by_p.get(ours_perc_key, []) if ours_perc_key else []
+            t2f_our, f2t_our, _, _ = _agg_transition(recs_ours)
+            logger.info(f"| Method | T→F (훼손) % | F→T (교정) % | Cost |")
+            logger.info(f"| Cyclic | {t2f_cyc:.2f} | {f2t_cyc:.2f} | {cost_cyc:.3f} |")
+            logger.info(f"| Ours (Adaptive) | {t2f_our:.2f} | {f2t_our:.2f} | {cost_our:.3f} |")
+            logger.info("======================================================\n")
 
     # -------- finalize W&B --------
     _wandb_done = {"done": False}
