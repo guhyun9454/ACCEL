@@ -1,0 +1,3 @@
+*.pyc
+/wandb
+/results_arc

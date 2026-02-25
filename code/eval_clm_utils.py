@@ -59,6 +59,8 @@ def parse_arguments():
     # W&B logging flags
     parser.add_argument("--wandb", action="store_true",
                         help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_entity", type=str, default="capde",
+                        help='W&B entity (default: "capde")')
     parser.add_argument("--wandb_project", type=str, default=None,
                         help="W&B project name")
     parser.add_argument("--wandb_run_name", type=str, default=None,
@@ -139,6 +141,8 @@ def parse_arguments():
 
     parser.add_argument("--force", action="store_true",
                         help="Overwrite existing results files if they exist")
+    parser.add_argument("--develop", action="store_true",
+                        help="Dev mode: skip model/data eval and generate dummy numeric logs/plots (for W&B/Streamlit pipeline test).")
 
     args = parser.parse_args()
 

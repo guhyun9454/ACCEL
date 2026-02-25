@@ -949,6 +949,61 @@ def _plot_three_curves_acc_recall_std(
         except Exception:
             pass
 
+    # -------- Save numeric curve points for downstream averaging --------
+    try:
+        points_path = os.path.join(out_dir, f"{task}_three_curves_points.json")
+        payload = {
+            "version": 1,
+            "task": str(task),
+            "cyclic_fractions": [int(x) for x in cyclic_fractions],
+            "pride_ours_fractions": [int(x) for x in pride_ours_fractions],
+            "curves": {
+                # x key differs by curve to keep semantics explicit
+                "cyclic": {
+                    "fraction": [int(x) for x in cyclic_fractions],
+                    "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_cyc],
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_cyc],  # (%)
+                    "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_cyc],
+                },
+                "default_pride": {
+                    "p": [int(x) for x in pride_ours_fractions],
+                    "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_pride],
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_pride],  # (%)
+                    "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_pride],
+                },
+                "ours": {
+                    "p": [int(x) for x in pride_ours_fractions],
+                    "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours],
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours],  # (%)
+                    "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours],
+                },
+            },
+        }
+        with open(points_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.info(_purple(f"Saved three-curves points: {points_path}"))
+
+        if wandb_ok and wandb_run is not None:
+            try:
+                import wandb
+                # Put points into summary for easy retrieval via API (supports multi-task per run)
+                existing = wandb_run.summary.get("three_curves_points_v1", {})
+                if not isinstance(existing, dict):
+                    existing = {}
+                existing = dict(existing)
+                existing[str(task)] = payload
+                wandb_run.summary["three_curves_points_v1"] = existing
+
+                # Also log as an artifact for durability
+                art_name = f"three-curves-points-{str(task)}-{wandb_run.id}"
+                art = wandb.Artifact(name=art_name, type="three_curves_points")
+                art.add_file(points_path)
+                wandb_run.log_artifact(art)
+            except Exception as e:
+                logger.warning(f"W&B three-curves points logging failed: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to save three-curves points json: {e}")
+
 
 def _plot_delta_cost_bars_by_p(
     delta_cost_by_p: Dict[float, Dict[str, float]],
@@ -3028,7 +3083,7 @@ def main():
             wandb_ok = True
             project = getattr(args, "wandb_project", None) or "eval_clm"
             run_name = getattr(args, "wandb_run_name", None) or f"{getattr(args,'model_name','model')}-{args.eval_names[0]}"
-            entity = getattr(args, "wandb_entity", None)
+            entity = getattr(args, "wandb_entity", None) or "capde"
             cfg = {
                 "pretrained_model_path": getattr(args, "pretrained_model_path", None),
                 "model_name": getattr(args, "model_name", None),
@@ -3042,6 +3097,117 @@ def main():
             logger.warning(f"W&B init failed: {e}")
             wandb_run = None
             wandb_ok = False
+
+    # -------- DEVELOP MODE: generate dummy curve points only --------
+    if bool(getattr(args, "develop", False)):
+        try:
+            # Use the same fractions as real plotting
+            cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
+            pride_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
+        except Exception:
+            cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+            pride_fracs = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+
+        logger.info(_orange("[develop] Skipping model/data eval. Writing dummy three-curves plots/points."))
+
+        # Always-random seed per process execution (time/pid/wandb_run.id mixed)
+        try:
+            wid = (wandb_run.id if wandb_run is not None else "no_wandb")
+            wid_u32 = int(zlib.adler32(str(wid).encode("utf-8"))) & 0xFFFFFFFF
+        except Exception:
+            wid_u32 = 0
+        base_seed = (int(time.time_ns()) ^ (int(os.getpid()) << 16) ^ int(wid_u32)) & 0xFFFFFFFF
+
+        for eval_name in (getattr(args, "eval_names", None) or []):
+            try:
+                parts = str(eval_name).split(",")
+                task = str(parts[0]).strip()
+                num_few_shot = int(parts[1]) if len(parts) > 1 and str(parts[1]).strip() else 0
+                args.task = task
+                args.num_few_shot = num_few_shot
+
+                out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
+                if getattr(args, "option_id_set", None):
+                    out_dir += f"_id-{args.option_id_set}"
+                os.makedirs(out_dir, exist_ok=True)
+
+                # Randomness per eval_name, mixed with base_seed
+                seed = (int(base_seed) ^ (int(zlib.adler32(str(eval_name).encode("utf-8"))) & 0xFFFFFFFF)) & 0xFFFFFFFF
+                rng = np.random.default_rng(seed)
+
+                # Build a single "subject" curve object that contains cyclic_random_{fp} keys.
+                # (three-curves plotting expects these keys inside one list element)
+                cobj_base = {}
+                k = 4.0  # pretend 4-choice
+                for fp in cyclic_fracs:
+                    frac = float(fp) / 100.0
+                    cost = 1.0 + frac * (k - 1.0) + float(rng.normal(0.0, 0.02))
+                    acc = 0.45 + 0.25 * frac + float(rng.normal(0.0, 0.01))
+                    acc = float(np.clip(acc, 0.0, 1.0))
+                    rstd = 0.20 - 0.10 * frac + float(rng.normal(0.0, 0.005))
+                    rstd = float(np.clip(rstd, 0.0, 1.0))
+                    cobj_base[f"cyclic_random_{int(fp)}"] = {"costs": [float(cost)], "accuracies": [float(acc)]}
+                    cobj_base[f"cyclic_random_{int(fp)}_recall_std"] = float(rstd)
+
+                derived_records_by_p = {}
+                for p in pride_fracs:
+                    frac = float(p) / 100.0
+                    # Heuristic point for OURS at each p
+                    ours_cost = 1.0 + frac * 1.5 + float(rng.normal(0.0, 0.02))
+                    ours_acc = 0.50 + 0.20 * frac + float(rng.normal(0.0, 0.01))
+                    ours_acc = float(np.clip(ours_acc, 0.0, 1.0))
+                    ours_rstd = 0.18 - 0.08 * frac + float(rng.normal(0.0, 0.006))
+                    ours_rstd = float(np.clip(ours_rstd, 0.0, 1.0))
+
+                    cobj = dict(cobj_base)
+                    cobj["heuristic_points"] = [{
+                        "label": "th1/2",
+                        "cost": float(ours_cost),
+                        "acc": float(ours_acc),
+                        "recall_std": float(ours_rstd),
+                        "n_base": int(800 + rng.integers(0, 50)),
+                        "n_probe2": int(150 + rng.integers(0, 50)),
+                        "n_cyclic": int(50 + rng.integers(0, 50)),
+                    }]
+                    derived_records_by_p[float(p)] = [cobj]  # 1 "subject"
+
+                derived_records_pride_by_p = {}
+                for p in pride_fracs:
+                    frac = float(p) / 100.0
+                    pride_cost = 1.0 + frac * 2.2 + float(rng.normal(0.0, 0.02))
+                    pride_acc = 0.52 + 0.18 * frac + float(rng.normal(0.0, 0.01))
+                    pride_acc = float(np.clip(pride_acc, 0.0, 1.0))
+                    pride_rstd = 0.16 - 0.07 * frac + float(rng.normal(0.0, 0.006))
+                    pride_rstd = float(np.clip(pride_rstd, 0.0, 1.0))
+                    key = f"cyclic_random_{int(p)}"
+                    derived_records_pride_by_p[float(p)] = [{
+                        key: {"costs": [float(pride_cost)], "accuracies": [float(pride_acc)]},
+                        f"{key}_recall_std": float(pride_rstd),
+                    }]
+
+                _plot_three_curves_acc_recall_std(
+                    derived_records_by_p,
+                    derived_records_pride_by_p,
+                    out_dir,
+                    args.task,
+                    cyclic_fractions=cyclic_fracs,
+                    pride_ours_fractions=pride_fracs,
+                    wandb_ok=wandb_ok,
+                    wandb_run=wandb_run,
+                )
+            except Exception as e:
+                logger.warning(f"[develop] Failed to write dummy plots for eval_name='{eval_name}': {e}")
+
+        # Finish W&B early (since we skip the rest of main)
+        if wandb_ok and wandb_run is not None:
+            try:
+                import wandb
+                logger.info(_blue("W&B: syncing and finishing run (develop)..."))
+                wandb.finish()
+                time.sleep(2)
+            except Exception:
+                pass
+        return
 
     # -------- Tokenizer / Model --------
     toker = AutoTokenizer.from_pretrained(

@@ -5,6 +5,7 @@ tqdm>=4.64
 matplotlib>=3.5
 scikit-learn>=1.0
 wandb>=0.15
+streamlit
 
 # PyTorch + HuggingFace
 torch
