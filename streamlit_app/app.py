@@ -388,7 +388,7 @@ def _plot_groups(
                 continue
             cd = CURVE_DEFS[ck]
             base_lab = str((curve_label_overrides or {}).get(ck) or cd["label"])
-            run_note = f" (n={n_runs_flattened} runs)" if n_runs_flattened > 1 else ""
+            run_note = ""
             # 밴드: Run 간 편차를 그림. 끄면 선만 (Run 내 시드편차 평균=0 의도)
             if show_overall_band:
                 ylo = np.where(np.isfinite(ystd), y - ystd, y)
@@ -414,7 +414,7 @@ def _plot_groups(
 
     _y_labels = {"acc": "Accuracy (%)", "delta_acc": "Δ Accuracy (%)", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
     _y_titles = {"acc": "Accuracy", "delta_acc": "Δ Accuracy", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
-    subtitle = f" ({n_runs_flattened} runs 평균)" if overall_mode and n_runs_flattened > 1 else ""
+    subtitle = ""
     ax.set_xlabel("Computational Cost (× of default)", fontsize=11)
     ax.set_ylabel(_y_labels.get(y_key, y_key), fontsize=11)
     ax.set_title(f"{task} — {_y_titles.get(y_key, y_key)}{subtitle}", fontsize=12)
