@@ -844,7 +844,7 @@ def _plot_three_curves_acc_recall_std(
     macro_note = f" (macro over {n_subjects} subjects)" if n_subjects > 1 else ""
 
     def _agg_cyclic(by_p, fracs):
-        costs, accs, rstds = [], [], []
+        costs, accs, rstds, acc_stds, rstd_stds = [], [], [], [], []
         p_any = next((float(p) for p in fracs if float(p) in by_p), None) or next(iter(by_p.keys()), None)
         cobjs = by_p.get(float(p_any), []) if p_any is not None else []
         for fp in fracs:
@@ -855,10 +855,12 @@ def _plot_three_curves_acc_recall_std(
             costs.append(np.mean(cbs) if cbs else float("nan"))
             accs.append(np.mean(abs_) if abs_ else float("nan"))
             rstds.append(np.nanmean(rbs) if rbs else float("nan"))
-        return costs, accs, rstds
+            acc_stds.append(float(np.nanstd(abs_)) if len(abs_) > 1 else 0.0)
+            rstd_stds.append(float(np.nanstd(rbs)) if len(rbs) > 1 else 0.0)
+        return costs, accs, rstds, acc_stds, rstd_stds
 
     def _agg_heur(by_p, label, fracs):
-        costs, accs, rstds = [], [], []
+        costs, accs, rstds, acc_stds, rstd_stds = [], [], [], [], []
         for p in fracs:
             pts = by_p.get(float(p), [])
             cl, al, rl = [], [], []
@@ -874,10 +876,12 @@ def _plot_three_curves_acc_recall_std(
             costs.append(np.mean(cl) if cl else float("nan"))
             accs.append(np.mean(al) if al else float("nan"))
             rstds.append(np.nanmean(rl) if rl else float("nan"))
-        return costs, accs, rstds
+            acc_stds.append(float(np.nanstd(al)) if len(al) > 1 else 0.0)
+            rstd_stds.append(float(np.nanstd(rl)) if len(rl) > 1 else 0.0)
+        return costs, accs, rstds, acc_stds, rstd_stds
 
     def _agg_pride_default(by_p, fracs):
-        costs, accs, rstds = [], [], []
+        costs, accs, rstds, acc_stds, rstd_stds = [], [], [], [], []
         for p in fracs:
             pts = by_p.get(float(p), [])
             cl, al, rl = [], [], []
@@ -892,13 +896,17 @@ def _plot_three_curves_acc_recall_std(
             costs.append(np.mean(cl) if cl else float("nan"))
             accs.append(np.mean(al) if al else float("nan"))
             rstds.append(np.nanmean(rl) if rl else float("nan"))
-        return costs, accs, rstds
+            acc_stds.append(float(np.nanstd(al)) if len(al) > 1 else 0.0)
+            rstd_stds.append(float(np.nanstd(rl)) if len(rl) > 1 else 0.0)
+        return costs, accs, rstds, acc_stds, rstd_stds
 
-    cost_cyc, acc_cyc, rstd_cyc = _agg_cyclic(derived_records_by_p, cyclic_fractions)
+    cost_cyc, acc_cyc, rstd_cyc, acc_std_cyc, rstd_std_cyc = _agg_cyclic(derived_records_by_p, cyclic_fractions)
     cobjs_p = derived_records_pride_by_p if derived_records_pride_by_p else {}
-    cost_pride, acc_pride, rstd_pride = _agg_pride_default(cobjs_p, pride_ours_fractions) if cobjs_p else ([float("nan")] * len(pride_ours_fractions), [float("nan")] * len(pride_ours_fractions), [float("nan")] * len(pride_ours_fractions))
-    cost_ours, acc_ours, rstd_ours = _agg_heur(derived_records_by_p, "th1/2", pride_ours_fractions)
-    cost_ours_pride, acc_ours_pride, rstd_ours_pride = _agg_heur(cobjs_p, "th1/2", pride_ours_fractions) if cobjs_p else ([float("nan")] * len(pride_ours_fractions), [float("nan")] * len(pride_ours_fractions), [float("nan")] * len(pride_ours_fractions))
+    _n = len(pride_ours_fractions)
+    _def5 = ([float("nan")] * _n, [float("nan")] * _n, [float("nan")] * _n, [0.0] * _n, [0.0] * _n)
+    cost_pride, acc_pride, rstd_pride, acc_std_pride, rstd_std_pride = _agg_pride_default(cobjs_p, pride_ours_fractions) if cobjs_p else _def5
+    cost_ours, acc_ours, rstd_ours, acc_std_ours, rstd_std_ours = _agg_heur(derived_records_by_p, "th1/2", pride_ours_fractions)
+    cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur(cobjs_p, "th1/2", pride_ours_fractions) if cobjs_p else _def5
 
     # Baseline = cyclic at fraction 0 (default, cost~1.0)
     default_acc = float(acc_cyc[0]) if acc_cyc and np.isfinite(acc_cyc[0]) else float("nan")
@@ -1030,6 +1038,8 @@ def _plot_three_curves_acc_recall_std(
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_cyc],
                     "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_cyc],
                     "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_cyc],
+                    "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_cyc],
+                    "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_cyc],
                 },
                 "default_pride": {
                     "p": [int(x) for x in pride_ours_fractions],
@@ -1038,6 +1048,8 @@ def _plot_three_curves_acc_recall_std(
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_pride],
                     "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_pride],
                     "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_pride],
+                    "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_pride],
+                    "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_pride],
                 },
                 "ours": {
                     "p": [int(x) for x in pride_ours_fractions],
@@ -1046,6 +1058,8 @@ def _plot_three_curves_acc_recall_std(
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours],
                     "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_ours],
                     "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_ours],
+                    "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_ours],
+                    "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours],
                 },
                 "ours_pride": {
                     "p": [int(x) for x in pride_ours_fractions],
@@ -1054,6 +1068,8 @@ def _plot_three_curves_acc_recall_std(
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours_pride],
                     "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_ours_pride],
                     "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_ours_pride],
+                    "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_ours_pride],
+                    "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours_pride],
                 },
             },
         }
