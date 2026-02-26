@@ -170,8 +170,8 @@ def _get_default_baseline(payload: dict, curves: dict, key: str) -> float:
 
 def _curve_series_from_payload(payload: dict, curve_key: str, y_key: str) -> Dict[float, Dict[str, float]]:
     """
-    Returns: x(p or fraction) -> {'cost': float, 'y': float, 'y_std': float (optional)}
-    y_std: Run 내 시드 편차 (payload에 delta_acc_std, delta_recall_std_std 있으면 사용).
+    Returns: x(p or fraction) -> {'cost': float, 'y': float}
+    y_key: 'acc'|'recall_std'|'delta_acc'|'delta_recall_std'
     """
     if not isinstance(payload, dict):
         return {}
@@ -183,7 +183,6 @@ def _curve_series_from_payload(payload: dict, curve_key: str, y_key: str) -> Dic
     costs = curve.get("cost", []) or []
     if y_key == "delta_acc":
         ys = curve.get("delta_acc", []) or []
-        y_stds = curve.get("delta_acc_std", []) or []
         default = _get_default_baseline(payload, curves, "acc")
         if not ys or (len(ys) != len(xs) and np.isfinite(default)):
             accs = curve.get("acc", []) or []
@@ -193,7 +192,6 @@ def _curve_series_from_payload(payload: dict, curve_key: str, y_key: str) -> Dic
             ys = curve.get("acc", []) or []
     elif y_key == "delta_recall_std":
         ys = curve.get("delta_recall_std", []) or []
-        y_stds = curve.get("delta_recall_std_std", []) or []
         default = _get_default_baseline(payload, curves, "recall_std")
         if not ys or (len(ys) != len(xs) and np.isfinite(default)):
             rstds = curve.get("recall_std", []) or []
@@ -203,7 +201,6 @@ def _curve_series_from_payload(payload: dict, curve_key: str, y_key: str) -> Dic
             ys = curve.get("recall_std", []) or []
     else:
         ys = curve.get(y_key, []) or []
-        y_stds = []
 
     out: Dict[float, Dict[str, float]] = {}
     n = min(len(xs), len(costs), len(ys))
@@ -214,14 +211,7 @@ def _curve_series_from_payload(payload: dict, curve_key: str, y_key: str) -> Dic
             yf = float(ys[i])
         except Exception:
             continue
-        entry: Dict[str, float] = {"cost": cf, "y": yf}
-        if i < len(y_stds):
-            try:
-                sf = float(y_stds[i])
-                entry["y_std"] = sf if np.isfinite(sf) else 0.0
-            except Exception:
-                entry["y_std"] = 0.0
-        out[xf] = entry
+        out[xf] = {"cost": cf, "y": yf}
     return out
 
 
@@ -237,8 +227,7 @@ def _nanstd(xs: List[float]) -> float:
 
 def _aggregate_series(series_list: List[Dict[float, Dict[str, float]]]) -> Dict[float, Dict[str, float]]:
     """
-    여러 run의 시리즈를 x 키로 맞춰서 평균.
-    y_std = Run 내 시드편차들의 평균 (각 run의 y_std를 평균). Run 간 흩어짐 아님.
+    여러 run의 시리즈를 x 키로 맞춰서 평균. y_std = n개 run 값들의 표준편차 (Run 간 흩어짐).
     """
     if not series_list:
         return {}
@@ -247,13 +236,11 @@ def _aggregate_series(series_list: List[Dict[float, Dict[str, float]]]) -> Dict[
     for x in xs_all:
         costs = []
         ys = []
-        y_stds = []
         for s in series_list:
             if not isinstance(s, dict) or x not in s:
                 continue
             c = s[x].get("cost")
             y = s[x].get("y")
-            y_std = s[x].get("y_std")
             try:
                 cf = float(c)
                 yf = float(y)
@@ -261,19 +248,12 @@ def _aggregate_series(series_list: List[Dict[float, Dict[str, float]]]) -> Dict[
                 continue
             costs.append(cf)
             ys.append(yf)
-            if y_std is not None:
-                try:
-                    y_stds.append(float(y_std) if np.isfinite(float(y_std)) else 0.0)
-                except (TypeError, ValueError):
-                    y_stds.append(0.0)
-            else:
-                y_stds.append(0.0)
         if not costs or not ys:
             continue
         out[float(x)] = {
             "cost_mean": _nanmean(costs),
             "y_mean": _nanmean(ys),
-            "y_std": _nanmean(y_stds) if y_stds else 0.0,
+            "y_std": _nanstd(ys),
             "n": float(len([v for v in ys if np.isfinite(v)])),
         }
     return out
