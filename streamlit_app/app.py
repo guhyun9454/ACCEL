@@ -268,7 +268,8 @@ def _series_to_xy(agg: Dict[float, Dict[str, float]]) -> Tuple[np.ndarray, np.nd
         ystd = float(v.get("y_std", float("nan")))
         x = float(v.get("cost_mean", float("nan")))
         if np.isfinite(x) and np.isfinite(y):
-            items.append((x, y, ystd))
+            # n=1일 때 nanstd→nan이므로 0으로 치환 (fill_between nan 시 잘못 렌더링됨)
+            items.append((x, y, ystd if np.isfinite(ystd) else 0.0))
     items = sorted(items, key=lambda t: t[0])
     if not items:
         return np.asarray([]), np.asarray([]), np.asarray([])
@@ -301,6 +302,7 @@ def _plot_groups(
     curve_label_overrides: Optional[Dict[str, str]] = None,
     plot_individual: bool = True,
     max_pct_by_curve: Optional[Dict[str, float]] = None,
+    n_runs_flattened: int = 0,
 ):
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=160)
 
@@ -326,6 +328,18 @@ def _plot_groups(
                 cd = CURVE_DEFS[ck]
                 base_lab = str((curve_label_overrides or {}).get(ck) or cd["label"])
                 label = f"{gname} • {base_lab}" if len(group_payloads) > 1 else base_lab
+                # 그룹별 밴드: 여러 payload 있을 때만, 밴드 먼저 그려서 선 뒤에 배치
+                if show_group_std and len(series_list) > 1 and ystd.size == y.size:
+                    ylo = np.where(np.isfinite(ystd), y - ystd, y)
+                    yhi = np.where(np.isfinite(ystd), y + ystd, y)
+                    ax.fill_between(
+                        x,
+                        ylo,
+                        yhi,
+                        color=cd["color"],
+                        alpha=0.10,
+                        linewidth=0,
+                    )
                 ax.plot(
                     x, y,
                     color=cd["color"],
@@ -336,16 +350,6 @@ def _plot_groups(
                     alpha=0.90,
                     label=label,
                 )
-                # Only meaningful if this group contains multiple payloads.
-                if show_group_std and len(series_list) > 1 and ystd.size == y.size:
-                    ax.fill_between(
-                        x,
-                        y - ystd,
-                        y + ystd,
-                        color=cd["color"],
-                        alpha=0.12,
-                        linewidth=0,
-                    )
 
     # overall mean (optional)
     if overall_mode in ("flatten_equal_run_weight",):
@@ -365,6 +369,18 @@ def _plot_groups(
                 continue
             cd = CURVE_DEFS[ck]
             base_lab = str((curve_label_overrides or {}).get(ck) or cd["label"])
+            run_note = f" (n={n_runs_flattened} runs)" if n_runs_flattened > 1 else ""
+            # 밴드를 먼저 그려서 선 뒤에 배치 (선이 밴드 위에 보이도록)
+            ylo = np.where(np.isfinite(ystd), y - ystd, y)
+            yhi = np.where(np.isfinite(ystd), y + ystd, y)
+            ax.fill_between(
+                x,
+                ylo,
+                yhi,
+                color=cd["color"],
+                alpha=0.10,
+                linewidth=0,
+            )
             ax.plot(
                 x, y,
                 color=cd["color"],
@@ -373,22 +389,15 @@ def _plot_groups(
                 linewidth=2.5,
                 markersize=8,
                 alpha=0.95,
-                label=f"{overall_curve_label} • {base_lab}",
-            )
-            ax.fill_between(
-                x,
-                y - ystd,
-                y + ystd,
-                color=cd["color"],
-                alpha=0.10,
-                linewidth=0,
+                label=f"{overall_curve_label}{run_note} • {base_lab}",
             )
 
     _y_labels = {"acc": "Accuracy (%)", "delta_acc": "Δ Accuracy (%)", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
     _y_titles = {"acc": "Accuracy", "delta_acc": "Δ Accuracy", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
+    subtitle = f" ({n_runs_flattened} runs 평균)" if overall_mode and n_runs_flattened > 1 else ""
     ax.set_xlabel("Computational Cost (× of default)", fontsize=11)
     ax.set_ylabel(_y_labels.get(y_key, y_key), fontsize=11)
-    ax.set_title(f"{task} — {_y_titles.get(y_key, y_key)}", fontsize=12)
+    ax.set_title(f"{task} — {_y_titles.get(y_key, y_key)}{subtitle}", fontsize=12)
     if y_key in ("delta_acc", "delta_recall_std"):
         ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax.grid(True, linestyle="--", alpha=0.35)
@@ -608,6 +617,7 @@ if plot_clicked:
 
     c_left, c_right = st.columns(2)
     with c_left:
+        n_runs_flattened = sum(len(p) for p in nonempty.values()) if overall_mode_key else 0
         fig_acc = _plot_groups(
             group_payloads=nonempty,
             task=str(task),
@@ -619,6 +629,7 @@ if plot_clicked:
             curve_label_overrides=curve_label_overrides,
             plot_individual=(display_mode in ("each", "each_plus_mean")),
             max_pct_by_curve=max_pct_by_curve,
+            n_runs_flattened=n_runs_flattened,
         )
         st.pyplot(fig_acc, use_container_width=True)
     with c_right:
@@ -633,5 +644,6 @@ if plot_clicked:
             curve_label_overrides=curve_label_overrides,
             plot_individual=(display_mode in ("each", "each_plus_mean")),
             max_pct_by_curve=max_pct_by_curve,
+            n_runs_flattened=n_runs_flattened,
         )
         st.pyplot(fig_rstd, use_container_width=True)
