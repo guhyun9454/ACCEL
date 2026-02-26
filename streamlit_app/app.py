@@ -303,6 +303,7 @@ def _plot_groups(
     plot_individual: bool = True,
     max_pct_by_curve: Optional[Dict[str, float]] = None,
     n_runs_flattened: int = 0,
+    show_overall_band: bool = False,
 ):
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=160)
 
@@ -370,17 +371,18 @@ def _plot_groups(
             cd = CURVE_DEFS[ck]
             base_lab = str((curve_label_overrides or {}).get(ck) or cd["label"])
             run_note = f" (n={n_runs_flattened} runs)" if n_runs_flattened > 1 else ""
-            # 밴드를 먼저 그려서 선 뒤에 배치 (선이 밴드 위에 보이도록)
-            ylo = np.where(np.isfinite(ystd), y - ystd, y)
-            yhi = np.where(np.isfinite(ystd), y + ystd, y)
-            ax.fill_between(
-                x,
-                ylo,
-                yhi,
-                color=cd["color"],
-                alpha=0.10,
-                linewidth=0,
-            )
+            # 밴드: Run 간 편차를 그림. 끄면 선만 (Run 내 시드편차 평균=0 의도)
+            if show_overall_band:
+                ylo = np.where(np.isfinite(ystd), y - ystd, y)
+                yhi = np.where(np.isfinite(ystd), y + ystd, y)
+                ax.fill_between(
+                    x,
+                    ylo,
+                    yhi,
+                    color=cd["color"],
+                    alpha=0.10,
+                    linewidth=0,
+                )
             ax.plot(
                 x, y,
                 color=cd["color"],
@@ -604,6 +606,11 @@ curve_label_overrides = {
     "ours_pride": lab_ours_pride,
 }
 
+show_overall_band = st.checkbox(
+    "평균 곡선 밴드 표시",
+    value=False,
+    help="켜면 Run 간 값 흩어짐을 밴드로 그림. 끄면 선만 그림 (의도: Run 내 시드편차 평균=0이므로 밴드 없음).",
+)
 plot_clicked = st.button("그래프 그리기", type="primary", use_container_width=True)
 
 if plot_clicked:
@@ -630,6 +637,7 @@ if plot_clicked:
             plot_individual=(display_mode in ("each", "each_plus_mean")),
             max_pct_by_curve=max_pct_by_curve,
             n_runs_flattened=n_runs_flattened,
+            show_overall_band=show_overall_band,
         )
         st.pyplot(fig_acc, use_container_width=True)
     with c_right:
@@ -645,5 +653,6 @@ if plot_clicked:
             plot_individual=(display_mode in ("each", "each_plus_mean")),
             max_pct_by_curve=max_pct_by_curve,
             n_runs_flattened=n_runs_flattened,
+            show_overall_band=show_overall_band,
         )
         st.pyplot(fig_rstd, use_container_width=True)
