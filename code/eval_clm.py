@@ -17,7 +17,7 @@ from typing import List, Optional, Tuple, Dict, Any
 import numpy as np
 import torch
 import zlib
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoConfig
 from transformers import logging as hf_logging
 
 # Matplotlib (headless)
@@ -3313,13 +3313,27 @@ def main():
     )
 
     use_bf16 = bool(torch.cuda.is_available()) and bool(torch.cuda.is_bf16_supported())
-    model = AutoModelForCausalLM.from_pretrained(
+    config = AutoConfig.from_pretrained(
         args.pretrained_model_path,
-        device_map='auto',
-        use_safetensors=True,
-        torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
         cache_dir=getattr(args, "cache_dir", None),
     )
+    model_type = getattr(config, "model_type", "").lower()
+    if model_type in ("t5", "mt5", "umt5"):
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            args.pretrained_model_path,
+            device_map='auto',
+            use_safetensors=True,
+            torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
+            cache_dir=getattr(args, "cache_dir", None),
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.pretrained_model_path,
+            device_map='auto',
+            use_safetensors=True,
+            torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
+            cache_dir=getattr(args, "cache_dir", None),
+        )
 
     logging_cuda_memory_usage()
 
