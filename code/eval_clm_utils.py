@@ -321,10 +321,15 @@ def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_id
 
         input_ids = toker(input_text, return_tensors="pt").input_ids.to(model.device)
         input_ids = input_ids[..., -1536:]
+        is_seq2seq = getattr(getattr(model, "config", None), "is_encoder_decoder", False)
         with torch.no_grad():
-            logits = model(
-                input_ids=input_ids,
-            ).logits[:, -1].view(-1)
+            if is_seq2seq:
+                cfg = getattr(model, "config", None)
+                dec_start = getattr(cfg, "decoder_start_token_id", None) or getattr(cfg, "pad_token_id", 0)
+                dec_ids = torch.full((input_ids.size(0), 1), dec_start, dtype=torch.long, device=model.device)
+                logits = model(input_ids=input_ids, decoder_input_ids=dec_ids).logits[:, -1].view(-1)
+            else:
+                logits = model(input_ids=input_ids).logits[:, -1].view(-1)
 
         option_indices = [toker(f': {e}').input_ids[-1] for e in option_ids] + \
             [toker(f':{e}').input_ids[-1] for e in option_ids]
@@ -432,14 +437,27 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
                 input_text += ' '
             input_texts.append(input_text)
 
+        is_seq2seq = getattr(getattr(model, "config", None), "is_encoder_decoder", False)
+        decoder_start = None
+        if is_seq2seq:
+            cfg = getattr(model, "config", None)
+            decoder_start = getattr(cfg, "decoder_start_token_id", None) or getattr(cfg, "pad_token_id", 0)
+
         all_probs = []
         for input_text in input_texts:
             input_ids = toker(input_text, truncation=False, return_tensors="pt").input_ids.to(model.device)
             input_ids = input_ids[..., -1536:]
             with torch.no_grad():
-                logits = model(
-                    input_ids=input_ids,
-                ).logits[:, -1]
+                if is_seq2seq:
+                    dec_ids = torch.full(
+                        (input_ids.size(0), 1),
+                        decoder_start,
+                        dtype=torch.long,
+                        device=model.device,
+                    )
+                    logits = model(input_ids=input_ids, decoder_input_ids=dec_ids).logits[:, -1]
+                else:
+                    logits = model(input_ids=input_ids).logits[:, -1]
 
             option_indices = [toker(f': {e}').input_ids[-1] for e in option_ids] + \
                 [toker(f':{e}').input_ids[-1] for e in option_ids]
