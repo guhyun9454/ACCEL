@@ -53,6 +53,13 @@ CURVE_DEFS = {
     },
 }
 
+# Ours+PRIDE 다중 α 곡선용 색상 팔레트 (α·variant별 구분)
+ALPHA_COLOR_PALETTE = [
+    "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00",
+    "#FFFF33", "#A65628", "#F781BF", "#66C2A5", "#FC8D62",
+    "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F",
+]
+
 
 @dataclass(frozen=True)
 class RunRecord:
@@ -332,96 +339,118 @@ def _plot_groups(
     max_pct_by_curve: Optional[Dict[str, float]] = None,
     n_runs_flattened: int = 0,
     show_overall_band: bool = False,
-    ours_pride_alpha: Optional[int] = None,
+    ours_pride_alphas: Optional[List[int]] = None,
+    ours_pride_base_label: str = "Ours+PRIDE",
 ):
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=160)
 
     # plot per-model lines (each selected run is a "group" with a single payload)
     max_by = max_pct_by_curve or {}
 
+    _pride_keys = ("ours_pride_th1_2", "ours_pride_online_sqrt")
     if plot_individual:
         for gname, payloads in group_payloads.items():
             if not payloads:
                 continue
             for ck in curve_keys:
-                series_list = [_curve_series_from_payload(p, ck, y_key, ours_pride_alpha=ours_pride_alpha if ck in ("ours_pride_th1_2", "ours_pride_online_sqrt") else None) for p in payloads]
-                m = max_by.get(ck)
-                series_list = [_filter_series_by_max_pct(s, m, ck) for s in series_list if s]
-                series_list = [s for s in series_list if s]
-                if not series_list:
-                    continue
-                agg = _aggregate_series(series_list)
-                x, y, ystd = _series_to_xy(agg)
-                if x.size == 0:
-                    continue
-
-                cd = CURVE_DEFS[ck]
-                base_lab = str((curve_label_overrides or {}).get(ck) or cd["label"])
-                label = f"{gname} • {base_lab}" if len(group_payloads) > 1 else base_lab
-                # 그룹별 밴드: 여러 payload 있을 때만, 밴드 먼저 그려서 선 뒤에 배치
-                if show_group_std and len(series_list) > 1 and ystd.size == y.size:
-                    ylo = np.where(np.isfinite(ystd), y - ystd, y)
-                    yhi = np.where(np.isfinite(ystd), y + ystd, y)
-                    ax.fill_between(
-                        x,
-                        ylo,
-                        yhi,
-                        color=cd["color"],
-                        alpha=0.10,
-                        linewidth=0,
-                    )
-                ax.plot(
-                    x, y,
-                    color=cd["color"],
-                    linestyle=cd["linestyle"],
-                    marker=cd["marker"],
-                    linewidth=2.0,
-                    markersize=8,
-                    alpha=0.90,
-                    label=label,
-                )
+                if ck in _pride_keys:
+                    alphas = ours_pride_alphas or [2]
+                    for i, alpha in enumerate(alphas):
+                        series_list = [_curve_series_from_payload(p, ck, y_key, ours_pride_alpha=alpha) for p in payloads]
+                        m = max_by.get(ck)
+                        series_list = [_filter_series_by_max_pct(s, m, ck) for s in series_list if s]
+                        series_list = [s for s in series_list if s]
+                        if not series_list:
+                            continue
+                        agg = _aggregate_series(series_list)
+                        x, y, ystd = _series_to_xy(agg)
+                        if x.size == 0:
+                            continue
+                        cd = CURVE_DEFS[ck]
+                        color_idx = (0 if ck == "ours_pride_th1_2" else len(alphas)) + i
+                        line_color = ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
+                        suffix = "th1/2" if ck == "ours_pride_th1_2" else "Online Sqrt"
+                        base_lab = f"{ours_pride_base_label} {suffix} (α={alpha})"
+                        label = f"{gname} • {base_lab}" if len(group_payloads) > 1 else base_lab
+                        if show_group_std and len(series_list) > 1 and ystd.size == y.size:
+                            ylo = np.where(np.isfinite(ystd), y - ystd, y)
+                            yhi = np.where(np.isfinite(ystd), y + ystd, y)
+                            ax.fill_between(x, ylo, yhi, color=line_color, alpha=0.10, linewidth=0)
+                        ax.plot(x, y, color=line_color, linestyle=cd["linestyle"], marker=cd["marker"],
+                                linewidth=2.0, markersize=8, alpha=0.90, label=label)
+                else:
+                    series_list = [_curve_series_from_payload(p, ck, y_key) for p in payloads]
+                    m = max_by.get(ck)
+                    series_list = [_filter_series_by_max_pct(s, m, ck) for s in series_list if s]
+                    series_list = [s for s in series_list if s]
+                    if not series_list:
+                        continue
+                    agg = _aggregate_series(series_list)
+                    x, y, ystd = _series_to_xy(agg)
+                    if x.size == 0:
+                        continue
+                    cd = CURVE_DEFS[ck]
+                    base_lab = str((curve_label_overrides or {}).get(ck) or cd["label"])
+                    label = f"{gname} • {base_lab}" if len(group_payloads) > 1 else base_lab
+                    if show_group_std and len(series_list) > 1 and ystd.size == y.size:
+                        ylo = np.where(np.isfinite(ystd), y - ystd, y)
+                        yhi = np.where(np.isfinite(ystd), y + ystd, y)
+                        ax.fill_between(x, ylo, yhi, color=cd["color"], alpha=0.10, linewidth=0)
+                    ax.plot(x, y, color=cd["color"], linestyle=cd["linestyle"], marker=cd["marker"],
+                            linewidth=2.0, markersize=8, alpha=0.90, label=label)
 
     # overall mean (optional)
     if overall_mode in ("flatten_equal_run_weight",):
         for ck in curve_keys:
-            all_series = []
-            for payloads in group_payloads.values():
-                for p in payloads:
-                    s = _curve_series_from_payload(p, ck, y_key, ours_pride_alpha=ours_pride_alpha if ck in ("ours_pride_th1_2", "ours_pride_online_sqrt") else None)
-                    m = max_by.get(ck)
-                    s = _filter_series_by_max_pct(s, m, ck) if s else {}
-                    if s:
-                        all_series.append(s)
-            agg_all = _aggregate_series(all_series) if all_series else {}
-            x, y, ystd = _series_to_xy(agg_all)
-
-            if x.size == 0:
-                continue
-            cd = CURVE_DEFS[ck]
-            base_lab = str((curve_label_overrides or {}).get(ck) or cd["label"])
-            run_note = ""
-            # 밴드: Run 간 편차를 그림. 끄면 선만 (Run 내 시드편차 평균=0 의도)
-            if show_overall_band:
-                ylo = np.where(np.isfinite(ystd), y - ystd, y)
-                yhi = np.where(np.isfinite(ystd), y + ystd, y)
-                ax.fill_between(
-                    x,
-                    ylo,
-                    yhi,
-                    color=cd["color"],
-                    alpha=0.10,
-                    linewidth=0,
-                )
-            ax.plot(
-                x, y,
-                color=cd["color"],
-                linestyle=":",
-                marker=cd["marker"],
-                linewidth=2.5,
-                markersize=8,
-                alpha=0.95,
-                label=f"{overall_curve_label}{run_note} • {base_lab}",
-            )
+            if ck in _pride_keys:
+                alphas = ours_pride_alphas or [2]
+                for i, alpha in enumerate(alphas):
+                    all_series = []
+                    for payloads in group_payloads.values():
+                        for p in payloads:
+                            s = _curve_series_from_payload(p, ck, y_key, ours_pride_alpha=alpha)
+                            m = max_by.get(ck)
+                            s = _filter_series_by_max_pct(s, m, ck) if s else {}
+                            if s:
+                                all_series.append(s)
+                    agg_all = _aggregate_series(all_series) if all_series else {}
+                    x, y, ystd = _series_to_xy(agg_all)
+                    if x.size == 0:
+                        continue
+                    cd = CURVE_DEFS[ck]
+                    color_idx = (0 if ck == "ours_pride_th1_2" else len(alphas)) + i
+                    line_color = ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
+                    suffix = "th1/2" if ck == "ours_pride_th1_2" else "Online Sqrt"
+                    base_lab = f"{ours_pride_base_label} {suffix} (α={alpha})"
+                    if show_overall_band and ystd.size == y.size:
+                        ylo = np.where(np.isfinite(ystd), y - ystd, y)
+                        yhi = np.where(np.isfinite(ystd), y + ystd, y)
+                        ax.fill_between(x, ylo, yhi, color=line_color, alpha=0.10, linewidth=0)
+                    ax.plot(x, y, color=line_color, linestyle=":", marker=cd["marker"],
+                            linewidth=2.5, markersize=8, alpha=0.95,
+                            label=f"{overall_curve_label} • {base_lab}")
+            else:
+                all_series = []
+                for payloads in group_payloads.values():
+                    for p in payloads:
+                        s = _curve_series_from_payload(p, ck, y_key)
+                        m = max_by.get(ck)
+                        s = _filter_series_by_max_pct(s, m, ck) if s else {}
+                        if s:
+                            all_series.append(s)
+                agg_all = _aggregate_series(all_series) if all_series else {}
+                x, y, ystd = _series_to_xy(agg_all)
+                if x.size == 0:
+                    continue
+                cd = CURVE_DEFS[ck]
+                base_lab = str((curve_label_overrides or {}).get(ck) or cd["label"])
+                if show_overall_band and ystd.size == y.size:
+                    ylo = np.where(np.isfinite(ystd), y - ystd, y)
+                    yhi = np.where(np.isfinite(ystd), y + ystd, y)
+                    ax.fill_between(x, ylo, yhi, color=cd["color"], alpha=0.10, linewidth=0)
+                ax.plot(x, y, color=cd["color"], linestyle=":", marker=cd["marker"],
+                        linewidth=2.5, markersize=8, alpha=0.95,
+                        label=f"{overall_curve_label} • {base_lab}")
 
     _y_labels = {"acc": "Accuracy (%)", "delta_acc": "Δ Accuracy (%)", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
     _y_titles = {"acc": "Accuracy", "delta_acc": "Δ Accuracy", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
@@ -595,14 +624,14 @@ with col_p4:
         key="max_ours_pride",
     )
 
-pride_alpha_options = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-ours_pride_alpha = st.selectbox(
+pride_alpha_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+ours_pride_alphas = st.multiselect(
     "Ours+PRIDE PriDe α (prefix)",
     options=pride_alpha_options,
-    index=0,
+    default=[2, 5, 10, 20],
     format_func=lambda x: f"α={x}%",
-    key="ours_pride_alpha",
-    help="Ours+PRIDE에서 PriDe prefix 비율. 10단위, 100까지.",
+    key="ours_pride_alphas",
+    help="Ours+PRIDE에서 PriDe prefix 비율. 여러 α 선택 시 각 α별 곡선이 함께 표시됩니다.",
 )
 
 max_pct_by_curve = {
@@ -644,8 +673,8 @@ curve_label_overrides = {
     "cyclic": lab_cyclic,
     "default_pride": lab_pride,
     "ours": lab_ours,
-    "ours_pride_th1_2": f"{lab_ours_pride} th1/2 (α={ours_pride_alpha})",
-    "ours_pride_online_sqrt": f"{lab_ours_pride} Online Sqrt (α={ours_pride_alpha})",
+    "ours_pride_th1_2": lab_ours_pride,
+    "ours_pride_online_sqrt": lab_ours_pride,
 }
 
 show_overall_band = st.checkbox(
@@ -680,7 +709,8 @@ if plot_clicked:
             max_pct_by_curve=max_pct_by_curve,
             n_runs_flattened=n_runs_flattened,
             show_overall_band=show_overall_band,
-            ours_pride_alpha=ours_pride_alpha,
+            ours_pride_alphas=ours_pride_alphas or [2],
+            ours_pride_base_label=str(lab_ours_pride or "Ours+PRIDE"),
         )
         st.pyplot(fig_acc, use_container_width=True)
     with c_right:
@@ -697,6 +727,7 @@ if plot_clicked:
             max_pct_by_curve=max_pct_by_curve,
             n_runs_flattened=n_runs_flattened,
             show_overall_band=show_overall_band,
-            ours_pride_alpha=ours_pride_alpha,
+            ours_pride_alphas=ours_pride_alphas or [2],
+            ours_pride_base_label=str(lab_ours_pride or "Ours+PRIDE"),
         )
         st.pyplot(fig_rstd, use_container_width=True)

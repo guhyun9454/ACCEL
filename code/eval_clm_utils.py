@@ -100,8 +100,8 @@ def parse_arguments():
                         help="Cyclic (no PRIDE) curve fractions, comma-separated (e.g. 0,10,20,...,100).")
     parser.add_argument("--plot_pride_ours_fractions", type=str, default="2,5,10,20,30,40,50,60,70,80,90,100",
                         help="OURS th1 curve (x-axis). Default+PRIDE도 동일 p 사용.")
-    parser.add_argument("--plot_pride_prefix_fractions", type=str, default="10,20,30,40,50,60,70,80,90,100",
-                        help="Ours+PRIDE에서 PriDe prefix(alpha) 값. 10단위, 100까지.")
+    parser.add_argument("--plot_pride_prefix_fractions", type=str, default="2,5,10,20,30,40,50,60,70,80,90,100",
+                        help="Ours+PRIDE에서 PriDe prefix(alpha) 값. 선택 가능한 α 목록.")
 
     parser.add_argument("--verbose", action="store_true",
                         help="Print verbose logs (extra summaries).")

@@ -3346,7 +3346,7 @@ def main():
                     }]
                     derived_records_by_p[float(p)] = [cobj]  # 1 "subject"
 
-                pride_prefix = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100] or [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+                pride_prefix = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100] or [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                 derived_records_pride_by_p = {}
                 derived_records_pride_by_alpha = {}
                 for alpha in pride_prefix:
@@ -3817,9 +3817,9 @@ def main():
                         curve_objs_baseline = []
                         curve_objs_pride = []
 
-                        pride_prefix_list = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
+                        pride_prefix_list = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
                         if not pride_prefix_list:
-                            pride_prefix_list = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+                            pride_prefix_list = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                         ours_th1_list = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
                         if not ours_th1_list:
                             ours_th1_list = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
@@ -4172,7 +4172,7 @@ def main():
                 os.makedirs(out_dir, exist_ok=True)
                 cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
                 pride_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
-                pride_prefix = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100] or [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+                pride_prefix = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100] or [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                 _plot_three_curves_acc_recall_std(
                     derived_records_by_p,
                     derived_records_pride_by_p if len(derived_records_pride_by_p) > 0 else {},
@@ -4298,14 +4298,14 @@ def main():
                     cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(cobjs, p)
                     logger.info(f"default_pride_α{alpha}_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
 
-            # 2. ours + pride (per alpha, th1/2 and online_sqrt_all)
+            # 2. ours + pride (per alpha): th1/2 and Online Sqrt
             logger.info("---- ours + pride (th1/2) ----")
             for alpha in pride_alphas:
                 cobjs = derived_records_pride_by_alpha[alpha]
                 for p in pride_fracs:
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, "th1/2")
                     logger.info(f"ours_pride_th12_α{alpha}_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
-            logger.info("---- ours + pride (online_sqrt_all) ----")
+            logger.info("---- ours + pride (Online Sqrt) ----")
             for alpha in pride_alphas:
                 cobjs = derived_records_pride_by_alpha[alpha]
                 for p in pride_fracs:
