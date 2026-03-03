@@ -2868,30 +2868,59 @@ def _merge_curve_objs_over_runs(cobjs: List[dict]) -> Optional[dict]:
             vals = [x for x in vals if np.isfinite(x)]
             if vals:
                 out[k] = float(np.mean(vals))
-    # heuristic_points
+    # heuristic_points (group by (label, th1_p) when th1_p present, else by label only)
     hp_ref = ref.get("heuristic_points") or []
     if hp_ref:
-        labels_seen = set(str(h.get("label")) for h in hp_ref if isinstance(h, dict) and h.get("label"))
+        def _hp_key(h):
+            lab = str(h.get("label")) if h.get("label") else ""
+            th1_p = h.get("th1_p")
+            return (lab, th1_p) if th1_p is not None else (lab, None)
+
+        keys_seen = set()
+        for h in hp_ref:
+            if isinstance(h, dict) and h.get("label"):
+                keys_seen.add(_hp_key(h))
         merged_hp = []
-        for lab in labels_seen:
-            costs, accs, rstds = [], [], []
+        for (lab, th1_p) in sorted(keys_seen, key=lambda k: (k[0], (k[1] if k[1] is not None else -1))):
+            costs, accs, rstds, nbs, np2s, ncs = [], [], [], [], [], []
             marker_ref, color_ref = "o", "black"
             for c in cobjs:
-                hp_map = {str(h.get("label")): h for h in (c.get("heuristic_points") or []) if isinstance(h, dict)}
-                h = hp_map.get(lab, {})
-                if h:
+                for h in (c.get("heuristic_points") or []):
+                    if not isinstance(h, dict):
+                        continue
+                    if str(h.get("label")) != lab:
+                        continue
+                    if th1_p is not None and h.get("th1_p") != th1_p:
+                        continue
+                    if th1_p is None and h.get("th1_p") is not None:
+                        continue
                     costs.append(float(h.get("cost", float("nan"))))
                     accs.append(float(h.get("acc", float("nan"))))
                     if "recall_std" in h:
                         rstds.append(float(h["recall_std"]))
+                    if "n_base" in h:
+                        nbs.append(int(h.get("n_base", 0)))
+                    if "n_probe2" in h:
+                        np2s.append(int(h.get("n_probe2", 0)))
+                    if "n_cyclic" in h:
+                        ncs.append(int(h.get("n_cyclic", 0)))
                     marker_ref = str(h.get("marker", "o"))
                     color_ref = str(h.get("color", "black"))
+                    break
             costs = [x for x in costs if np.isfinite(x)]
             accs = [x for x in accs if np.isfinite(x)]
             if costs and accs:
                 entry = {"label": lab, "cost": float(np.mean(costs)), "acc": float(np.mean(accs)), "marker": marker_ref, "color": color_ref}
+                if th1_p is not None:
+                    entry["th1_p"] = th1_p
                 if rstds:
                     entry["recall_std"] = float(np.mean(rstds))
+                if nbs:
+                    entry["n_base"] = int(np.mean(nbs))
+                if np2s:
+                    entry["n_probe2"] = int(np.mean(np2s))
+                if ncs:
+                    entry["n_cyclic"] = int(np.mean(ncs))
                 merged_hp.append(entry)
         out["heuristic_points"] = merged_hp
     return out
@@ -4016,7 +4045,8 @@ def main():
                                             probe2_pred_idx_list_pr, labels_idx_for_curves, k, ours_th1, lambda x: x / 2.0, prefix_ids_set)
                                         rec_op = _make_transition_record_from_preds(
                                             base_correct_list_pr, preds_op, labels_idx_for_curves, default_conf_pr, subject)
-                                        transition_records_ours_pride_by_p.setdefault(float(ours_th1), []).append(rec_op)
+                                        if pride_alpha == 2:
+                                            transition_records_ours_pride_by_p.setdefault(float(ours_th1), []).append(rec_op)
                                     except Exception:
                                         pass
 
@@ -4136,7 +4166,8 @@ def main():
             if not records_by_p:
                 return
             pride_fracs_sorted = sorted([p for p in records_by_p.keys() if isinstance(p, (int, float))])
-            logger.info(_purple(f"\n==== EMPIRICAL ANALYSIS: {method_name} (per perc) [{args.task}] ===="))
+            suffix = " (α=2% 고정)" if method_name == "Ours+PRIDE" else ""
+            logger.info(_purple(f"\n==== EMPIRICAL ANALYSIS: {method_name} (per perc){suffix} [{args.task}] ===="))
             logger.info("perc | avg_conf_T(정답) | avg_conf_F(오답) | T→F(훼손) | F→T(교정) | T→F% | F→T%")
             for p in pride_fracs_sorted:
                 recs = records_by_p.get(float(p), [])
@@ -4290,13 +4321,13 @@ def main():
             _fmt = (lambda m, s: f"{m:.3f}±{s:.3f}" if np.isfinite(s) and s > 0 else f"{m:.3f}") if n_runs > 1 else (lambda m, s: f"{m:.3f}")
             _fmt4 = (lambda m, s: f"{m:.4f}±{s:.4f}" if np.isfinite(s) and s > 0 else f"{m:.4f}") if n_runs > 1 else (lambda m, s: f"{m:.4f}")
 
-            # 1. default + pride (per alpha)
+            # 1. default + pride (per alpha only — alpha와 cyclic fraction p 동일 개념)
             logger.info("---- default + pride ----")
             for alpha in pride_alphas:
                 cobjs = derived_records_pride_by_alpha[alpha]
-                for p in pride_fracs:
-                    cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(cobjs, p)
-                    logger.info(f"default_pride_α{alpha}_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
+                p = alpha  # Default+PRIDE: prefix α% = cyclic fraction, 하나의 파라미터만 사용
+                cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(cobjs, p)
+                logger.info(f"default_pride_α{alpha}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
 
             # 2. ours + pride (per alpha): th1/2 and Online Sqrt
             logger.info("---- ours + pride (th1/2) ----")
