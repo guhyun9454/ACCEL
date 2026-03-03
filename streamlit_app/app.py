@@ -37,11 +37,18 @@ CURVE_DEFS = {
         "linestyle": "-.",
         "marker": "^",
     },
-    "ours_pride": {
+    "ours_pride_th1_2": {
         "x_key": "p",
-        "label": "Ours (with PriDe)",
+        "label": "Ours+PRIDE (th1/2)",
         "color": "#27AE60",
         "linestyle": "--",
+        "marker": "*",
+    },
+    "ours_pride_online_sqrt": {
+        "x_key": "p",
+        "label": "Ours+PRIDE (Online Sqrt)",
+        "color": "#2ECC71",
+        "linestyle": "-.",
         "marker": "D",
     },
 }
@@ -168,16 +175,39 @@ def _get_default_baseline(payload: dict, curves: dict, key: str) -> float:
     return float("nan")
 
 
-def _curve_series_from_payload(payload: dict, curve_key: str, y_key: str) -> Dict[float, Dict[str, float]]:
+def _curve_series_from_payload(
+    payload: dict,
+    curve_key: str,
+    y_key: str,
+    ours_pride_alpha: Optional[int] = None,
+    ours_pride_variant: Optional[str] = None,
+) -> Dict[float, Dict[str, float]]:
     """
     Returns: x(p or fraction) -> {'cost': float, 'y': float}
     y_key: 'acc'|'recall_std'|'delta_acc'|'delta_recall_std'
+    ours_pride_alpha: for ours_pride*, which PriDe α (10,20,...,100). None = 첫 번째.
+    ours_pride_variant: 'th1/2'|'online_sqrt_all' for ours_pride_th1_2, ours_pride_online_sqrt.
     """
     if not isinstance(payload, dict):
         return {}
     curves = payload.get("curves", {}) or {}
     curve = curves.get(curve_key, {}) or {}
-    x_key = CURVE_DEFS[curve_key]["x_key"]
+    if curve_key in ("ours_pride_th1_2", "ours_pride_online_sqrt"):
+        ours_pride_data = curves.get("ours_pride", {}) or {}
+        by_alpha = ours_pride_data.get("by_alpha") or {}
+        if by_alpha:
+            alpha_key = str(ours_pride_alpha) if ours_pride_alpha is not None else (list(by_alpha.keys())[0] if by_alpha else None)
+            if alpha_key and alpha_key in by_alpha:
+                alpha_curves = by_alpha[alpha_key]
+                if isinstance(alpha_curves, dict):
+                    variant = ours_pride_variant or ("online_sqrt_all" if curve_key == "ours_pride_online_sqrt" else "th1/2")
+                    if variant in alpha_curves:
+                        curve = alpha_curves[variant]
+                    else:
+                        curve = alpha_curves.get("online_sqrt_all") or alpha_curves.get("th1/2") or alpha_curves
+                else:
+                    curve = alpha_curves
+    x_key = CURVE_DEFS.get(curve_key, {}).get("x_key") or "p"
 
     xs = curve.get(x_key, []) or []
     costs = curve.get("cost", []) or []
@@ -302,6 +332,7 @@ def _plot_groups(
     max_pct_by_curve: Optional[Dict[str, float]] = None,
     n_runs_flattened: int = 0,
     show_overall_band: bool = False,
+    ours_pride_alpha: Optional[int] = None,
 ):
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=160)
 
@@ -313,7 +344,7 @@ def _plot_groups(
             if not payloads:
                 continue
             for ck in curve_keys:
-                series_list = [_curve_series_from_payload(p, ck, y_key) for p in payloads]
+                series_list = [_curve_series_from_payload(p, ck, y_key, ours_pride_alpha=ours_pride_alpha if ck in ("ours_pride_th1_2", "ours_pride_online_sqrt") else None) for p in payloads]
                 m = max_by.get(ck)
                 series_list = [_filter_series_by_max_pct(s, m, ck) for s in series_list if s]
                 series_list = [s for s in series_list if s]
@@ -356,7 +387,7 @@ def _plot_groups(
             all_series = []
             for payloads in group_payloads.values():
                 for p in payloads:
-                    s = _curve_series_from_payload(p, ck, y_key)
+                    s = _curve_series_from_payload(p, ck, y_key, ours_pride_alpha=ours_pride_alpha if ck in ("ours_pride_th1_2", "ours_pride_online_sqrt") else None)
                     m = max_by.get(ck)
                     s = _filter_series_by_max_pct(s, m, ck) if s else {}
                     if s:
@@ -523,7 +554,8 @@ st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X�
 curve_keys = st.multiselect(
     "그릴 곡선",
     options=list(CURVE_DEFS.keys()),
-    default=["cyclic", "default_pride", "ours"],
+    default=["cyclic", "default_pride", "ours", "ours_pride_th1_2", "ours_pride_online_sqrt"],
+    help="Ours+PRIDE th1/2 vs Online Sqrt 중 하나만, 또는 둘 다 선택 가능.",
 )
 
 st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
@@ -556,18 +588,29 @@ with col_p3:
     )
 with col_p4:
     max_pct_ours_pride = st.selectbox(
-        "Ours (with PriDe) 상한",
+        "Ours (with PriDe) 상한 (Ours th1)",
         options=pride_ours_options,
         index=len(pride_ours_options) - 1,
         format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
         key="max_ours_pride",
     )
 
+pride_alpha_options = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+ours_pride_alpha = st.selectbox(
+    "Ours+PRIDE PriDe α (prefix)",
+    options=pride_alpha_options,
+    index=0,
+    format_func=lambda x: f"α={x}%",
+    key="ours_pride_alpha",
+    help="Ours+PRIDE에서 PriDe prefix 비율. 10단위, 100까지.",
+)
+
 max_pct_by_curve = {
     "cyclic": float(max_pct_cyclic),
     "default_pride": float(max_pct_pride),
     "ours": float(max_pct_ours),
-    "ours_pride": float(max_pct_ours_pride),
+    "ours_pride_th1_2": float(max_pct_ours_pride),
+    "ours_pride_online_sqrt": float(max_pct_ours_pride),
 }
 
 overall_mode = st.radio(
@@ -595,13 +638,14 @@ with col_c:
 with col_d:
     lab_ours = st.text_input("OURS 라벨", value=CURVE_DEFS["ours"]["label"])
 with col_e:
-    lab_ours_pride = st.text_input("OURS+PRIDE 라벨", value=CURVE_DEFS["ours_pride"]["label"])
+    lab_ours_pride = st.text_input("OURS+PRIDE 라벨", value="Ours+PRIDE")
 
 curve_label_overrides = {
     "cyclic": lab_cyclic,
     "default_pride": lab_pride,
     "ours": lab_ours,
-    "ours_pride": lab_ours_pride,
+    "ours_pride_th1_2": f"{lab_ours_pride} th1/2 (α={ours_pride_alpha})",
+    "ours_pride_online_sqrt": f"{lab_ours_pride} Online Sqrt (α={ours_pride_alpha})",
 }
 
 show_overall_band = st.checkbox(
@@ -636,6 +680,7 @@ if plot_clicked:
             max_pct_by_curve=max_pct_by_curve,
             n_runs_flattened=n_runs_flattened,
             show_overall_band=show_overall_band,
+            ours_pride_alpha=ours_pride_alpha,
         )
         st.pyplot(fig_acc, use_container_width=True)
     with c_right:
@@ -652,5 +697,6 @@ if plot_clicked:
             max_pct_by_curve=max_pct_by_curve,
             n_runs_flattened=n_runs_flattened,
             show_overall_band=show_overall_band,
+            ours_pride_alpha=ours_pride_alpha,
         )
         st.pyplot(fig_rstd, use_container_width=True)

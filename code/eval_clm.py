@@ -209,6 +209,7 @@ def _run_online_th1_quantile_th2_from_th1_rule_with_preds(
 
         if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
             c_step = max(float(c_step), float(k))
+            pred_i = int(cyclic_pred_idx[i])  # forced → cyclic prediction
 
         preds.append(pred_i)
         total_cost += float(c_step)
@@ -267,6 +268,7 @@ def _run_online_switch_cyclic_with_preds(
 
         if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
             c_step = max(float(c_step), float(k))
+            pred_i = int(cyclic_pred_idx[i])  # forced → cyclic prediction
 
         preds.append(pred_i)
         total_cost += float(c_step)
@@ -364,6 +366,7 @@ def _run_online_sqrt_policy_with_preds(
 
         if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
             c_step = max(float(c_step), float(k))
+            pred_i = int(cyclic_pred_idx[i])  # forced → cyclic prediction
 
         preds.append(pred_i)
         total_cost += float(c_step)
@@ -425,6 +428,7 @@ def _run_online_sqrt_policy_lowconf_update_with_preds(
 
         if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
             c_step = max(float(c_step), float(k))
+            pred_i = int(cyclic_pred_idx[i])  # forced → cyclic prediction
 
         preds.append(pred_i)
         total_cost += float(c_step)
@@ -823,10 +827,12 @@ def _plot_baseline_vs_pride_points_scatter(
 def _plot_three_curves_acc_recall_std(
     derived_records_by_p: Dict[float, List[dict]],
     derived_records_pride_by_p: Dict[float, List[dict]],
+    derived_records_pride_by_alpha: Dict[int, List[dict]],
     out_dir: str,
     task: str,
     cyclic_fractions: List[int],
     pride_ours_fractions: List[int],
+    pride_prefix_list: List[int],
     wandb_ok: bool = False,
     wandb_run: Any = None,
 ):
@@ -900,13 +906,50 @@ def _plot_three_curves_acc_recall_std(
             rstd_stds.append(float(np.nanstd(rl)) if len(rl) > 1 else 0.0)
         return costs, accs, rstds, acc_stds, rstd_stds
 
+    def _agg_heur_by_th1_p(cobjs_list, th1_list, label_filter="online_sqrt_all"):
+        """cobjs have heuristic_points with th1_p and label; extract by p and label."""
+        costs, accs, rstds, acc_stds, rstd_stds = [], [], [], [], []
+        for p in th1_list:
+            cl, al, rl = [], [], []
+            for c in cobjs_list:
+                for h in (c.get("heuristic_points", []) or []):
+                    if isinstance(h, dict) and h.get("th1_p") == p and h.get("label") == label_filter:
+                        if "cost" in h:
+                            cl.append(float(h["cost"]))
+                        if "acc" in h:
+                            al.append(float(h["acc"]) * 100.0)
+                        if "recall_std" in h:
+                            rl.append(float(h["recall_std"]))
+                        break
+            costs.append(np.mean(cl) if cl else float("nan"))
+            accs.append(np.mean(al) if al else float("nan"))
+            rstds.append(np.nanmean(rl) if rl else float("nan"))
+            acc_stds.append(float(np.nanstd(al)) if len(al) > 1 else 0.0)
+            rstd_stds.append(float(np.nanstd(rl)) if len(rl) > 1 else 0.0)
+        return costs, accs, rstds, acc_stds, rstd_stds
+
     cost_cyc, acc_cyc, rstd_cyc, acc_std_cyc, rstd_std_cyc = _agg_cyclic(derived_records_by_p, cyclic_fractions)
-    cobjs_p = derived_records_pride_by_p if derived_records_pride_by_p else {}
     _n = len(pride_ours_fractions)
     _def5 = ([float("nan")] * _n, [float("nan")] * _n, [float("nan")] * _n, [0.0] * _n, [0.0] * _n)
-    cost_pride, acc_pride, rstd_pride, acc_std_pride, rstd_std_pride = _agg_pride_default(cobjs_p, pride_ours_fractions) if cobjs_p else _def5
+
+    # Default+PRIDE: use by_p (legacy) or build from derived_records_pride_by_alpha (first alpha)
+    if derived_records_pride_by_alpha:
+        alpha_def = pride_prefix_list[0] if pride_prefix_list else 10
+        cobjs_def = derived_records_pride_by_alpha.get(alpha_def, [])
+        by_p_def = {float(p): cobjs_def for p in pride_ours_fractions} if cobjs_def else {}
+        cost_pride, acc_pride, rstd_pride, acc_std_pride, rstd_std_pride = _agg_pride_default(by_p_def, pride_ours_fractions) if by_p_def else _def5
+    else:
+        cost_pride, acc_pride, rstd_pride, acc_std_pride, rstd_std_pride = _agg_pride_default(derived_records_pride_by_p, pride_ours_fractions) if derived_records_pride_by_p else _def5
+
     cost_ours, acc_ours, rstd_ours, acc_std_ours, rstd_std_ours = _agg_heur(derived_records_by_p, "th1/2", pride_ours_fractions)
-    cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur(cobjs_p, "th1/2", pride_ours_fractions) if cobjs_p else _def5
+
+    # Ours+PRIDE: use derived_records_pride_by_alpha (first alpha for plot) or legacy by_p
+    if derived_records_pride_by_alpha:
+        alpha_ours = pride_prefix_list[0] if pride_prefix_list else 10
+        cobjs_op = derived_records_pride_by_alpha.get(alpha_ours, [])
+        cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, "online_sqrt_all") if cobjs_op else _def5
+    else:
+        cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur(derived_records_pride_by_p, "th1/2", pride_ours_fractions) if derived_records_pride_by_p else _def5
 
     # Baseline = cyclic at fraction 0 (default, cost~1.0)
     default_acc = float(acc_cyc[0]) if acc_cyc and np.isfinite(acc_cyc[0]) else float("nan")
@@ -1021,6 +1064,48 @@ def _plot_three_curves_acc_recall_std(
             pass
 
     # -------- Save numeric curve points for downstream averaging --------
+    def _build_ours_pride_payload(
+        by_alpha, prefix_list, th1_fracs, def_acc, def_rstd, agg_fn,
+        cost_legacy, acc_legacy, rstd_legacy, dacc_legacy, drstd_legacy, acc_std_legacy, rstd_std_legacy,
+    ):
+        if by_alpha:
+            by_alpha_out = {}
+            for alpha in prefix_list:
+                cobjs = by_alpha.get(alpha, [])
+                if not cobjs:
+                    continue
+                entry = {}
+                for variant in ("th1/2", "online_sqrt_all"):
+                    co, ac, rs, asd, rsd = agg_fn(cobjs, th1_fracs, variant)
+                    entry[variant] = {
+                        "p": [int(x) for x in th1_fracs],
+                        "cost": [float(x) if np.isfinite(x) else float("nan") for x in co],
+                        "acc": [float(x) if np.isfinite(x) else float("nan") for x in ac],
+                        "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rs],
+                        "delta_acc": [float(a - def_acc) if np.isfinite(a) and np.isfinite(def_acc) else float("nan") for a in ac],
+                        "delta_recall_std": [float(def_rstd - r) if np.isfinite(r) and np.isfinite(def_rstd) else float("nan") for r in rs],
+                        "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in asd],
+                        "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rsd],
+                    }
+                by_alpha_out[str(alpha)] = entry
+            return {
+                "pride_prefix_fractions": [int(a) for a in prefix_list],
+                "p": [int(x) for x in th1_fracs],
+                "by_alpha": by_alpha_out,
+            }
+        return {
+            "pride_prefix_fractions": [],
+            "p": [int(x) for x in th1_fracs],
+            "by_alpha": {},
+            "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_legacy],
+            "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_legacy],
+            "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_legacy],
+            "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in dacc_legacy],
+            "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in drstd_legacy],
+            "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_legacy],
+            "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_legacy],
+        }
+
     try:
         points_path = os.path.join(out_dir, f"{task}_three_curves_points.json")
         payload = {
@@ -1061,16 +1146,12 @@ def _plot_three_curves_acc_recall_std(
                     "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_ours],
                     "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours],
                 },
-                "ours_pride": {
-                    "p": [int(x) for x in pride_ours_fractions],
-                    "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours_pride],
-                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours_pride],
-                    "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours_pride],
-                    "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_ours_pride],
-                    "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_ours_pride],
-                    "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_ours_pride],
-                    "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours_pride],
-                },
+                "ours_pride": _build_ours_pride_payload(
+                    derived_records_pride_by_alpha, pride_prefix_list, pride_ours_fractions,
+                    default_acc, default_recall_std, _agg_heur_by_th1_p, cost_ours_pride,
+                    acc_ours_pride, rstd_ours_pride, delta_acc_ours_pride, delta_rstd_ours_pride,
+                    acc_std_ours_pride, rstd_std_ours_pride,
+                ),
             },
         }
         with open(points_path, "w", encoding="utf-8") as f:
@@ -3265,27 +3346,45 @@ def main():
                     }]
                     derived_records_by_p[float(p)] = [cobj]  # 1 "subject"
 
+                pride_prefix = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100] or [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                 derived_records_pride_by_p = {}
-                for p in pride_fracs:
-                    frac = float(p) / 100.0
-                    pride_cost = 1.0 + frac * 2.2 + float(rng.normal(0.0, 0.02))
-                    pride_acc = 0.52 + 0.18 * frac + float(rng.normal(0.0, 0.01))
-                    pride_acc = float(np.clip(pride_acc, 0.0, 1.0))
-                    pride_rstd = 0.16 - 0.07 * frac + float(rng.normal(0.0, 0.006))
-                    pride_rstd = float(np.clip(pride_rstd, 0.0, 1.0))
-                    key = f"cyclic_random_{int(p)}"
-                    derived_records_pride_by_p[float(p)] = [{
-                        key: {"costs": [float(pride_cost)], "accuracies": [float(pride_acc)]},
-                        f"{key}_recall_std": float(pride_rstd),
-                    }]
+                derived_records_pride_by_alpha = {}
+                for alpha in pride_prefix:
+                    cobj_pr = {}
+                    for p in pride_fracs:
+                        frac = float(p) / 100.0
+                        pride_cost = 1.0 + frac * 2.2 + float(rng.normal(0.0, 0.02))
+                        pride_acc = 0.52 + 0.18 * frac + float(rng.normal(0.0, 0.01))
+                        pride_acc = float(np.clip(pride_acc, 0.0, 1.0))
+                        pride_rstd = 0.16 - 0.07 * frac + float(rng.normal(0.0, 0.006))
+                        pride_rstd = float(np.clip(pride_rstd, 0.0, 1.0))
+                        key = f"cyclic_random_{int(p)}"
+                        cobj_pr[key] = {"costs": [float(pride_cost)], "accuracies": [float(pride_acc)]}
+                        cobj_pr[f"{key}_recall_std"] = float(pride_rstd)
+                        cobj_pr.setdefault("heuristic_points", []).append({
+                            "label": "th1/2", "th1_p": p, "cost": float(pride_cost),
+                            "acc": float(pride_acc), "recall_std": float(pride_rstd),
+                            "n_base": 800, "n_probe2": 150, "n_cyclic": 50,
+                        })
+                        sqrt_cost = 1.0 + frac * 1.9 + float(rng.normal(0.0, 0.02))
+                        sqrt_acc = 0.53 + 0.19 * frac + float(rng.normal(0.0, 0.01))
+                        sqrt_rstd = 0.15 - 0.06 * frac + float(rng.normal(0.0, 0.006))
+                        cobj_pr["heuristic_points"].append({
+                            "label": "online_sqrt_all", "th1_p": p, "cost": float(sqrt_cost),
+                            "acc": float(np.clip(sqrt_acc, 0.0, 1.0)), "recall_std": float(np.clip(sqrt_rstd, 0.0, 1.0)),
+                            "n_base": 800, "n_probe2": 150, "n_cyclic": 50,
+                        })
+                    derived_records_pride_by_alpha[alpha] = [cobj_pr]
 
                 _plot_three_curves_acc_recall_std(
                     derived_records_by_p,
                     derived_records_pride_by_p,
+                    derived_records_pride_by_alpha,
                     out_dir,
                     args.task,
                     cyclic_fractions=cyclic_fracs,
                     pride_ours_fractions=pride_fracs,
+                    pride_prefix_list=pride_prefix,
                     wandb_ok=wandb_ok,
                     wandb_run=wandb_run,
                 )
@@ -3346,7 +3445,8 @@ def main():
         # =========================
         eval_acc_records: List[dict] = []  # [{'subject':str,'corrects':int,'total':int,'acc':float}]
         derived_records_by_p: Dict[float, List[dict]] = {}  # p -> list of curve_obj (per subject)
-        derived_records_pride_by_p: Dict[float, List[dict]] = {}  # p -> list of PRIDE+OURS curve_obj (per subject)
+        derived_records_pride_by_p: Dict[float, List[dict]] = {}  # legacy: p->list (Default+PRIDE 단일 alpha용)
+        derived_records_pride_by_alpha: Dict[int, List[dict]] = {}  # alpha(2,5,10,20) -> list of PRIDE curve_obj
         pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
         recall_std_vs_p_records: List[dict] = []  # [{'subject':str,'p':float,'method':str,'kind':str,'rstd':float}]
         n_runs = max(1, int(getattr(args, "n_runs", 1)))
@@ -3713,17 +3813,23 @@ def main():
                         # ---------- optional: PRIDE debiasing + n_runs averaging (like debiase_pride.py) ----------
                         pride_enabled = bool(getattr(args, "pride_mix", False))
                         by_perc_baseline: Dict[float, List[dict]] = defaultdict(list)
-                        by_perc_pride: Dict[float, List[dict]] = defaultdict(list)
+                        by_pride_alpha: Dict[int, List[dict]] = defaultdict(list)  # alpha(2,5,10,20) -> [cobj]
                         curve_objs_baseline = []
                         curve_objs_pride = []
+
+                        pride_prefix_list = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
+                        if not pride_prefix_list:
+                            pride_prefix_list = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+                        ours_th1_list = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
+                        if not ours_th1_list:
+                            ours_th1_list = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
                         # n_runs>1이면 외부 run_idx당 1회만 (이미 다른 결과). n_runs==1이면 n_runs번 curve variation
                         inner_run_indices = [run_idx] if use_run_suffix else list(range(n_runs))
                         for run_idx_inner in inner_run_indices:
-                            perc_list_run = _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100") or "5,10,20,30")
                             cyclic_fracs_run = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
 
-                            for perc in perc_list_run:
+                            for perc in ours_th1_list:
                                 perc = float(perc)
                                 labels_idx_for_curves = [option_ids.index(str(x)) for x in ideals]
 
@@ -3770,151 +3876,166 @@ def main():
                                     except Exception:
                                         pass
 
-                                # --- 2) PRIDE Curves 계산 (고정 0.02 대신 perc/100.0 적용) ---
-                                if pride_enabled:
-                                    seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)) + run_idx_inner)
-                                    pride_prior, pride_meta = _estimate_pride_prior_random_prefix_mean(
-                                        per_sample_probs=per_sample_probs,
-                                        cyclic_indices=cyclic_indices,
-                                        k=k,
-                                        prefix_ratio=perc / 100.0,
-                                        seed=seed,
-                                    )
-                                    prefix_ids_set = set(int(x) for x in (pride_meta.get("prefix_ids") or []))
+                        # --- 2) PRIDE Curves: pride_alpha(2,5,10,20) x ours_th1(2..100) 분리 ---
+                        if pride_enabled:
+                            for pride_alpha in pride_prefix_list:
+                                seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)) + run_idx_inner)
+                                pride_prior, pride_meta = _estimate_pride_prior_random_prefix_mean(
+                                    per_sample_probs=per_sample_probs,
+                                    cyclic_indices=cyclic_indices,
+                                    k=k,
+                                    prefix_ratio=float(pride_alpha) / 100.0,
+                                    seed=seed,
+                                )
+                                prefix_ids_set = set(int(x) for x in (pride_meta.get("prefix_ids") or []))
 
-                                    base_correct_list_pr = []
-                                    cyclic_correct_list_pr = []
-                                    full_correct_list_pr = []
-                                    full_pred_idx_list_pr = []
-                                    default_conf_pr = []
-                                    mean_gap_list_pr = []
-                                    flip_trigger_mask_pr = []
-                                    probe2_correct_list_pr = []
-                                    base_pred_idx_list_pr = []
-                                    cyclic_pred_idx_list_pr = []
-                                    probe2_pred_idx_list_pr = []
+                                base_correct_list_pr = []
+                                cyclic_correct_list_pr = []
+                                full_correct_list_pr = []
+                                full_pred_idx_list_pr = []
+                                default_conf_pr = []
+                                mean_gap_list_pr = []
+                                flip_trigger_mask_pr = []
+                                probe2_correct_list_pr = []
+                                base_pred_idx_list_pr = []
+                                cyclic_pred_idx_list_pr = []
+                                probe2_pred_idx_list_pr = []
 
-                                    for i in range(len(per_sample_probs)):
-                                        ps = np.asarray(per_sample_probs[i], dtype=np.float64)
-                                        ps_corr = np.asarray([_pride_correct_row(ps[j], pride_prior) for j in range(ps.shape[0])], dtype=np.float64)
+                                for i in range(len(per_sample_probs)):
+                                    ps = np.asarray(per_sample_probs[i], dtype=np.float64)
+                                    ps_corr = np.asarray([_pride_correct_row(ps[j], pride_prior) for j in range(ps.shape[0])], dtype=np.float64)
 
-                                        # Cyclic
-                                        cyc_probs_corr = [ps_corr[idx] for idx in cyclic_indices]
-                                        agg_cyc_corr = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs_corr], cyc_perms, k)
-                                        pred_cyc_corr = option_ids[int(np.argmax(agg_cyc_corr))]
-                                        cyclic_pred_idx_list_pr.append(int(np.argmax(agg_cyc_corr)))
-                                        cyclic_correct_list_pr.append(pred_cyc_corr == ideals[i])
+                                    # Cyclic
+                                    cyc_probs_corr = [ps_corr[idx] for idx in cyclic_indices]
+                                    agg_cyc_corr = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs_corr], cyc_perms, k)
+                                    pred_cyc_corr = option_ids[int(np.argmax(agg_cyc_corr))]
+                                    cyclic_pred_idx_list_pr.append(int(np.argmax(agg_cyc_corr)))
+                                    cyclic_correct_list_pr.append(pred_cyc_corr == ideals[i])
 
-                                        # Base
-                                        base_row_corr = np.asarray(ps_corr[identity_idx], dtype=np.float64)
-                                        pred_base_corr = option_ids[int(np.argmax(base_row_corr))]
-                                        base_pred_idx_list_pr.append(int(np.argmax(base_row_corr)))
-                                        base_correct_list_pr.append(pred_base_corr == ideals[i])
+                                    # Base
+                                    base_row_corr = np.asarray(ps_corr[identity_idx], dtype=np.float64)
+                                    pred_base_corr = option_ids[int(np.argmax(base_row_corr))]
+                                    base_pred_idx_list_pr.append(int(np.argmax(base_row_corr)))
+                                    base_correct_list_pr.append(pred_base_corr == ideals[i])
 
-                                        # Full
-                                        if full_enabled:
-                                            agg_full_corr = _aggregate_probs_over_permutations(ps_corr, perm_list, k)
-                                            pred_full_idx_pr = int(np.argmax(agg_full_corr))
-                                            full_pred_idx_list_pr.append(pred_full_idx_pr)
-                                            full_correct_list_pr.append(option_ids[pred_full_idx_pr] == ideals[i])
+                                    # Full
+                                    if full_enabled:
+                                        agg_full_corr = _aggregate_probs_over_permutations(ps_corr, perm_list, k)
+                                        pred_full_idx_pr = int(np.argmax(agg_full_corr))
+                                        full_pred_idx_list_pr.append(pred_full_idx_pr)
+                                        full_correct_list_pr.append(option_ids[pred_full_idx_pr] == ideals[i])
 
-                                        # Gaps
-                                        vals = np.sort(base_row_corr)[::-1]
-                                        default_conf_pr.append((float(vals[0]) if len(vals) > 0 else 0.0) - (float(vals[1]) if len(vals) > 1 else 0.0))
+                                    # Gaps
+                                    vals = np.sort(base_row_corr)[::-1]
+                                    default_conf_pr.append((float(vals[0]) if len(vals) > 0 else 0.0) - (float(vals[1]) if len(vals) > 1 else 0.0))
 
-                                        shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_row_corr, k)
-                                        probe_perm_idx = cyclic_indices[shift]
-                                        agg_base = _aggregate_probs_over_permutations([base_row_corr.tolist()], [tuple(range(k))], k)
-                                        probe_row_corr = np.asarray(ps_corr[probe_perm_idx], dtype=np.float64)
-                                        agg_probe = _aggregate_probs_over_permutations([probe_row_corr.tolist()], [cyc_perms[shift]], k)
+                                    shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_row_corr, k)
+                                    probe_perm_idx = cyclic_indices[shift]
+                                    agg_base = _aggregate_probs_over_permutations([base_row_corr.tolist()], [tuple(range(k))], k)
+                                    probe_row_corr = np.asarray(ps_corr[probe_perm_idx], dtype=np.float64)
+                                    agg_probe = _aggregate_probs_over_permutations([probe_row_corr.tolist()], [cyc_perms[shift]], k)
 
-                                        mean_probs = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_probe, dtype=np.float64)) / 2.0
-                                        vals_mean = np.sort(mean_probs)[::-1]
-                                        mean_gap_list_pr.append(float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0)
+                                    mean_probs = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_probe, dtype=np.float64)) / 2.0
+                                    vals_mean = np.sort(mean_probs)[::-1]
+                                    mean_gap_list_pr.append(float(vals_mean[0] - vals_mean[1]) if len(vals_mean) > 1 else 0.0)
 
-                                        pred_base_cs = option_ids[int(np.argmax(agg_base))]
-                                        pred_probe_cs = option_ids[int(np.argmax(agg_probe))]
-                                        flip_trigger_mask_pr.append(pred_base_cs != pred_probe_cs)
+                                    pred_base_cs = option_ids[int(np.argmax(agg_base))]
+                                    pred_probe_cs = option_ids[int(np.argmax(agg_probe))]
+                                    flip_trigger_mask_pr.append(pred_base_cs != pred_probe_cs)
 
-                                        pred2 = option_ids[int(np.argmax(mean_probs))]
-                                        probe2_pred_idx_list_pr.append(int(np.argmax(mean_probs)))
-                                        probe2_correct_list_pr.append(pred2 == ideals[i])
+                                    pred2 = option_ids[int(np.argmax(mean_probs))]
+                                    probe2_pred_idx_list_pr.append(int(np.argmax(mean_probs)))
+                                    probe2_correct_list_pr.append(pred2 == ideals[i])
 
-                                    default_conf_pr = np.asarray(default_conf_pr, dtype=np.float64)
-                                    mean_conf_pr = np.asarray(mean_gap_list_pr, dtype=np.float64)
-                                    arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
-                                    arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
+                                default_conf_pr = np.asarray(default_conf_pr, dtype=np.float64)
+                                mean_conf_pr = np.asarray(mean_gap_list_pr, dtype=np.float64)
+                                arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
+                                arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
 
-                                    pride_fracs = [int(x) for x in perc_list_run if 0 <= x <= 100]
-                                    cobj_pr = _compute_curves_for_one_percentile(
-                                        subject=subject, tag="pride_mix", k=k, perm_list=perm_list,
-                                        base_correct_list=base_correct_list_pr, cyclic_correct_list=cyclic_correct_list,
-                                        full_correct_list=full_correct_list_pr if full_enabled else [],
-                                        default_conf=default_conf_pr, mean_conf=mean_conf_pr,
-                                        flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
-                                        perc_value=perc, full_enabled=bool(full_enabled),
-                                        forced_cyclic_ids=prefix_ids_set, labels_idx=labels_idx_for_curves,
-                                        base_pred_idx=base_pred_idx_list_pr, cyclic_pred_idx=cyclic_pred_idx_list,
-                                        probe2_pred_idx=probe2_pred_idx_list_pr,
-                                        full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
-                                        cyclic_fractions=pride_fracs, run_seed_offset=run_idx_inner,
-                                    )
-                                    if cobj_pr:
-                                        by_perc_pride[perc].append(cobj_pr)
-                                        def _get_static_pt_pride(th1_p, rule_func):
-                                            c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
-                                                default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list,
-                                                arr_probe2_correct_pr, k, th1_p, rule_func, prefix_ids_set)
-                                            out = {'cost': c, 'acc': a, 'label': 'th1/2', 'marker': '*', 'color': 'gray'}
-                                            try:
-                                                _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
-                                                    default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list,
-                                                    probe2_pred_idx_list_pr, labels_idx_for_curves, k, th1_p, rule_func, prefix_ids_set)
-                                                out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
-                                                out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
-                                            except Exception:
-                                                pass
-                                            return out
-                                        if "heuristic_points" not in cobj_pr:
-                                            cobj_pr["heuristic_points"] = [_get_static_pt_pride(perc, lambda x: x / 2.0)]
+                                cobj_pr = _compute_curves_for_one_percentile(
+                                    subject=subject, tag="pride_mix", k=k, perm_list=perm_list,
+                                    base_correct_list=base_correct_list_pr, cyclic_correct_list=cyclic_correct_list_pr,
+                                    full_correct_list=full_correct_list_pr if full_enabled else [],
+                                    default_conf=default_conf_pr, mean_conf=mean_conf_pr,
+                                    flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
+                                    perc_value=float(pride_alpha), full_enabled=bool(full_enabled),
+                                    forced_cyclic_ids=prefix_ids_set, labels_idx=labels_idx_for_curves,
+                                    base_pred_idx=base_pred_idx_list_pr, cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                    probe2_pred_idx=probe2_pred_idx_list_pr,
+                                    full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
+                                    cyclic_fractions=ours_th1_list, run_seed_offset=run_idx_inner,
+                                )
+                                if cobj_pr:
+                                    def _get_static_pt_pride(th1_p, rule_func, label_key):
+                                        c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
+                                            default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr,
+                                            arr_probe2_correct_pr, k, th1_p, rule_func, prefix_ids_set)
+                                        out = {'cost': c, 'acc': a, 'label': label_key, 'th1_p': th1_p, 'marker': '*', 'color': 'gray'}
+                                        try:
+                                            _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
+                                                default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
+                                                probe2_pred_idx_list_pr, labels_idx_for_curves, k, th1_p, rule_func, prefix_ids_set)
+                                            out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
+                                            out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
+                                        except Exception:
+                                            pass
+                                        return out
+                                    def _get_static_pt_online_sqrt(th1_p):
+                                        c, a, th2p, st = _run_online_sqrt_policy_with_stats(
+                                            default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr,
+                                            arr_probe2_correct_pr, k, th1_p, prefix_ids_set)
+                                        out = {'cost': c, 'acc': a, 'label': 'online_sqrt_all', 'th1_p': th1_p, 'marker': 'D', 'color': 'gray'}
+                                        try:
+                                            _, _, preds = _run_online_sqrt_policy_with_preds(
+                                                default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
+                                                probe2_pred_idx_list_pr, labels_idx_for_curves, k, th1_p, prefix_ids_set)
+                                            out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
+                                            out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
+                                        except Exception:
+                                            pass
+                                        return out
+                                    pts_th12 = [_get_static_pt_pride(int(th1), lambda x: x / 2.0, "th1/2") for th1 in ours_th1_list]
+                                    pts_sqrt = [_get_static_pt_online_sqrt(int(th1)) for th1 in ours_th1_list]
+                                    cobj_pr["heuristic_points"] = pts_th12 + pts_sqrt
+                                    by_pride_alpha[pride_alpha].append(cobj_pr)
 
-                                    # Default+PRIDE transition (cyclic_random at perc)
+                                for ours_th1 in ours_th1_list:
                                     try:
-                                        seed_cyc = _stable_u32_seed(str(subject), int(run_idx_inner)) + int(perc)
+                                        seed_cyc = _stable_u32_seed(str(subject), int(run_idx_inner)) + int(ours_th1)
                                         _, _, preds_dp = _run_cyclic_random_fraction_with_preds(
                                             base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
-                                            labels_idx_for_curves, k, int(perc), seed_cyc)
+                                            labels_idx_for_curves, k, int(ours_th1), seed_cyc)
                                         rec_dp = _make_transition_record_from_preds(
                                             base_correct_list_pr, preds_dp, labels_idx_for_curves, default_conf_pr, subject)
-                                        transition_records_default_pride_by_p.setdefault(perc, []).append(rec_dp)
+                                        transition_records_default_pride_by_p.setdefault(float(ours_th1), []).append(rec_dp)
                                     except Exception:
                                         pass
-
-                                    # Ours+PRIDE transition
                                     try:
                                         _, _, _, preds_op = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
                                             default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
-                                            probe2_pred_idx_list_pr, labels_idx_for_curves, k, perc, lambda x: x / 2.0, prefix_ids_set)
+                                            probe2_pred_idx_list_pr, labels_idx_for_curves, k, ours_th1, lambda x: x / 2.0, prefix_ids_set)
                                         rec_op = _make_transition_record_from_preds(
                                             base_correct_list_pr, preds_op, labels_idx_for_curves, default_conf_pr, subject)
-                                        transition_records_ours_pride_by_p.setdefault(perc, []).append(rec_op)
+                                        transition_records_ours_pride_by_p.setdefault(float(ours_th1), []).append(rec_op)
                                     except Exception:
                                         pass
 
                         # Merge over runs and append to derived_records
-                        perc_list = _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", None) or "2,5,10,20,30,40,50,60,70,80,90,100")
-                        for perc in perc_list:
+                        for perc in ours_th1_list:
                             perc = float(perc)
                             cobjs_b = by_perc_baseline.get(perc, [])
-                            cobjs_p = by_perc_pride.get(perc, [])
                             merged_b = _merge_curve_objs_over_runs(cobjs_b) if cobjs_b else None
-                            merged_p = _merge_curve_objs_over_runs(cobjs_p) if cobjs_p else None
                             if merged_b:
                                 derived_records_by_p.setdefault(perc, []).append(merged_b)
                                 curve_objs_baseline.append(merged_b)
-                            if merged_p:
-                                derived_records_pride_by_p.setdefault(perc, []).append(merged_p)
-                                curve_objs_pride.append(merged_p)
+
+                        if pride_enabled:
+                            for pride_alpha in pride_prefix_list:
+                                cobjs_p = by_pride_alpha.get(pride_alpha, [])
+                                merged_p = _merge_curve_objs_over_runs(cobjs_p) if cobjs_p else None
+                                if merged_p:
+                                    derived_records_pride_by_alpha.setdefault(pride_alpha, []).append(merged_p)
+                                    curve_objs_pride.append(merged_p)
 
                         # ---------- save cyclic/base derived results ----------
                         cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
@@ -4051,13 +4172,16 @@ def main():
                 os.makedirs(out_dir, exist_ok=True)
                 cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
                 pride_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
+                pride_prefix = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100] or [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
                 _plot_three_curves_acc_recall_std(
                     derived_records_by_p,
                     derived_records_pride_by_p if len(derived_records_pride_by_p) > 0 else {},
+                    derived_records_pride_by_alpha if len(derived_records_pride_by_alpha) > 0 else {},
                     out_dir,
                     args.task,
                     cyclic_fractions=cyclic_fracs or [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
                     pride_ours_fractions=pride_fracs or [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                    pride_prefix_list=pride_prefix,
                     wandb_ok=wandb_ok,
                     wandb_run=wandb_run,
                 )
@@ -4132,25 +4256,61 @@ def main():
                 mean_nc = float(np.mean(nc)) if nc else 0.0
                 return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
 
+            def get_heur_stats_by_th1_p(cobjs, th1_p, label_filter="online_sqrt_all"):
+                costs, accs, rstds, nb, np2, nc = [], [], [], [], [], []
+                for c in cobjs:
+                    for h in (c.get("heuristic_points") or []):
+                        if isinstance(h, dict) and h.get("th1_p") == th1_p and h.get("label") == label_filter:
+                            if "cost" in h:
+                                costs.append(h["cost"])
+                            accs.append(h.get("acc", float("nan")))
+                            if "recall_std" in h:
+                                rstds.append(h["recall_std"])
+                            if "n_base" in h:
+                                nb.append(h["n_base"])
+                            if "n_probe2" in h:
+                                np2.append(h["n_probe2"])
+                            if "n_cyclic" in h:
+                                nc.append(h["n_cyclic"])
+                            break
+                if not accs:
+                    return float("nan"), float("nan"), float("nan"), 0.0, 0.0, 0.0, float("nan"), float("nan"), float("nan")
+                mean_c, std_c = _macro_mean_std_over_runs(costs, n_subjects, n_runs)
+                mean_a, std_a = _macro_mean_std_over_runs(accs, n_subjects, n_runs)
+                mean_r, std_r = _macro_mean_std_over_runs(rstds, n_subjects, n_runs)
+                mean_nb = float(np.mean(nb)) if nb else 0.0
+                mean_np2 = float(np.mean(np2)) if np2 else 0.0
+                mean_nc = float(np.mean(nc)) if nc else 0.0
+                return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
+
             pride_fracs = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
             cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+            pride_alphas = sorted(derived_records_pride_by_alpha.keys()) if derived_records_pride_by_alpha else []
 
             _fmt = (lambda m, s: f"{m:.3f}±{s:.3f}" if np.isfinite(s) and s > 0 else f"{m:.3f}") if n_runs > 1 else (lambda m, s: f"{m:.3f}")
             _fmt4 = (lambda m, s: f"{m:.4f}±{s:.4f}" if np.isfinite(s) and s > 0 else f"{m:.4f}") if n_runs > 1 else (lambda m, s: f"{m:.4f}")
 
-            # 1. default + pride
+            # 1. default + pride (per alpha)
             logger.info("---- default + pride ----")
-            for p in pride_fracs:
-                if float(p) in derived_records_pride_by_p:
-                    cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(derived_records_pride_by_p[float(p)], p)
-                    logger.info(f"default_pride_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
+            for alpha in pride_alphas:
+                cobjs = derived_records_pride_by_alpha[alpha]
+                for p in pride_fracs:
+                    cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(cobjs, p)
+                    logger.info(f"default_pride_α{alpha}_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
 
-            # 2. ours + pride
-            logger.info("---- ours + pride ----")
-            for p in pride_fracs:
-                if float(p) in derived_records_pride_by_p:
-                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_pride_by_p[float(p)], "th1/2")
-                    logger.info(f"ours_pride_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+            # 2. ours + pride (per alpha, th1/2 and online_sqrt_all)
+            logger.info("---- ours + pride (th1/2) ----")
+            for alpha in pride_alphas:
+                cobjs = derived_records_pride_by_alpha[alpha]
+                for p in pride_fracs:
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, "th1/2")
+                    logger.info(f"ours_pride_th12_α{alpha}_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+            logger.info("---- ours + pride (online_sqrt_all) ----")
+            for alpha in pride_alphas:
+                cobjs = derived_records_pride_by_alpha[alpha]
+                for p in pride_fracs:
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, "online_sqrt_all")
+                    logger.info(f"ours_pride_sqrt_α{alpha}_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 3. ours
             logger.info("---- ours ----")
