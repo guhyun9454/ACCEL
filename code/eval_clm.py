@@ -491,6 +491,31 @@ def _estimate_pride_prior_random_prefix_mean(
     return prior, meta
 
 
+def _run_prefix_cyclic_postfix_base(
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    k: int,
+    prefix_ids: set,
+) -> Tuple[float, float]:
+    """
+    Default+PRIDE: prefix=cyclic, postfix=base.
+    alpha=2 → 앞 2% cyclic, 뒤 98% 보정된 base로 측정.
+    Returns (cost, acc).
+    """
+    N = len(base_correct)
+    if N == 0:
+        return float("nan"), float("nan")
+    total_cost, corrects = 0.0, 0
+    for i in range(N):
+        if int(i) in prefix_ids:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+        else:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+    return total_cost / float(N), corrects / float(N)
+
+
 def _run_cyclic_random_fraction(
     base_correct: List[bool],
     cyclic_correct: List[bool],
@@ -929,15 +954,16 @@ def _plot_three_curves_acc_recall_std(
         return costs, accs, rstds, acc_stds, rstd_stds
 
     cost_cyc, acc_cyc, rstd_cyc, acc_std_cyc, rstd_std_cyc = _agg_cyclic(derived_records_by_p, cyclic_fractions)
-    _n = len(pride_ours_fractions)
+    _n = len(pride_prefix_list) if pride_prefix_list else len(pride_ours_fractions)
     _def5 = ([float("nan")] * _n, [float("nan")] * _n, [float("nan")] * _n, [0.0] * _n, [0.0] * _n)
 
-    # Default+PRIDE: use by_p (legacy) or build from derived_records_pride_by_alpha (first alpha)
+    # Default+PRIDE: alpha=2 → prefix 2% cyclic, postfix 98% base. 각 alpha당 1점.
+    pride_fracs_for_plot = pride_ours_fractions
     if derived_records_pride_by_alpha:
-        alpha_def = pride_prefix_list[0] if pride_prefix_list else 10
-        cobjs_def = derived_records_pride_by_alpha.get(alpha_def, [])
-        by_p_def = {float(p): cobjs_def for p in pride_ours_fractions} if cobjs_def else {}
-        cost_pride, acc_pride, rstd_pride, acc_std_pride, rstd_std_pride = _agg_pride_default(by_p_def, pride_ours_fractions) if by_p_def else _def5
+        fracs_pride = [p for p in pride_prefix_list if p in derived_records_pride_by_alpha]
+        by_p_def = {float(alpha): derived_records_pride_by_alpha[alpha] for alpha in fracs_pride}
+        cost_pride, acc_pride, rstd_pride, acc_std_pride, rstd_std_pride = _agg_pride_default(by_p_def, fracs_pride) if by_p_def else _def5
+        pride_fracs_for_plot = fracs_pride
     else:
         cost_pride, acc_pride, rstd_pride, acc_std_pride, rstd_std_pride = _agg_pride_default(derived_records_pride_by_p, pride_ours_fractions) if derived_records_pride_by_p else _def5
 
@@ -1127,7 +1153,7 @@ def _plot_three_curves_acc_recall_std(
                     "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_cyc],
                 },
                 "default_pride": {
-                    "p": [int(x) for x in pride_ours_fractions],
+                    "p": [int(x) for x in pride_fracs_for_plot],
                     "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_pride],
                     "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_pride],
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_pride],
@@ -2079,7 +2105,12 @@ def _run_online_th1_quantile_th2_from_th1_rule_with_stats(
             th2_val = 1.0
         final_th2_val = th2_val
 
-        if gap_i >= th1_val:
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+        if is_forced:
+            c_step = float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+            n_cyclic += 1
+        elif gap_i >= th1_val:
             c_step = 1.0
             corrects += 1 if base_correct[i] else 0
             n_base += 1
@@ -2093,8 +2124,6 @@ def _run_online_th1_quantile_th2_from_th1_rule_with_stats(
                 corrects += 1 if bool(probe2_correct[i]) else 0
                 n_probe2 += 1
 
-        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
-            c_step = max(float(c_step), float(k))
         total_cost += float(c_step)
 
         past_gaps.append(gap_i)
@@ -3088,14 +3117,21 @@ def _compute_curves_for_one_percentile(
     )
 
     # Cyclic random fraction (for three-curves plot)
+    # Default+PRIDE: alpha<100 → prefix cyclic, postfix base(보정). alpha>=100 → Cyclic과 동일(원본).
     cyclic_fractions = cyclic_fractions or [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     seed_base = _stable_u32_seed(str(subject), int(run_seed_offset))
     cyclic_random_costs: Dict[str, float] = {}
     cyclic_random_accs: Dict[str, float] = {}
+    prefix_ids_set = set(int(x) for x in forced_cyclic_ids) if forced_cyclic_ids else set()
     for fp in cyclic_fractions:
-        c_r, a_r = _run_cyclic_random_fraction(
-            base_correct_list, cyclic_correct_list, k, int(fp), seed_base + int(fp)
-        )
+        if prefix_ids_set and int(fp) == int(perc_value):
+            c_r, a_r = _run_prefix_cyclic_postfix_base(
+                base_correct_list, cyclic_correct_list, k, prefix_ids_set
+            )
+        else:
+            c_r, a_r = _run_cyclic_random_fraction(
+                base_correct_list, cyclic_correct_list, k, int(fp), seed_base + int(fp)
+            )
         cyclic_random_costs[f"cyclic_random_{fp}"] = float(c_r)
         cyclic_random_accs[f"cyclic_random_{fp}"] = float(a_r)
 
@@ -3981,9 +4017,13 @@ def main():
                                 arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
                                 arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
 
+                                # alpha>=100: prefix=전체 → 보정 불가. Cyclic permutation과 동일 (원본 사용)
+                                base_for_dp = base_correct_list if pride_alpha >= 100 else base_correct_list_pr
+                                cyclic_for_dp = cyclic_correct_list if pride_alpha >= 100 else cyclic_correct_list_pr
+
                                 cobj_pr = _compute_curves_for_one_percentile(
                                     subject=subject, tag="pride_mix", k=k, perm_list=perm_list,
-                                    base_correct_list=base_correct_list_pr, cyclic_correct_list=cyclic_correct_list_pr,
+                                    base_correct_list=base_for_dp, cyclic_correct_list=cyclic_for_dp,
                                     full_correct_list=full_correct_list_pr if full_enabled else [],
                                     default_conf=default_conf_pr, mean_conf=mean_conf_pr,
                                     flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
@@ -3992,7 +4032,8 @@ def main():
                                     base_pred_idx=base_pred_idx_list_pr, cyclic_pred_idx=cyclic_pred_idx_list_pr,
                                     probe2_pred_idx=probe2_pred_idx_list_pr,
                                     full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
-                                    cyclic_fractions=ours_th1_list, run_seed_offset=run_idx_inner,
+                                    cyclic_fractions=[pride_alpha],
+                                    run_seed_offset=run_idx_inner,
                                 )
                                 if cobj_pr:
                                     def _get_static_pt_pride(th1_p, rule_func, label_key):
@@ -4315,7 +4356,9 @@ def main():
                 return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
 
             pride_fracs = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-            cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+            cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
+            if not cyclic_fracs:
+                cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
             pride_alphas = sorted(derived_records_pride_by_alpha.keys()) if derived_records_pride_by_alpha else []
 
             _fmt = (lambda m, s: f"{m:.3f}±{s:.3f}" if np.isfinite(s) and s > 0 else f"{m:.3f}") if n_runs > 1 else (lambda m, s: f"{m:.3f}")
