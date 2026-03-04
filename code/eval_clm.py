@@ -4356,9 +4356,8 @@ def main():
                 return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
 
             pride_fracs = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-            cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
-            if not cyclic_fracs:
-                cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+            # Cyclic 레포트: 항상 0,10,20,...,100 전체 구간 출력 (plot_cyclic_fractions와 무관)
+            cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
             pride_alphas = sorted(derived_records_pride_by_alpha.keys()) if derived_records_pride_by_alpha else []
 
             _fmt = (lambda m, s: f"{m:.3f}±{s:.3f}" if np.isfinite(s) and s > 0 else f"{m:.3f}") if n_runs > 1 else (lambda m, s: f"{m:.3f}")
