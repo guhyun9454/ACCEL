@@ -4020,6 +4020,8 @@ def main():
                                 # alpha>=100: prefix=전체 → 보정 불가. Cyclic permutation과 동일 (원본 사용)
                                 base_for_dp = base_correct_list if pride_alpha >= 100 else base_correct_list_pr
                                 cyclic_for_dp = cyclic_correct_list if pride_alpha >= 100 else cyclic_correct_list_pr
+                                base_pred_dp = base_pred_idx_list if pride_alpha >= 100 else base_pred_idx_list_pr
+                                cyclic_pred_dp = cyclic_pred_idx_list if pride_alpha >= 100 else cyclic_pred_idx_list_pr
 
                                 cobj_pr = _compute_curves_for_one_percentile(
                                     subject=subject, tag="pride_mix", k=k, perm_list=perm_list,
@@ -4029,21 +4031,24 @@ def main():
                                     flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
                                     perc_value=float(pride_alpha), full_enabled=bool(full_enabled),
                                     forced_cyclic_ids=prefix_ids_set, labels_idx=labels_idx_for_curves,
-                                    base_pred_idx=base_pred_idx_list_pr, cyclic_pred_idx=cyclic_pred_idx_list_pr,
+                                    base_pred_idx=base_pred_dp, cyclic_pred_idx=cyclic_pred_dp,
                                     probe2_pred_idx=probe2_pred_idx_list_pr,
                                     full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
                                     cyclic_fractions=[pride_alpha],
                                     run_seed_offset=run_idx_inner,
                                 )
                                 if cobj_pr:
+                                    # alpha>=100: cost/acc/recall_std 모두 Cyclic과 동일하게 원본 사용
+                                    bc_use, cc_use = (base_for_dp, cyclic_for_dp) if pride_alpha >= 100 else (base_correct_list_pr, cyclic_correct_list_pr)
+                                    bp_use, cp_use = (base_pred_dp, cyclic_pred_dp) if pride_alpha >= 100 else (base_pred_idx_list_pr, cyclic_pred_idx_list_pr)
                                     def _get_static_pt_pride(th1_p, rule_func, label_key):
                                         c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
-                                            default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr,
+                                            default_conf_pr, mean_conf_pr, bc_use, cc_use,
                                             arr_probe2_correct_pr, k, th1_p, rule_func, prefix_ids_set)
                                         out = {'cost': c, 'acc': a, 'label': label_key, 'th1_p': th1_p, 'marker': '*', 'color': 'gray'}
                                         try:
                                             _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
-                                                default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
+                                                default_conf_pr, mean_conf_pr, bp_use, cp_use,
                                                 probe2_pred_idx_list_pr, labels_idx_for_curves, k, th1_p, rule_func, prefix_ids_set)
                                             out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
                                             out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
@@ -4052,12 +4057,12 @@ def main():
                                         return out
                                     def _get_static_pt_online_sqrt(th1_p):
                                         c, a, th2p, st = _run_online_sqrt_policy_with_stats(
-                                            default_conf_pr, mean_conf_pr, base_correct_list_pr, cyclic_correct_list_pr,
+                                            default_conf_pr, mean_conf_pr, bc_use, cc_use,
                                             arr_probe2_correct_pr, k, th1_p, prefix_ids_set)
                                         out = {'cost': c, 'acc': a, 'label': 'online_sqrt_all', 'th1_p': th1_p, 'marker': 'D', 'color': 'gray'}
                                         try:
                                             _, _, preds = _run_online_sqrt_policy_with_preds(
-                                                default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
+                                                default_conf_pr, mean_conf_pr, bp_use, cp_use,
                                                 probe2_pred_idx_list_pr, labels_idx_for_curves, k, th1_p, prefix_ids_set)
                                             out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
                                             out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
