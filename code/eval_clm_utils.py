@@ -308,7 +308,12 @@ def prepare_eval(args, eval_name):
 
 
 def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_ids):
-    bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
+    # NOTE: 일부 Seq2Seq 토크나이저(T5 등)는 기본적으로 EOS 같은 special token을 붙여서
+    # `input_ids[-1]`가 항상 EOS가 되는 문제가 있음. 반드시 special token 없이 비교/추출한다.
+    bpe_has_space_prefix = (
+        toker(": A", add_special_tokens=False).input_ids[-1]
+        != toker(":A", add_special_tokens=False).input_ids[-1]
+    )
 
     def eval_fn(sample, rng: random.Random):
         idx, (input, options, ideal) = sample
@@ -333,8 +338,10 @@ def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_id
             else:
                 logits = model(input_ids=input_ids).logits[:, -1].view(-1)
 
-        option_indices = [toker(f': {e}').input_ids[-1] for e in option_ids] + \
-            [toker(f':{e}').input_ids[-1] for e in option_ids]
+        option_indices = (
+            [toker(f": {e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
+            + [toker(f":{e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
+        )
         probs = F.softmax(
             logits[..., option_indices], dim=-1
         ).detach().cpu().to(torch.float32).numpy()
@@ -360,7 +367,10 @@ def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_id
 
 def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot, option_ids):
     toker.padding_side = 'right'
-    bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
+    bpe_has_space_prefix = (
+        toker(": A", add_special_tokens=False).input_ids[-1]
+        != toker(":A", add_special_tokens=False).input_ids[-1]
+    )
 
     def eval_fn(sample, rng: random.Random):
         idx, (input, options, ideal) = sample
@@ -418,7 +428,10 @@ def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot, option_id
 
 def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_ids):
     toker.padding_side = 'left'
-    bpe_has_space_prefix = toker(': A').input_ids[-1] != toker(':A').input_ids[-1]
+    bpe_has_space_prefix = (
+        toker(": A", add_special_tokens=False).input_ids[-1]
+        != toker(":A", add_special_tokens=False).input_ids[-1]
+    )
 
     def eval_fn(sample, rng: random.Random):
         idx, (probing_inputs, options, ideal) = sample
@@ -461,8 +474,10 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
                 else:
                     logits = model(input_ids=input_ids).logits[:, -1]
 
-            option_indices = [toker(f': {e}').input_ids[-1] for e in option_ids] + \
-                [toker(f':{e}').input_ids[-1] for e in option_ids]
+            option_indices = (
+                [toker(f": {e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
+                + [toker(f":{e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
+            )
             probs = F.softmax(
                 logits[..., option_indices], dim=-1,
             ).detach().to(torch.float32).cpu().numpy()
