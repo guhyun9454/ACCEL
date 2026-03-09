@@ -31,6 +31,15 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+def _try_import_matplotlib():
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # headless
+        import matplotlib.pyplot as plt
+        return plt
+    except Exception:
+        return None
+
 
 def _rotations(k: int) -> List[Tuple[int, ...]]:
     """cyclic rotations: ABCD, BCDA, CDAB, DABC"""
@@ -160,6 +169,7 @@ def _run_analysis(
     subset_trials: int,
     subset_sizes: str,
     max_perms_corr: int,
+    save_plots: bool,
 ) -> None:
     subjects_list = [s.strip() for s in str(subjects or []) if str(s).strip()] if subjects else None
     cache_files = _discover_cache_files(str(cache_dir), subjects_list, int(n_runs))
@@ -305,6 +315,115 @@ def _run_analysis(
         json.dump(per_record_reports, f, ensure_ascii=False, indent=2)
     print(f"Saved: {out_path}")
 
+    if save_plots:
+        _save_noise_plots(per_record_reports, str(cache_dir))
+
+
+def _save_noise_plots(per_record_reports: List[dict], out_dir: str) -> None:
+    """
+    Save a small set of PNG plots into out_dir.
+    - subset size (m) vs ensemble accuracy (mean±std over subject-run records)
+    - permutation-accuracy variance summary (cyclic vs all perms)
+    """
+    plt = _try_import_matplotlib()
+    if plt is None:
+        print("[warn] matplotlib not available; skipping plot saving.")
+        return
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Group records by k
+    ks = sorted({int(r.get("k", -1)) for r in per_record_reports if isinstance(r.get("k"), (int, float)) and int(r.get("k")) > 0})
+    if not ks:
+        return
+
+    for k in ks:
+        rs = [r for r in per_record_reports if int(r.get("k", -1)) == k]
+        if not rs:
+            continue
+
+        # Aggregate subset curve across records
+        all_ms = sorted({int(m) for r in rs for m in (r.get("subset_curve") or {}).keys()})
+        xs: List[int] = []
+        ys: List[float] = []
+        es: List[float] = []
+        for m in all_ms:
+            vals = []
+            for r in rs:
+                sc = r.get("subset_curve") or {}
+                if m in sc:
+                    vals.append(float(sc[m][0]))
+            vals = [v for v in vals if np.isfinite(v)]
+            if not vals:
+                continue
+            xs.append(int(m))
+            ys.append(float(np.mean(vals)))
+            es.append(float(np.std(vals)) if len(vals) > 1 else 0.0)
+
+        # Baselines
+        def _m(key: str) -> float:
+            v = [float(r.get(key, float("nan"))) for r in rs]
+            v = [x for x in v if np.isfinite(x)]
+            return float(np.mean(v)) if v else float("nan")
+
+        orig = _m("orig_acc")
+        ens_cyc = _m("ens_acc_cyclic_perms")
+        ens_all = _m("ens_acc_all_perms")
+        full_enabled_any = any(bool(r.get("full_enabled")) for r in rs)
+
+        # Plot: subset curve
+        if xs:
+            fig = plt.figure(figsize=(8.5, 5.5), dpi=160)
+            ax = fig.add_subplot(1, 1, 1)
+            ax.errorbar(xs, ys, yerr=es, fmt="-o", lw=1.6, ms=4, capsize=3, label="Ensemble(m perms): mean±std over subject-run")
+            if np.isfinite(orig):
+                ax.axhline(orig, color="gray", ls="--", lw=1.2, label="Original (identity) macro-mean")
+            if np.isfinite(ens_cyc):
+                ax.axhline(ens_cyc, color="#8E44AD", ls=":", lw=1.4, label="Cyclic ensemble (all rotations) macro-mean")
+            if np.isfinite(ens_all):
+                lab = "Full/available ensemble (all perms) macro-mean" if full_enabled_any else "Available ensemble (all perms in cache) macro-mean"
+                ax.axhline(ens_all, color="#2E86C1", ls="-.", lw=1.2, label=lab)
+            ax.set_title(f"Permutation-noise: ensemble size vs accuracy (k={k})")
+            ax.set_xlabel("m = #permutations mixed")
+            ax.set_ylabel("Accuracy")
+            ax.set_ylim(0.0, 1.0)
+            ax.grid(True, alpha=0.25)
+            ax.legend(fontsize=8, loc="best")
+            fig.tight_layout()
+            p = os.path.join(out_dir, f"perm_noise_subset_curve_k{k}.png")
+            fig.savefig(p)
+            plt.close(fig)
+
+        # Plot: variance bars
+        cyc_vars = [float(r.get("cyc_nonid_var_acc", float("nan"))) for r in rs]
+        all_vars = [float(r.get("full_nonid_var_acc", float("nan"))) for r in rs]
+        cyc_vars = [v for v in cyc_vars if np.isfinite(v)]
+        all_vars = [v for v in all_vars if np.isfinite(v)]
+        if cyc_vars or all_vars:
+            fig = plt.figure(figsize=(6.5, 4.2), dpi=160)
+            ax = fig.add_subplot(1, 1, 1)
+            labels = []
+            vals = []
+            errs = []
+            if cyc_vars:
+                labels.append("Cyclic perms (non-id)\nvar(acc)")
+                vals.append(float(np.mean(cyc_vars)))
+                errs.append(float(np.std(cyc_vars)) if len(cyc_vars) > 1 else 0.0)
+            if all_vars:
+                labels.append("All perms (non-id)\nvar(acc)")
+                vals.append(float(np.mean(all_vars)))
+                errs.append(float(np.std(all_vars)) if len(all_vars) > 1 else 0.0)
+            x = np.arange(len(labels))
+            ax.bar(x, vals, yerr=errs, capsize=4, color=["#8E44AD", "#2E86C1"][: len(labels)], alpha=0.9)
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, fontsize=9)
+            ax.set_ylabel("Variance")
+            ax.set_title(f"Permutation accuracy variance (k={k})")
+            ax.grid(True, axis="y", alpha=0.25)
+            fig.tight_layout()
+            p = os.path.join(out_dir, f"perm_noise_perm_acc_variance_k{k}.png")
+            fig.savefig(p)
+            plt.close(fig)
+
 
 def _perm_accs_and_correct_matrix(
     results: List[dict],
@@ -435,6 +554,7 @@ def main() -> None:
     ap.add_argument("--subset_sizes", type=str, default="1,2,3,4,6,8,12,16,24",
                     help="Comma-separated subset sizes m (number of perms to mix). Sizes > P are ignored.")
     ap.add_argument("--max_perms_corr", type=int, default=24, help="Max permutations for correlation calc (subsample if larger).")
+    ap.add_argument("--save_plots", action="store_true", help="Save PNG plots into results_dir (default: off).")
 
     # Parse known args and forward the rest to eval_clm.py
     args, unknown = ap.parse_known_args()
@@ -451,6 +571,7 @@ def main() -> None:
             subset_trials=int(args.subset_trials),
             subset_sizes=str(args.subset_sizes),
             max_perms_corr=int(args.max_perms_corr),
+            save_plots=bool(args.save_plots),
         )
         return
 
@@ -501,6 +622,7 @@ def main() -> None:
             subset_trials=int(args.subset_trials),
             subset_sizes=str(args.subset_sizes),
             max_perms_corr=int(args.max_perms_corr),
+            save_plots=bool(args.save_plots),
         )
 
 
