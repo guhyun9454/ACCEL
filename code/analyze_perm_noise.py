@@ -551,6 +551,12 @@ def _wandb_log_report(
     except Exception as e:
         print(f"[warn] wandb.init failed; skipping W&B logging: {e}")
         return
+    try:
+        # Helpful for debugging in cluster logs
+        if getattr(run, "url", None):
+            print(f"W&B run: {run.url}")
+    except Exception:
+        pass
 
     # Log key summary scalars (macro over records), per k
     try:
@@ -577,16 +583,33 @@ def _wandb_log_report(
         pass
 
     # Log images
+    imgs = []
     for p in plot_paths:
+        if not p:
+            continue
+        if not os.path.exists(p):
+            print(f"[warn] plot missing, not uploading: {p}")
+            continue
         try:
             key = os.path.splitext(os.path.basename(p))[0]
-            wandb.log({f"perm_noise/plots/{key}": wandb.Image(p)})
+            img = wandb.Image(p, caption=key)
+            imgs.append(img)
+            wandb.log({f"perm_noise/plots/{key}": img})
+        except Exception as e:
+            print(f"[warn] failed to upload image {p}: {e}")
+    # Also log a single gallery key for convenience
+    if imgs:
+        try:
+            wandb.log({"perm_noise/plots_gallery": imgs})
         except Exception:
             pass
+    else:
+        print("[warn] no plots to upload (did matplotlib fail? did --save_plots run?)")
 
     # Save JSON into the run (files panel)
     try:
-        wandb.save(report_json_path, base_path=out_dir, policy="now")
+        # wandb.save works best with paths relative to base_path
+        wandb.save(os.path.basename(report_json_path), base_path=out_dir, policy="now")
     except Exception:
         pass
 
