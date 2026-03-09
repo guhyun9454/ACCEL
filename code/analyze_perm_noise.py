@@ -192,6 +192,8 @@ def _run_analysis(
         raise SystemExit(f"No cache files found under: {cache_dir}")
 
     per_record_reports = []
+    # For correlation heatmaps: accumulate correctness matrices by k when permutation ordering matches.
+    corr_by_k: Dict[int, Dict[str, object]] = {}
 
     for ci in cache_files:
         results = _read_results_file(ci.path)
@@ -295,6 +297,17 @@ def _run_analysis(
             "subset_curve": subset_curve,
         })
 
+        # Store correctness matrix for heatmap (only if we can keep a consistent perm order for this k)
+        if (save_plots or wandb_enabled) and len(perm_list) > 1:
+            if int(k) not in corr_by_k:
+                corr_by_k[int(k)] = {"perm_list": perm_list, "mats": [correct_mat]}
+            else:
+                ref_perm_list = corr_by_k[int(k)].get("perm_list")
+                if isinstance(ref_perm_list, list) and ref_perm_list == perm_list:
+                    mats = corr_by_k[int(k)].get("mats")
+                    if isinstance(mats, list):
+                        mats.append(correct_mat)
+
     if not per_record_reports:
         raise SystemExit("No valid records after reading cache files.")
 
@@ -332,7 +345,7 @@ def _run_analysis(
 
     saved_plot_paths: List[str] = []
     if save_plots or wandb_enabled:
-        saved_plot_paths = _save_noise_plots(per_record_reports, str(cache_dir))
+        saved_plot_paths = _save_noise_plots(per_record_reports, str(cache_dir), corr_by_k=corr_by_k)
 
     if wandb_enabled:
         _wandb_log_report(
@@ -349,7 +362,7 @@ def _run_analysis(
         )
 
 
-def _save_noise_plots(per_record_reports: List[dict], out_dir: str) -> List[str]:
+def _save_noise_plots(per_record_reports: List[dict], out_dir: str, corr_by_k: Optional[Dict[int, Dict[str, object]]] = None) -> List[str]:
     """
     Save a small set of PNG plots into out_dir.
     - subset size (m) vs ensemble accuracy (mean±std over subject-run records)
@@ -424,6 +437,52 @@ def _save_noise_plots(per_record_reports: List[dict], out_dir: str) -> List[str]
             fig.savefig(p)
             plt.close(fig)
             saved.append(p)
+
+        # Plot: correlation heatmap (Cyclic first, then non-cyclic)
+        if corr_by_k and int(k) in corr_by_k:
+            perm_list = corr_by_k[int(k)].get("perm_list")
+            mats = corr_by_k[int(k)].get("mats")
+            if isinstance(perm_list, list) and isinstance(mats, list) and mats:
+                try:
+                    # concat along samples axis: (P, sum_N)
+                    mat_concat = np.concatenate([np.asarray(m, dtype=np.float64) for m in mats], axis=1)
+                    P = int(mat_concat.shape[0])
+                    cyc_perms = _rotations(int(k))
+                    cyc_idxs = [perm_list.index(p) for p in cyc_perms if p in perm_list]
+                    non_cyc_idxs = [i for i in range(P) if i not in set(cyc_idxs)]
+                    order = list(cyc_idxs) + list(non_cyc_idxs)
+                    X = mat_concat[order]
+                    # robust corr (avoid NaN when variance=0)
+                    X = X - X.mean(axis=1, keepdims=True)
+                    denom = np.sqrt((X * X).sum(axis=1, keepdims=True)) + 1e-12
+                    Xn = X / denom
+                    C = Xn @ Xn.T
+
+                    fig = plt.figure(figsize=(7.5, 6.5), dpi=180)
+                    ax = fig.add_subplot(1, 1, 1)
+                    im = ax.imshow(C, vmin=-1.0, vmax=1.0, cmap="coolwarm", interpolation="nearest")
+                    ax.set_title(f"Permutation correctness correlation heatmap (k={k})")
+
+                    # Axis labels: C1..Ck then N1..N(P-k)
+                    n_c = len(cyc_idxs)
+                    labels = [f"C{i+1}" for i in range(n_c)] + [f"N{i+1}" for i in range(P - n_c)]
+                    ax.set_xticks(np.arange(P))
+                    ax.set_yticks(np.arange(P))
+                    ax.set_xticklabels(labels, fontsize=6, rotation=90)
+                    ax.set_yticklabels(labels, fontsize=6)
+                    # separators between cyclic and non-cyclic
+                    if n_c > 0 and n_c < P:
+                        ax.axhline(y=n_c - 0.5, color="black", lw=1.5, ls="--")
+                        ax.axvline(x=n_c - 0.5, color="black", lw=1.5, ls="--")
+                    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    cbar.set_label("Pearson corr (correctness vectors)", rotation=90)
+                    fig.tight_layout()
+                    p = os.path.join(out_dir, f"perm_noise_corr_heatmap_k{k}.png")
+                    fig.savefig(p)
+                    plt.close(fig)
+                    saved.append(p)
+                except Exception:
+                    pass
 
         # Plot: variance bars
         cyc_vars = [float(r.get("cyc_nonid_var_acc", float("nan"))) for r in rs]
