@@ -41,6 +41,14 @@ def _try_import_matplotlib():
         return None
 
 
+def _try_import_wandb():
+    try:
+        import wandb  # type: ignore
+        return wandb
+    except Exception:
+        return None
+
+
 def _rotations(k: int) -> List[Tuple[int, ...]]:
     """cyclic rotations: ABCD, BCDA, CDAB, DABC"""
     return [tuple((i + s) % k for i in range(k)) for s in range(k)]
@@ -170,6 +178,13 @@ def _run_analysis(
     subset_sizes: str,
     max_perms_corr: int,
     save_plots: bool,
+    wandb_enabled: bool,
+    wandb_project: Optional[str],
+    wandb_entity: Optional[str],
+    wandb_run_name: Optional[str],
+    wandb_tags: Optional[str],
+    wandb_group: Optional[str],
+    wandb_job_type: str,
 ) -> None:
     subjects_list = [s.strip() for s in str(subjects or []) if str(s).strip()] if subjects else None
     cache_files = _discover_cache_files(str(cache_dir), subjects_list, int(n_runs))
@@ -315,11 +330,26 @@ def _run_analysis(
         json.dump(per_record_reports, f, ensure_ascii=False, indent=2)
     print(f"Saved: {out_path}")
 
-    if save_plots:
-        _save_noise_plots(per_record_reports, str(cache_dir))
+    saved_plot_paths: List[str] = []
+    if save_plots or wandb_enabled:
+        saved_plot_paths = _save_noise_plots(per_record_reports, str(cache_dir))
+
+    if wandb_enabled:
+        _wandb_log_report(
+            per_record_reports=per_record_reports,
+            out_dir=str(cache_dir),
+            report_json_path=out_path,
+            plot_paths=saved_plot_paths,
+            wandb_project=wandb_project,
+            wandb_entity=wandb_entity,
+            wandb_run_name=wandb_run_name,
+            wandb_tags=wandb_tags,
+            wandb_group=wandb_group,
+            wandb_job_type=wandb_job_type,
+        )
 
 
-def _save_noise_plots(per_record_reports: List[dict], out_dir: str) -> None:
+def _save_noise_plots(per_record_reports: List[dict], out_dir: str) -> List[str]:
     """
     Save a small set of PNG plots into out_dir.
     - subset size (m) vs ensemble accuracy (mean±std over subject-run records)
@@ -328,8 +358,9 @@ def _save_noise_plots(per_record_reports: List[dict], out_dir: str) -> None:
     plt = _try_import_matplotlib()
     if plt is None:
         print("[warn] matplotlib not available; skipping plot saving.")
-        return
+        return []
     os.makedirs(out_dir, exist_ok=True)
+    saved: List[str] = []
 
     # Group records by k
     ks = sorted({int(r.get("k", -1)) for r in per_record_reports if isinstance(r.get("k"), (int, float)) and int(r.get("k")) > 0})
@@ -392,6 +423,7 @@ def _save_noise_plots(per_record_reports: List[dict], out_dir: str) -> None:
             p = os.path.join(out_dir, f"perm_noise_subset_curve_k{k}.png")
             fig.savefig(p)
             plt.close(fig)
+            saved.append(p)
 
         # Plot: variance bars
         cyc_vars = [float(r.get("cyc_nonid_var_acc", float("nan"))) for r in rs]
@@ -423,6 +455,86 @@ def _save_noise_plots(per_record_reports: List[dict], out_dir: str) -> None:
             p = os.path.join(out_dir, f"perm_noise_perm_acc_variance_k{k}.png")
             fig.savefig(p)
             plt.close(fig)
+            saved.append(p)
+
+    return saved
+
+
+def _wandb_log_report(
+    *,
+    per_record_reports: List[dict],
+    out_dir: str,
+    report_json_path: str,
+    plot_paths: List[str],
+    wandb_project: Optional[str],
+    wandb_entity: Optional[str],
+    wandb_run_name: Optional[str],
+    wandb_tags: Optional[str],
+    wandb_group: Optional[str],
+    wandb_job_type: str,
+) -> None:
+    wandb = _try_import_wandb()
+    if wandb is None:
+        print("[warn] wandb not available; skipping W&B logging.")
+        return
+
+    tags = [t.strip() for t in (wandb_tags or "").split(",") if t.strip()] if wandb_tags else None
+    try:
+        run = wandb.init(
+            project=wandb_project or None,
+            entity=wandb_entity or None,
+            name=wandb_run_name or None,
+            group=wandb_group or None,
+            job_type=str(wandb_job_type or "analysis"),
+            tags=tags,
+            reinit=True,
+        )
+    except Exception as e:
+        print(f"[warn] wandb.init failed; skipping W&B logging: {e}")
+        return
+
+    # Log key summary scalars (macro over records), per k
+    try:
+        ks = sorted({int(r.get("k", -1)) for r in per_record_reports if isinstance(r.get("k"), (int, float)) and int(r.get("k")) > 0})
+        for k in ks:
+            rs = [r for r in per_record_reports if int(r.get("k", -1)) == k]
+            if not rs:
+                continue
+            def _mean(key: str) -> float:
+                v = [float(x.get(key, float("nan"))) for x in rs]
+                v = [x for x in v if np.isfinite(x)]
+                return float(np.mean(v)) if v else float("nan")
+            wandb.log({
+                f"perm_noise/k{k}/orig_acc_mean": _mean("orig_acc"),
+                f"perm_noise/k{k}/ens_cyclic_mean": _mean("ens_acc_cyclic_perms"),
+                f"perm_noise/k{k}/ens_all_mean": _mean("ens_acc_all_perms"),
+                f"perm_noise/k{k}/corr_cyclic_mean": _mean("corr_cyclic_mean"),
+                f"perm_noise/k{k}/corr_all_mean": _mean("corr_full_mean"),
+                f"perm_noise/k{k}/var_cyclic_nonid_mean": _mean("cyc_nonid_var_acc"),
+                f"perm_noise/k{k}/var_all_nonid_mean": _mean("full_nonid_var_acc"),
+                f"perm_noise/k{k}/n_records": float(len(rs)),
+            })
+    except Exception:
+        pass
+
+    # Log images
+    for p in plot_paths:
+        try:
+            key = os.path.splitext(os.path.basename(p))[0]
+            wandb.log({f"perm_noise/plots/{key}": wandb.Image(p)})
+        except Exception:
+            pass
+
+    # Save JSON into the run (files panel)
+    try:
+        wandb.save(report_json_path, base_path=out_dir, policy="now")
+    except Exception:
+        pass
+
+    try:
+        run.finish()
+    except Exception:
+        pass
 
 
 def _perm_accs_and_correct_matrix(
@@ -556,6 +668,15 @@ def main() -> None:
     ap.add_argument("--max_perms_corr", type=int, default=24, help="Max permutations for correlation calc (subsample if larger).")
     ap.add_argument("--save_plots", action="store_true", help="Save PNG plots into results_dir (default: off).")
 
+    # W&B logging for analysis (separate run)
+    ap.add_argument("--wandb", action="store_true", help="Log analysis results (metrics/images) to Weights & Biases.")
+    ap.add_argument("--wandb_project", type=str, default=None, help="W&B project name (analysis).")
+    ap.add_argument("--wandb_entity", type=str, default=None, help="W&B entity (analysis).")
+    ap.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name (analysis).")
+    ap.add_argument("--wandb_tags", type=str, default=None, help="Comma-separated tags for W&B run.")
+    ap.add_argument("--wandb_group", type=str, default=None, help="W&B group for analysis runs.")
+    ap.add_argument("--wandb_job_type", type=str, default="perm_noise_analysis", help="W&B job_type.")
+
     # Parse known args and forward the rest to eval_clm.py
     args, unknown = ap.parse_known_args()
 
@@ -572,6 +693,13 @@ def main() -> None:
             subset_sizes=str(args.subset_sizes),
             max_perms_corr=int(args.max_perms_corr),
             save_plots=bool(args.save_plots),
+            wandb_enabled=bool(args.wandb),
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            wandb_run_name=args.wandb_run_name,
+            wandb_tags=args.wandb_tags,
+            wandb_group=args.wandb_group,
+            wandb_job_type=str(args.wandb_job_type),
         )
         return
 
@@ -600,6 +728,15 @@ def main() -> None:
             cmd += ["--option_id_set", str(args.option_id_set)]
         if int(args.n_runs) != 1:
             cmd += ["--n_runs", str(int(args.n_runs))]
+        # Forward W&B flags to eval_clm as well (so eval logs are preserved)
+        if bool(args.wandb):
+            cmd += ["--wandb"]
+        if args.wandb_project:
+            cmd += ["--wandb_project", str(args.wandb_project)]
+        if args.wandb_entity:
+            cmd += ["--wandb_entity", str(args.wandb_entity)]
+        if args.wandb_run_name:
+            cmd += ["--wandb_run_name", str(args.wandb_run_name)]
         cmd += list(unknown)
 
         print("==== Running eval_clm.py ====")
@@ -623,6 +760,13 @@ def main() -> None:
             subset_sizes=str(args.subset_sizes),
             max_perms_corr=int(args.max_perms_corr),
             save_plots=bool(args.save_plots),
+            wandb_enabled=bool(args.wandb),
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            wandb_run_name=(args.wandb_run_name or f"perm_noise/{os.path.basename(str(args.pretrained_model_path))}/{eval_name}"),
+            wandb_tags=args.wandb_tags,
+            wandb_group=args.wandb_group,
+            wandb_job_type=str(args.wandb_job_type),
         )
 
 
