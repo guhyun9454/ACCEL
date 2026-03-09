@@ -438,7 +438,7 @@ def _save_noise_plots(per_record_reports: List[dict], out_dir: str, corr_by_k: O
             plt.close(fig)
             saved.append(p)
 
-        # Plot: correlation heatmap (Cyclic first, then non-cyclic)
+        # Plot: correlation heatmap + boxplot (Cyclic first, then non-cyclic)
         if corr_by_k and int(k) in corr_by_k:
             perm_list = corr_by_k[int(k)].get("perm_list")
             mats = corr_by_k[int(k)].get("mats")
@@ -458,10 +458,21 @@ def _save_noise_plots(per_record_reports: List[dict], out_dir: str, corr_by_k: O
                     Xn = X / denom
                     C = Xn @ Xn.T
 
-                    fig = plt.figure(figsize=(7.5, 6.5), dpi=180)
+                    # Enhanced heatmap: remove diagonal, tight scale
+                    C_plot = np.asarray(C, dtype=np.float64).copy()
+                    np.fill_diagonal(C_plot, np.nan)
+                    vmin = float(np.nanmin(C_plot)) if np.isfinite(np.nanmin(C_plot)) else -1.0
+                    vmax = float(np.nanmax(C_plot)) if np.isfinite(np.nanmax(C_plot)) else 1.0
+                    # If all correlations are positive-ish, a sequential cmap shows contrast better
+                    if vmin >= 0.0:
+                        cmap = "YlOrRd"
+                    else:
+                        cmap = "coolwarm"
+
+                    fig = plt.figure(figsize=(8.0, 6.8), dpi=200)
                     ax = fig.add_subplot(1, 1, 1)
-                    im = ax.imshow(C, vmin=-1.0, vmax=1.0, cmap="coolwarm", interpolation="nearest")
-                    ax.set_title(f"Permutation correctness correlation heatmap (k={k})")
+                    im = ax.imshow(C_plot, vmin=vmin, vmax=vmax, cmap=cmap, interpolation="nearest")
+                    ax.set_title(f"Enhanced corr heatmap (diag removed, tight scale) (k={k})")
 
                     # Axis labels: C1..Ck then N1..N(P-k)
                     n_c = len(cyc_idxs)
@@ -481,6 +492,46 @@ def _save_noise_plots(per_record_reports: List[dict], out_dir: str, corr_by_k: O
                     fig.savefig(p)
                     plt.close(fig)
                     saved.append(p)
+
+                    # Boxplot comparison: cyclic pairs vs non-cyclic pairs
+                    if n_c >= 2 and (P - n_c) >= 2:
+                        cyc_block = C_plot[:n_c, :n_c]
+                        non_block = C_plot[n_c:, n_c:]
+                        cyc_pairs = cyc_block[np.triu_indices(n_c, k=1)]
+                        non_pairs = non_block[np.triu_indices(P - n_c, k=1)]
+                        cyc_pairs = cyc_pairs[np.isfinite(cyc_pairs)]
+                        non_pairs = non_pairs[np.isfinite(non_pairs)]
+                        if cyc_pairs.size > 0 and non_pairs.size > 0:
+                            fig = plt.figure(figsize=(7.2, 5.8), dpi=200)
+                            ax = fig.add_subplot(1, 1, 1)
+                            bp = ax.boxplot(
+                                [cyc_pairs, non_pairs],
+                                labels=["Cyclic pairs (C vs C)", "Non-cyclic pairs (N vs N)"],
+                                patch_artist=True,
+                                widths=0.55,
+                                showfliers=False,
+                            )
+                            colors = ["#1f77b4", "#ff7f0e"]
+                            for patch, color in zip(bp["boxes"], colors):
+                                patch.set_facecolor(color)
+                                patch.set_alpha(0.55)
+                            for med in bp["medians"]:
+                                med.set(color="black", linewidth=2)
+
+                            # jittered scatter for readability
+                            rng = np.random.default_rng(42)
+                            x1 = rng.normal(1.0, 0.045, size=cyc_pairs.size)
+                            x2 = rng.normal(2.0, 0.045, size=non_pairs.size)
+                            ax.scatter(x1, cyc_pairs, color="blue", alpha=0.55, s=12, zorder=3)
+                            ax.scatter(x2, non_pairs, color="red", alpha=0.40, s=12, zorder=3)
+                            ax.set_ylabel("Pearson correlation")
+                            ax.set_title(f"Error-correlation distribution: cyclic vs non-cyclic (k={k})")
+                            ax.grid(axis="y", linestyle="--", alpha=0.35)
+                            fig.tight_layout()
+                            p2 = os.path.join(out_dir, f"perm_noise_corr_boxplot_k{k}.png")
+                            fig.savefig(p2)
+                            plt.close(fig)
+                            saved.append(p2)
                 except Exception:
                     pass
 
@@ -753,7 +804,8 @@ def main() -> None:
     # W&B logging for analysis (separate run)
     ap.add_argument("--wandb", action="store_true", help="Log analysis results (metrics/images) to Weights & Biases.")
     ap.add_argument("--wandb_project", type=str, default=None, help="W&B project name (analysis).")
-    ap.add_argument("--wandb_entity", type=str, default=None, help="W&B entity (analysis).")
+    # Match eval_clm default entity ("capde") to avoid silent 'wrong entity' uploads.
+    ap.add_argument("--wandb_entity", type=str, default="capde", help="W&B entity (analysis).")
     ap.add_argument("--wandb_run_name", type=str, default=None, help="W&B run name (analysis).")
     ap.add_argument("--wandb_tags", type=str, default=None, help="Comma-separated tags for W&B run.")
     ap.add_argument("--wandb_group", type=str, default=None, help="W&B group for analysis runs.")
