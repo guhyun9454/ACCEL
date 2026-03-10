@@ -53,14 +53,18 @@ def _aggregate_probs_over_permutations(
     permuted_indices: Sequence[Tuple[int, ...]],
     k: int,
 ) -> np.ndarray:
-    
+    """
+    probs_seq: list/array len = (#perms used), each element length k (letter-space probs)
+    permuted_indices: perms p where p[j] is content-index at letter position j.
+    Returns: agg (k,) content-space aggregated probs (mean over permutations)
+    """
     agg = np.zeros(k, dtype=np.float64)
     for perm_idx, p in enumerate(permuted_indices):
         letter_probs = np.asarray(probs_seq[perm_idx], dtype=np.float64)
         for j in range(k):
-            # ❌ 기존 코드: agg[p[j]] += letter_probs[j]
-            # ✅ 수정된 코드: 원래 j번째 옵션이 p[j] 위치로 갔으므로, p[j] 위치의 확률을 j에 더함
-            agg[j] += letter_probs[p[j]]
+            # p[j] is the content-index that appears at letter position j in this permutation.
+            # Convert letter-space probs -> content-space by adding letter_probs[j] into agg[p[j]].
+            agg[p[j]] += letter_probs[j]
             
     if len(permuted_indices) > 0:
         agg /= float(len(permuted_indices))
