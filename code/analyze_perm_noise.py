@@ -185,6 +185,7 @@ def _run_analysis(
     wandb_tags: Optional[str],
     wandb_group: Optional[str],
     wandb_job_type: str,
+    task_name: Optional[str],
 ) -> None:
     subjects_list = [s.strip() for s in str(subjects or []) if str(s).strip()] if subjects else None
     cache_files = _discover_cache_files(str(cache_dir), subjects_list, int(n_runs))
@@ -406,6 +407,7 @@ def _run_analysis(
             str(cache_dir),
             corr_by_k=corr_by_k,
             recall_by_k=recall_by_k,
+            task_name=task_name,
         )
 
     if wandb_enabled:
@@ -428,6 +430,7 @@ def _save_noise_plots(
     out_dir: str,
     corr_by_k: Optional[Dict[int, Dict[str, object]]] = None,
     recall_by_k: Optional[Dict[int, Dict[str, List[str]]]] = None,
+    task_name: Optional[str] = None,
 ) -> List[str]:
     """
     Save a small set of PNG plots into out_dir.
@@ -440,6 +443,14 @@ def _save_noise_plots(
         return []
     os.makedirs(out_dir, exist_ok=True)
     saved: List[str] = []
+
+    # Task color palette (for "which dataset" identity, not method identity)
+    task_palette = {
+        "arc": "#1f77b4",   # blue
+        "mmlu": "#ff7f0e",  # orange
+        "csqa": "#2ca02c",  # green
+    }
+    curve_color = task_palette.get(str(task_name).lower(), "#1f77b4" if str(task_name).lower() == "arc" else "#2E86C1")
 
     # Group records by k
     ks = sorted({int(r.get("k", -1)) for r in per_record_reports if isinstance(r.get("k"), (int, float)) and int(r.get("k")) > 0})
@@ -484,7 +495,19 @@ def _save_noise_plots(
         if xs:
             fig = plt.figure(figsize=(8.5, 5.5), dpi=160)
             ax = fig.add_subplot(1, 1, 1)
-            ax.errorbar(xs, ys, yerr=es, fmt="-o", lw=1.6, ms=4, capsize=3, label="Ensemble(m perms): mean±std over subject-run")
+            task_tag = f"{task_name}" if task_name else "task"
+            ax.errorbar(
+                xs,
+                ys,
+                yerr=es,
+                fmt="-o",
+                lw=1.8,
+                ms=4,
+                capsize=3,
+                color=curve_color,
+                ecolor=curve_color,
+                label=f"{task_tag}: Ensemble(m perms) mean±std over subject-run",
+            )
             if np.isfinite(orig):
                 ax.axhline(orig, color="gray", ls="--", lw=1.2, label="Original (identity) macro-mean")
             if np.isfinite(ens_cyc):
@@ -985,6 +1008,9 @@ def main() -> None:
 
     # If results_dir is explicitly given, do analysis-only.
     if str(args.results_dir).strip():
+        # Infer task name from results_dir like "results_arc/..." when possible
+        _td = str(args.results_dir)
+        task_name = "arc" if "results_arc" in _td else ("mmlu" if "results_mmlu" in _td else ("csqa" if "results_csqa" in _td else None))
         subjects = [s.strip() for s in str(args.subjects).split(",") if s.strip()] if args.subjects else None
         _run_analysis(
             cache_dir=str(args.results_dir),
@@ -1003,6 +1029,7 @@ def main() -> None:
             wandb_tags=args.wandb_tags,
             wandb_group=args.wandb_group,
             wandb_job_type=str(args.wandb_job_type),
+            task_name=task_name,
         )
         return
 
@@ -1049,6 +1076,11 @@ def main() -> None:
 
     # Analyze each eval_name separately (results_dir differs by task/shot/setting)
     for eval_name in args.eval_names:
+        # eval_name like "arc,0,full"
+        try:
+            task_name = str(eval_name).split(",")[0].strip()
+        except Exception:
+            task_name = None
         rel_results_dir = _compute_eval_save_path(str(eval_name), str(args.pretrained_model_path), args.option_id_set)
         results_dir = os.path.join(code_dir, rel_results_dir)
         print("")
@@ -1070,6 +1102,7 @@ def main() -> None:
             wandb_tags=args.wandb_tags,
             wandb_group=args.wandb_group,
             wandb_job_type=str(args.wandb_job_type),
+            task_name=task_name,
         )
 
 
