@@ -194,6 +194,8 @@ def _run_analysis(
     per_record_reports = []
     # For correlation heatmaps: accumulate correctness matrices by k when permutation ordering matches.
     corr_by_k: Dict[int, Dict[str, object]] = {}
+    # For recall-by-option bar plot across all subjects: accumulate y_true/preds per k
+    recall_by_k: Dict[int, Dict[str, List[str]]] = {}
 
     for ci in cache_files:
         results = _read_results_file(ci.path)
@@ -297,6 +299,60 @@ def _run_analysis(
             "subset_curve": subset_curve,
         })
 
+        # Accumulate per-sample predictions for recall-by-option plot (all subjects combined)
+        try:
+            y_true_list = []
+            y_orig_list = []
+            y_cyc_list = []
+            y_full_list = []
+
+            # Precompute indices
+            identity_perm = tuple(range(int(k)))
+            identity_idx = perm_list.index(identity_perm) if identity_perm in perm_list else 0
+            cyc_perms = _rotations(int(k))
+            cyc_idxs = [perm_list.index(p) for p in cyc_perms if p in perm_list]
+            cyc_perm_list = [perm_list[i] for i in cyc_idxs]
+
+            for r in results:
+                d = r.get("data", {}) or {}
+                probs_seq = d.get("probs", None)
+                if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
+                    continue
+                ideal = str(d.get("ideal"))
+                if ideal not in option_ids:
+                    continue
+
+                # Original (identity only)
+                agg_o = _aggregate_probs_over_permutations([probs_seq[identity_idx]], [perm_list[identity_idx]], int(k))
+                pred_o = option_ids[int(np.argmax(agg_o))]
+
+                # Cyclic ensemble (all rotations available)
+                if cyc_idxs:
+                    probs_c = [probs_seq[i] for i in cyc_idxs]
+                    agg_c = _aggregate_probs_over_permutations(probs_c, cyc_perm_list, int(k))
+                    pred_c = option_ids[int(np.argmax(agg_c))]
+                else:
+                    pred_c = pred_o
+
+                # Full/available ensemble (all perms in cache)
+                agg_f = _aggregate_probs_over_permutations(probs_seq, perm_list, int(k))
+                pred_f = option_ids[int(np.argmax(agg_f))]
+
+                y_true_list.append(ideal)
+                y_orig_list.append(pred_o)
+                y_cyc_list.append(pred_c)
+                y_full_list.append(pred_f)
+
+            if y_true_list:
+                if int(k) not in recall_by_k:
+                    recall_by_k[int(k)] = {"y_true": [], "orig": [], "cyclic": [], "full": []}
+                recall_by_k[int(k)]["y_true"].extend(y_true_list)
+                recall_by_k[int(k)]["orig"].extend(y_orig_list)
+                recall_by_k[int(k)]["cyclic"].extend(y_cyc_list)
+                recall_by_k[int(k)]["full"].extend(y_full_list)
+        except Exception:
+            pass
+
         # Store correctness matrix for heatmap (only if we can keep a consistent perm order for this k)
         if (save_plots or wandb_enabled) and len(perm_list) > 1:
             if int(k) not in corr_by_k:
@@ -345,7 +401,12 @@ def _run_analysis(
 
     saved_plot_paths: List[str] = []
     if save_plots or wandb_enabled:
-        saved_plot_paths = _save_noise_plots(per_record_reports, str(cache_dir), corr_by_k=corr_by_k)
+        saved_plot_paths = _save_noise_plots(
+            per_record_reports,
+            str(cache_dir),
+            corr_by_k=corr_by_k,
+            recall_by_k=recall_by_k,
+        )
 
     if wandb_enabled:
         _wandb_log_report(
@@ -362,7 +423,12 @@ def _run_analysis(
         )
 
 
-def _save_noise_plots(per_record_reports: List[dict], out_dir: str, corr_by_k: Optional[Dict[int, Dict[str, object]]] = None) -> List[str]:
+def _save_noise_plots(
+    per_record_reports: List[dict],
+    out_dir: str,
+    corr_by_k: Optional[Dict[int, Dict[str, object]]] = None,
+    recall_by_k: Optional[Dict[int, Dict[str, List[str]]]] = None,
+) -> List[str]:
     """
     Save a small set of PNG plots into out_dir.
     - subset size (m) vs ensemble accuracy (mean±std over subject-run records)
@@ -437,6 +503,109 @@ def _save_noise_plots(per_record_reports: List[dict], out_dir: str, corr_by_k: O
             fig.savefig(p)
             plt.close(fig)
             saved.append(p)
+
+        # Plot: recall-by-option bar chart (aggregate over all subjects)
+        if recall_by_k and int(k) in recall_by_k:
+            try:
+                rec = recall_by_k[int(k)]
+                y_true = rec.get("y_true") or []
+                y_orig = rec.get("orig") or []
+                y_cyc = rec.get("cyclic") or []
+                y_full = rec.get("full") or []
+                if y_true and len(y_true) == len(y_orig) == len(y_cyc) == len(y_full):
+                    options = list("ABCDE"[: int(k)]) if int(k) in (4, 5) else sorted(list({*y_true}))
+
+                    def _acc(y_pred):
+                        return float(np.mean([1.0 if p == t else 0.0 for p, t in zip(y_pred, y_true)])) if y_true else float("nan")
+
+                    def _recalls(y_pred):
+                        out = []
+                        for opt in options:
+                            idxs = [i for i, t in enumerate(y_true) if t == opt]
+                            if not idxs:
+                                out.append(0.0)
+                            else:
+                                out.append(float(np.mean([1.0 if y_pred[i] == opt else 0.0 for i in idxs])))
+                        return out
+
+                    r_orig = _recalls(y_orig)
+                    r_cyc = _recalls(y_cyc)
+                    r_full = _recalls(y_full)
+                    a_orig = _acc(y_orig)
+                    a_cyc = _acc(y_cyc)
+                    a_full = _acc(y_full)
+                    s_orig = float(np.std(r_orig))
+                    s_cyc = float(np.std(r_cyc))
+                    s_full = float(np.std(r_full))
+
+                    x = np.arange(int(k))
+                    width = 0.25
+                    fig = plt.figure(figsize=(10.0, 6.0), dpi=160)
+                    ax = fig.add_subplot(1, 1, 1)
+                    b1 = ax.bar(
+                        x - width,
+                        r_orig,
+                        width,
+                        label=f"Original (Acc: {a_orig:.3f} | Std: {s_orig:.3f})",
+                        color="#d62728",
+                        alpha=0.82,
+                    )
+                    b2 = ax.bar(
+                        x,
+                        r_cyc,
+                        width,
+                        label=f"Cyclic {int(k)} (Acc: {a_cyc:.3f} | Std: {s_cyc:.3f})",
+                        color="#1f77b4",
+                        edgecolor="black",
+                        linewidth=1.2,
+                        alpha=0.85,
+                    )
+                    b3 = ax.bar(
+                        x + width,
+                        r_full,
+                        width,
+                        label=f"Full {len(_rotations(int(k))) if int(k) != 4 else 24} (Acc: {a_full:.3f} | Std: {s_full:.3f})",
+                        color="#ff7f0e",
+                        alpha=0.82,
+                    )
+                    ax.set_ylabel("Recall (accuracy per option)", fontsize=12)
+                    ax.set_xlabel("Option", fontsize=12)
+                    ax.set_title("Recall robustness per option (all subjects combined)", fontsize=14, pad=12)
+                    ax.set_xticks(x)
+                    ax.set_xticklabels(options, fontsize=12)
+                    ax.grid(axis="y", linestyle=":", alpha=0.5)
+                    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=10, title="Metrics (Lower Std = More Robust)")
+
+                    def _autolabel(rects):
+                        for rect in rects:
+                            h = rect.get_height()
+                            ax.annotate(
+                                f"{h:.3f}",
+                                xy=(rect.get_x() + rect.get_width() / 2, h),
+                                xytext=(0, 3),
+                                textcoords="offset points",
+                                ha="center",
+                                va="bottom",
+                                fontsize=8,
+                                rotation=90,
+                            )
+
+                    _autolabel(b1)
+                    _autolabel(b2)
+                    _autolabel(b3)
+                    ymin = max(0.0, min(r_orig + r_cyc + r_full) - 0.08)
+                    ymax = min(1.0, max(r_orig + r_cyc + r_full) + 0.10)
+                    ax.set_ylim(ymin, ymax)
+
+                    fig.tight_layout()
+                    # If only one k exists, keep the user's preferred name.
+                    fname = "analyze_perm_recall.png" if len(ks) == 1 else f"analyze_perm_recall_k{k}.png"
+                    p = os.path.join(out_dir, fname)
+                    fig.savefig(p)
+                    plt.close(fig)
+                    saved.append(p)
+            except Exception:
+                pass
 
         # Plot: correlation heatmap + boxplot (Cyclic first, then non-cyclic)
         if corr_by_k and int(k) in corr_by_k:
