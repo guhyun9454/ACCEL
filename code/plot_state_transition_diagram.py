@@ -502,7 +502,7 @@ def main():
     ap.add_argument("--option_id_set", type=str, default=None)
     ap.add_argument("--n_runs", type=int, default=1)
     ap.add_argument("--force", action="store_true")
-    ap.add_argument("--th1_percent", type=float, default=30.0, help="th1 percentile for Online Sqrt All")
+    ap.add_argument("--th1_percent", type=float, default=100.0, help="th1 percentile for Online Sqrt All")
     ap.add_argument("--pride_prefix_ratio", type=float, default=0.02, help="PRIDE prefix ratio")
     ap.add_argument("--pride_seed", type=int, default=0, help="PRIDE seed offset")
 
