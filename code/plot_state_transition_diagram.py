@@ -62,7 +62,7 @@ def _resolve_overlap(ys, min_dist):
     return ys.tolist()
 
 
-def draw_state_column(ax, x_pos, title, blocks, width=1.0):
+def draw_state_column(ax, x_pos, title, blocks, width=1.5):
     """
     막대 그래프 컬럼을 그리고, 모든 라벨을 막대 우측으로 깔끔하게 정렬합니다.
     """
@@ -75,7 +75,7 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.0):
     col_height = 6.0
     y_curr = 2.0
 
-    # 컬럼 제목 (굵은 폰트로 가시성 향상)
+    # 컬럼 제목 (기본 굵기, 검정색)
     ax.text(
         x_pos + width / 2.0,
         8.4,
@@ -83,10 +83,29 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.0):
         ha="center",
         va="bottom",
         fontsize=12,
-        fontweight="bold",
+        fontweight="normal",
+        color="black"
     )
 
     labels_info = []
+
+    # 각 상태별 패턴 매핑
+    hatch_dict = {
+        "(0)": "///",
+        "(1)": "///",
+        "(0, 0)": "///",
+        "(0, 1)": "...",
+        "(1, 0)": "...",
+        "(1, 1)": "///",
+        "(0, 0, 0)": "///",
+        "(0, 0, 1)": "...",
+        "(0, 1, 0)": "|||",
+        "(0, 1, 1)": "\\\\\\",
+        "(1, 0, 0)": "\\\\\\",
+        "(1, 0, 1)": "|||",
+        "(1, 1, 0)": "...",
+        "(1, 1, 1)": "///"
+    }
 
     # 1) 블록 그리기 및 라벨 정보 수집
     for block in reversed(blocks):
@@ -95,20 +114,25 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.0):
         pct = (h_raw / total_val) * 100
 
         text_str = str(block["text"])
+        
+        # 파스텔 톤 색상 적용
         if text_str.endswith("1)"):
-            facecolor = "#3b82f6"  # 파란색 (Correct)
+            facecolor = "#bae1ff"  # 파스텔 블루 (Correct)
         elif text_str.endswith("0)"):
-            facecolor = "#ef4444"  # 빨간색 (Incorrect)
+            facecolor = "#ffb3ba"  # 파스텔 핑크 (Incorrect)
         else:
             facecolor = "#e2e3e5"
+
+        hatch_pattern = hatch_dict.get(text_str, "")
 
         rect = patches.Rectangle(
             (x_pos, y_curr),
             width,
             h_norm,
-            linewidth=1.5,
-            edgecolor="black",
+            linewidth=1.2,
+            edgecolor="#555555",  # 약간 회색 선
             facecolor=facecolor,
+            hatch=hatch_pattern
         )
         ax.add_patch(rect)
 
@@ -128,19 +152,19 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.0):
         for (target_y, text), actual_y in zip(labels_info, actual_ys):
             label_x = x_pos + width + 0.15
             
-            # 블록 오른쪽에서 라벨로 이어지는 가이드선
+            # 블록 오른쪽에서 라벨로 이어지는 가이드선 (약간 회색)
             ax.plot(
                 [x_pos + width, label_x - 0.05],
                 [target_y, actual_y],
-                color="black",
-                linewidth=1.0,
+                color="#555555",
+                linewidth=0.8,
                 zorder=0,
             )
             
-            # 라벨 텍스트
+            # 라벨 텍스트 (기본 굵기, 검정색)
             ax.text(
                 label_x, actual_y, text,
-                ha="left", va="center", fontsize=10, color="black", fontweight="bold"
+                ha="left", va="center", fontsize=10, color="black", fontweight="normal"
             )
 
 
@@ -453,7 +477,8 @@ def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--out", type=str, default="state_transition_diagram.png", help="Output PNG path")
     ap.add_argument("--dpi", type=int, default=300)
-    ap.add_argument("--width", type=float, default=8.0)
+    # 가로 길이를 대폭 늘려서 라벨이 들어갈 충분한 공간을 확보합니다.
+    ap.add_argument("--width", type=float, default=13.0) 
     ap.add_argument("--height", type=float, default=10.0)
     ap.add_argument("--wandb", action="store_true", help="Upload PNG to W&B using wandb.Image.")
     ap.add_argument("--wandb_project", type=str, default=None)
@@ -476,7 +501,6 @@ def main():
 
     results_dir = None
     if str(args.pretrained_model_path).strip() and args.eval_names:
-        # 기존 로직 유지 (데이터 로드 등)
         eval_clm_path = str(args.eval_clm_path).strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_clm.py")
         if not os.path.exists(eval_clm_path):
             raise SystemExit(f"eval_clm.py not found: {eval_clm_path}")
@@ -519,11 +543,13 @@ def main():
         avg_cost = float("nan")
 
     fig, ax = plt.subplots(figsize=(float(args.width), float(args.height)))
-    ax.set_xlim(0, 9.0)
+    
+    # 겹침 방지를 위해 전체 범위를 넓게 씁니다.
+    ax.set_xlim(0, 15.0)
     ax.set_ylim(0, 10)
     ax.axis("off")
 
-    col_width = 1.0  # 컬럼 폭을 약간 줄여서 우측 라벨 공간 확보
+    col_width = 1.5
     
     col1_data = [
         {"h": float(counts_init.get((0,), 0)), "text": "(0)"},
@@ -540,35 +566,35 @@ def main():
         (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1),
     ]]
 
-    # 간격을 시원하게 배치합니다.
+    # 간격을 아주 넓게(x_pos 0.5 -> 5.5 -> 10.5) 배치하여 글씨가 겹칠 일이 없도록 합니다.
     draw_state_column(ax, 0.5, "Initial\n(Default)", col1_data, width=col_width)
-    draw_state_column(ax, 2.8, "Only Flip", col2_data, width=col_width)
+    draw_state_column(ax, 5.5, "Only Flip", col2_data, width=col_width)
     
     if np.isfinite(avg_cost):
-        draw_state_column(ax, 5.1, f"Ours+PRIDE\nOnline Sqrt\n(Cost={avg_cost:.2f})", col3_data, width=col_width)
+        draw_state_column(ax, 10.5, f"Ours+PRIDE\nOnline Sqrt\n(Cost={avg_cost:.2f})", col3_data, width=col_width)
     else:
-        draw_state_column(ax, 5.1, "Ours+PRIDE\nOnline Sqrt", col3_data, width=col_width)
+        draw_state_column(ax, 10.5, "Ours+PRIDE\nOnline Sqrt", col3_data, width=col_width)
 
-    # 범례: 네모 칸 안에, 바 옆에 플롯 형태로 직관적 배치
-    leg_x, leg_y = 7.4, 4.5
-    leg_w, leg_h = 1.4, 1.2
+    # 범례: 네모 칸 안에 글씨가 넉넉히 들어가게 너비/높이 조정
+    leg_x, leg_y = 12.5, 4.0
+    leg_w, leg_h = 2.0, 1.4
     leg_box = patches.Rectangle(
         (leg_x, leg_y),
         leg_w,
         leg_h,
-        linewidth=1.5,
-        edgecolor="black",
+        linewidth=1.2,
+        edgecolor="#555555",
         facecolor="white",
     )
     ax.add_patch(leg_box)
     
-    # 0 = incorrect (Red)
-    ax.add_patch(patches.Rectangle((leg_x + 0.1, leg_y + leg_h - 0.45), 0.25, 0.25, facecolor="#ef4444", edgecolor="black", linewidth=1.5))
-    ax.text(leg_x + 0.45, leg_y + leg_h - 0.32, "0: Incorrect", ha="left", va="center", fontsize=11, fontweight="bold")
+    # 0 = incorrect (Pastel Red, hatch)
+    ax.add_patch(patches.Rectangle((leg_x + 0.15, leg_y + leg_h - 0.5), 0.3, 0.3, facecolor="#ffb3ba", edgecolor="#555555", linewidth=1.2, hatch="///"))
+    ax.text(leg_x + 0.55, leg_y + leg_h - 0.35, "0: Incorrect", ha="left", va="center", fontsize=11, fontweight="normal", color="black")
     
-    # 1 = correct (Blue)
-    ax.add_patch(patches.Rectangle((leg_x + 0.1, leg_y + leg_h - 0.95), 0.25, 0.25, facecolor="#3b82f6", edgecolor="black", linewidth=1.5))
-    ax.text(leg_x + 0.45, leg_y + leg_h - 0.82, "1: Correct", ha="left", va="center", fontsize=11, fontweight="bold")
+    # 1 = correct (Pastel Blue, hatch)
+    ax.add_patch(patches.Rectangle((leg_x + 0.15, leg_y + leg_h - 1.1), 0.3, 0.3, facecolor="#bae1ff", edgecolor="#555555", linewidth=1.2, hatch="///"))
+    ax.text(leg_x + 0.55, leg_y + leg_h - 0.95, "1: Correct", ha="left", va="center", fontsize=11, fontweight="normal", color="black")
 
     plt.tight_layout()
 
