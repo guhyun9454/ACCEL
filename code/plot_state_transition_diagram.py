@@ -65,6 +65,7 @@ def _resolve_overlap(ys, min_dist):
 def draw_state_column(ax, x_pos, title, blocks, width=1.5):
     """
     막대 그래프 컬럼을 그립니다.
+    파란색(Correct, 1)이 아래쪽으로, 빨간색(Incorrect, 0)이 위쪽으로 가도록 정렬합니다.
     Y축을 60%부터 시작하도록 자르고(Zoom-in), 상단 부분을 확대해서 표시합니다.
     """
     # 0% 블록 제외
@@ -72,7 +73,15 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.5):
     if not blocks:
         return
 
-    total_val = sum([float(b["h"]) for b in blocks])
+    # 파란색(1로 끝남)이 아래로, 빨간색(0으로 끝남)이 위로 가도록 정렬
+    # (주의: 그릴 때는 아래(y_base)에서 위로 쌓아가므로 리스트의 앞쪽이 막대 아래에 그려짐)
+    blocks_correct = [b for b in blocks if str(b["text"]).endswith("1)")]
+    blocks_incorrect = [b for b in blocks if str(b["text"]).endswith("0)")]
+    
+    # 두 리스트를 합침 (Correct 먼저 -> Incorrect 나중)
+    sorted_blocks = blocks_correct + blocks_incorrect
+
+    total_val = sum([float(b["h"]) for b in sorted_blocks])
     
     # 60% ~ 100% 구간을 전체 높이(6.0)로 매핑
     y_min_pct = 60.0
@@ -96,26 +105,16 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.5):
 
     # 각 상태별 패턴 매핑: 0, 1 만 있는 순수 상태는 패턴 제거("")
     hatch_dict = {
-        "(0)": "",
-        "(1)": "",
-        "(0, 0)": "",
-        "(0, 1)": "...",
-        "(1, 0)": "...",
-        "(1, 1)": "",
-        "(0, 0, 0)": "",
-        "(0, 0, 1)": "...",
-        "(0, 1, 0)": "|||",
-        "(0, 1, 1)": "\\\\\\",
-        "(1, 0, 0)": "\\\\\\",
-        "(1, 0, 1)": "|||",
-        "(1, 1, 0)": "...",
-        "(1, 1, 1)": ""
+        "(0)": "", "(1)": "",
+        "(0, 0)": "", "(0, 1)": "...", "(1, 0)": "...", "(1, 1)": "",
+        "(0, 0, 0)": "", "(0, 0, 1)": "...", "(0, 1, 0)": "|||", "(0, 1, 1)": "\\\\\\",
+        "(1, 0, 0)": "\\\\\\", "(1, 0, 1)": "|||", "(1, 1, 0)": "...", "(1, 1, 1)": ""
     }
 
     current_bottom_pct = 0.0
 
-    # 1) 블록 그리기 및 라벨 정보 수집 (아래에서 위로)
-    for block in reversed(blocks):
+    # 1) 정렬된 블록 그리기 및 라벨 정보 수집 (아래에서 위로)
+    for block in sorted_blocks:
         h_raw = float(block["h"])
         pct = (h_raw / total_val) * 100.0
         block_top_pct = current_bottom_pct + pct
