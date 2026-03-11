@@ -6,6 +6,7 @@ import os
 import platform
 import subprocess
 import sys
+from typing import Optional
 
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
@@ -134,7 +135,7 @@ def _read_results_jsonl(path: str):
     return rows
 
 
-def _compute_results_dir(code_dir: str, eval_name: str, pretrained_model_path: str, option_id_set: str | None):
+def _compute_results_dir(code_dir: str, eval_name: str, pretrained_model_path: str, option_id_set: Optional[str]):
     eval_args = str(eval_name).split(",")
     task = str(eval_args[0]).strip()
     num_few_shot = int(eval_args[1])
@@ -148,7 +149,7 @@ def _compute_results_dir(code_dir: str, eval_name: str, pretrained_model_path: s
     return os.path.join(code_dir, save_path)
 
 
-def _compute_transition_counts(results_dir: str, n_runs: int, option_id_set: str | None):
+def _compute_transition_counts(results_dir: str, n_runs: int, option_id_set: Optional[str]):
     """
     Compute counts for:
       - Initial: (base)
