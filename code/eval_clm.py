@@ -520,7 +520,7 @@ def _run_cyclic_random_fraction(
     base_correct: List[bool],
     cyclic_correct: List[bool],
     k: int,
-    fraction_pct: int,
+    fraction_pct: float,
     seed: int,
 ) -> Tuple[float, float]:
     """
@@ -550,7 +550,7 @@ def _run_cyclic_random_fraction_with_preds(
     cyclic_pred_idx: List[int],
     labels_idx: List[int],
     k: int,
-    fraction_pct: int,
+    fraction_pct: float,
     seed: int,
 ) -> Tuple[float, float, List[int]]:
     """Returns (cost, acc, preds) for recall_std."""
@@ -852,12 +852,12 @@ def _plot_baseline_vs_pride_points_scatter(
 def _plot_three_curves_acc_recall_std(
     derived_records_by_p: Dict[float, List[dict]],
     derived_records_pride_by_p: Dict[float, List[dict]],
-    derived_records_pride_by_alpha: Dict[int, List[dict]],
+    derived_records_pride_by_alpha: Dict[float, List[dict]],
     out_dir: str,
     task: str,
     cyclic_fractions: List[int],
-    pride_ours_fractions: List[int],
-    pride_prefix_list: List[int],
+    pride_ours_fractions: List[float],
+    pride_prefix_list: List[float],
     wandb_ok: bool = False,
     wandb_run: Any = None,
 ):
@@ -917,13 +917,18 @@ def _plot_three_curves_acc_recall_std(
             pts = by_p.get(float(p), [])
             cl, al, rl = [], [], []
             for c in pts:
-                key = f"cyclic_random_{int(p)}"
-                if key in c:
+                pf = float(p)
+                key_candidates = [
+                    f"cyclic_random_{pf}",
+                    f"cyclic_random_{pf:g}",  # e.g., 1.0 -> "1"
+                ]
+                key = next((kk for kk in key_candidates if kk in c), None)
+                if key is not None:
                     cl.append(float(c[key]["costs"][0]))
                     al.append(float(c[key]["accuracies"][0]) * 100.0)
-                rkey = f"{key}_recall_std"
-                if rkey in c and isinstance(c.get(rkey), (int, float)):
-                    rl.append(float(c[rkey]))
+                    rkey = f"{key}_recall_std"
+                    if rkey in c and isinstance(c.get(rkey), (int, float)):
+                        rl.append(float(c[rkey]))
             costs.append(np.mean(cl) if cl else float("nan"))
             accs.append(np.mean(al) if al else float("nan"))
             rstds.append(np.nanmean(rl) if rl else float("nan"))
@@ -1104,7 +1109,7 @@ def _plot_three_curves_acc_recall_std(
                 for variant in ("th1/2", "online_sqrt_all"):
                     co, ac, rs, asd, rsd = agg_fn(cobjs, th1_fracs, variant)
                     entry[variant] = {
-                        "p": [int(x) for x in th1_fracs],
+                        "p": [float(x) for x in th1_fracs],
                         "cost": [float(x) if np.isfinite(x) else float("nan") for x in co],
                         "acc": [float(x) if np.isfinite(x) else float("nan") for x in ac],
                         "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rs],
@@ -1113,10 +1118,11 @@ def _plot_three_curves_acc_recall_std(
                         "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in asd],
                         "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rsd],
                     }
-                by_alpha_out[str(alpha)] = entry
+                alpha_key = f"{float(alpha):g}"
+                by_alpha_out[alpha_key] = entry
             return {
-                "pride_prefix_fractions": [int(a) for a in prefix_list],
-                "p": [int(x) for x in th1_fracs],
+                "pride_prefix_fractions": [float(a) for a in prefix_list],
+                "p": [float(x) for x in th1_fracs],
                 "by_alpha": by_alpha_out,
             }
         return {
@@ -1140,7 +1146,7 @@ def _plot_three_curves_acc_recall_std(
             "default_acc": float(default_acc),
             "default_recall_std": float(default_recall_std),
             "cyclic_fractions": [int(x) for x in cyclic_fractions],
-            "pride_ours_fractions": [int(x) for x in pride_ours_fractions],
+            "pride_ours_fractions": [float(x) for x in pride_ours_fractions],
             "curves": {
                 "cyclic": {
                     "fraction": [int(x) for x in cyclic_fractions],
@@ -1153,7 +1159,7 @@ def _plot_three_curves_acc_recall_std(
                     "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_cyc],
                 },
                 "default_pride": {
-                    "p": [int(x) for x in pride_fracs_for_plot],
+                    "p": [float(x) for x in pride_fracs_for_plot],
                     "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_pride],
                     "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_pride],
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_pride],
@@ -1163,7 +1169,7 @@ def _plot_three_curves_acc_recall_std(
                     "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_pride],
                 },
                 "ours": {
-                    "p": [int(x) for x in pride_ours_fractions],
+                    "p": [float(x) for x in pride_ours_fractions],
                     "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours],
                     "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours],
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours],
@@ -2975,7 +2981,7 @@ def _compute_curves_for_one_percentile(
     cyclic_pred_idx: Optional[List[int]] = None,
     probe2_pred_idx: Optional[List[int]] = None,
     full_pred_idx: Optional[List[int]] = None,
-    cyclic_fractions: Optional[List[int]] = None,
+    cyclic_fractions: Optional[List[float]] = None,
     run_seed_offset: int = 0,
 ) -> dict:
     """
@@ -3124,13 +3130,15 @@ def _compute_curves_for_one_percentile(
     cyclic_random_accs: Dict[str, float] = {}
     prefix_ids_set = set(int(x) for x in forced_cyclic_ids) if forced_cyclic_ids else set()
     for fp in cyclic_fractions:
-        if prefix_ids_set and int(fp) == int(perc_value):
+        fp_f = float(fp)
+        if prefix_ids_set and float(fp_f) == float(perc_value):
             c_r, a_r = _run_prefix_cyclic_postfix_base(
                 base_correct_list, cyclic_correct_list, k, prefix_ids_set
             )
         else:
+            fp_seed_off = int(fp_f) if float(fp_f).is_integer() else int(round(fp_f * 1000.0))
             c_r, a_r = _run_cyclic_random_fraction(
-                base_correct_list, cyclic_correct_list, k, int(fp), seed_base + int(fp)
+                base_correct_list, cyclic_correct_list, k, fp_f, seed_base + fp_seed_off
             )
         cyclic_random_costs[f"cyclic_random_{fp}"] = float(c_r)
         cyclic_random_accs[f"cyclic_random_{fp}"] = float(a_r)
@@ -3187,9 +3195,15 @@ def _compute_curves_for_one_percentile(
             curve_obj["default_recall_std"] = float(_recall_std(labels_idx, default_pred_idx, k))
             curve_obj["cyclic_recall_std"] = float(_recall_std(labels_idx, cyclic_pred_idx, k))
             for fp in cyclic_fractions:
-                _, _, preds_r = _run_cyclic_random_fraction_with_preds(
-                    base_pred_idx, cyclic_pred_idx, labels_idx, k, int(fp), seed_base + int(fp)
-                )  # seed_base already includes run_seed_offset
+                fp_f = float(fp)
+                if forced_cyclic_ids is not None and float(fp_f) == float(perc_value):
+                    # Default+PRIDE: prefix=cyclic, postfix=base (same as default_pred_idx)
+                    preds_r = default_pred_idx
+                else:
+                    fp_seed_off = int(fp_f) if float(fp_f).is_integer() else int(round(fp_f * 1000.0))
+                    _, _, preds_r = _run_cyclic_random_fraction_with_preds(
+                        base_pred_idx, cyclic_pred_idx, labels_idx, k, fp_f, seed_base + fp_seed_off
+                    )  # seed_base already includes run_seed_offset
                 curve_obj[f"cyclic_random_{fp}_recall_std"] = float(_recall_std(labels_idx, preds_r, k))
             if full_enabled and full_pred_idx is not None and len(full_pred_idx) == len(labels_idx):
                 curve_obj["full_recall_std"] = float(_recall_std(labels_idx, full_pred_idx, k))
@@ -3240,19 +3254,25 @@ def _log_baseline_report(curve_obj: dict):
 
     # Cyclic random fractions (plot에 쓰이는 것과 동일)
     def _log_cyclic_random(obj: dict, prefix: str):
-        fracs = sorted([int(k.replace("cyclic_random_", "")) for k in (obj or {}).keys()
-                       if isinstance(k, str) and k.startswith("cyclic_random_") and not k.endswith("_recall_std")],
-                      key=lambda x: x)
-        if fracs:
+        keys = [
+            k for k in (obj or {}).keys()
+            if isinstance(k, str) and k.startswith("cyclic_random_") and not k.endswith("_recall_std")
+        ]
+        def _k_to_float(s: str) -> float:
+            try:
+                return float(s.replace("cyclic_random_", ""))
+            except Exception:
+                return float("inf")
+        keys = sorted(keys, key=_k_to_float)
+        if keys:
             logger.info(_purple(f"---- Cyclic random fractions (plot과 동일) [{prefix}] ----"))
-            for fp in fracs:
-                k = f"cyclic_random_{fp}"
+            for k in keys:
                 if k in obj and isinstance(obj[k], dict) and "costs" in obj[k] and "accuracies" in obj[k]:
                     c = float(obj[k]["costs"][0])
                     a = float(obj[k]["accuracies"][0])
                     rstd = obj.get(f"{k}_recall_std")
                     extra = f", recall_std={rstd:.4f}" if isinstance(rstd, (int, float)) else ""
-                    logger.info(f"BASELINE cyclic_{fp}%      : cost={c:.3f}, acc={a:.4f}{extra}")
+                    logger.info(f"BASELINE {k:<16}: cost={c:.3f}, acc={a:.4f}{extra}")
     _log_cyclic_random(curve_obj, "BASELINE")
 
 
@@ -3386,8 +3406,8 @@ def main():
                     acc = float(np.clip(acc, 0.0, 1.0))
                     rstd = 0.20 - 0.10 * frac + float(rng.normal(0.0, 0.005))
                     rstd = float(np.clip(rstd, 0.0, 1.0))
-                    cobj_base[f"cyclic_random_{int(fp)}"] = {"costs": [float(cost)], "accuracies": [float(acc)]}
-                    cobj_base[f"cyclic_random_{int(fp)}_recall_std"] = float(rstd)
+                    cobj_base[f"cyclic_random_{fp}"] = {"costs": [float(cost)], "accuracies": [float(acc)]}
+                    cobj_base[f"cyclic_random_{fp}_recall_std"] = float(rstd)
 
                 derived_records_by_p = {}
                 for p in pride_fracs:
@@ -3411,7 +3431,7 @@ def main():
                     }]
                     derived_records_by_p[float(p)] = [cobj]  # 1 "subject"
 
-                pride_prefix = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100] or [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+                pride_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0] or [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
                 derived_records_pride_by_p = {}
                 derived_records_pride_by_alpha = {}
                 for alpha in pride_prefix:
@@ -3423,7 +3443,7 @@ def main():
                         pride_acc = float(np.clip(pride_acc, 0.0, 1.0))
                         pride_rstd = 0.16 - 0.07 * frac + float(rng.normal(0.0, 0.006))
                         pride_rstd = float(np.clip(pride_rstd, 0.0, 1.0))
-                        key = f"cyclic_random_{int(p)}"
+                        key = f"cyclic_random_{p}"
                         cobj_pr[key] = {"costs": [float(pride_cost)], "accuracies": [float(pride_acc)]}
                         cobj_pr[f"{key}_recall_std"] = float(pride_rstd)
                         cobj_pr.setdefault("heuristic_points", []).append({
@@ -3511,7 +3531,7 @@ def main():
         eval_acc_records: List[dict] = []  # [{'subject':str,'corrects':int,'total':int,'acc':float}]
         derived_records_by_p: Dict[float, List[dict]] = {}  # p -> list of curve_obj (per subject)
         derived_records_pride_by_p: Dict[float, List[dict]] = {}  # legacy: p->list (Default+PRIDE 단일 alpha용)
-        derived_records_pride_by_alpha: Dict[int, List[dict]] = {}  # alpha(2,5,10,20) -> list of PRIDE curve_obj
+        derived_records_pride_by_alpha: Dict[float, List[dict]] = {}  # alpha(0.5,1.0,2,5,...) -> list of PRIDE curve_obj
         pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
         recall_std_vs_p_records: List[dict] = []  # [{'subject':str,'p':float,'method':str,'kind':str,'rstd':float}]
         n_runs = max(1, int(getattr(args, "n_runs", 1)))
@@ -3878,16 +3898,16 @@ def main():
                         # ---------- optional: PRIDE debiasing + n_runs averaging (like debiase_pride.py) ----------
                         pride_enabled = bool(getattr(args, "pride_mix", False))
                         by_perc_baseline: Dict[float, List[dict]] = defaultdict(list)
-                        by_pride_alpha: Dict[int, List[dict]] = defaultdict(list)  # alpha(2,5,10,20) -> [cobj]
+                        by_pride_alpha: Dict[float, List[dict]] = defaultdict(list)  # alpha(0.5,1.0,2,5,...) -> [cobj]
                         curve_objs_baseline = []
                         curve_objs_pride = []
 
-                        pride_prefix_list = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
+                        pride_prefix_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
                         if not pride_prefix_list:
-                            pride_prefix_list = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-                        ours_th1_list = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
+                            pride_prefix_list = [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+                        ours_th1_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
                         if not ours_th1_list:
-                            ours_th1_list = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+                            ours_th1_list = [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
 
                         # n_runs>1이면 외부 run_idx당 1회만 (이미 다른 결과). n_runs==1이면 n_runs번 curve variation
                         inner_run_indices = [run_idx] if use_run_suffix else list(range(n_runs))
@@ -4069,20 +4089,22 @@ def main():
                                         except Exception:
                                             pass
                                         return out
-                                    pts_th12 = [_get_static_pt_pride(int(th1), lambda x: x / 2.0, "th1/2") for th1 in ours_th1_list]
-                                    pts_sqrt = [_get_static_pt_online_sqrt(int(th1)) for th1 in ours_th1_list]
+                                    pts_th12 = [_get_static_pt_pride(float(th1), lambda x: x / 2.0, "th1/2") for th1 in ours_th1_list]
+                                    pts_sqrt = [_get_static_pt_online_sqrt(float(th1)) for th1 in ours_th1_list]
                                     cobj_pr["heuristic_points"] = pts_th12 + pts_sqrt
                                     by_pride_alpha[pride_alpha].append(cobj_pr)
 
                                 for ours_th1 in ours_th1_list:
                                     try:
-                                        seed_cyc = _stable_u32_seed(str(subject), int(run_idx_inner)) + int(ours_th1)
+                                        th1_f = float(ours_th1)
+                                        th1_seed_off = int(th1_f) if th1_f.is_integer() else int(round(th1_f * 1000.0))
+                                        seed_cyc = _stable_u32_seed(str(subject), int(run_idx_inner)) + int(th1_seed_off)
                                         _, _, preds_dp = _run_cyclic_random_fraction_with_preds(
                                             base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
-                                            labels_idx_for_curves, k, int(ours_th1), seed_cyc)
+                                            labels_idx_for_curves, k, th1_f, seed_cyc)
                                         rec_dp = _make_transition_record_from_preds(
                                             base_correct_list_pr, preds_dp, labels_idx_for_curves, default_conf_pr, subject)
-                                        transition_records_default_pride_by_p.setdefault(float(ours_th1), []).append(rec_dp)
+                                        transition_records_default_pride_by_p.setdefault(float(th1_f), []).append(rec_dp)
                                     except Exception:
                                         pass
                                     try:
@@ -4091,8 +4113,8 @@ def main():
                                             probe2_pred_idx_list_pr, labels_idx_for_curves, k, ours_th1, lambda x: x / 2.0, prefix_ids_set)
                                         rec_op = _make_transition_record_from_preds(
                                             base_correct_list_pr, preds_op, labels_idx_for_curves, default_conf_pr, subject)
-                                        if pride_alpha == 2:
-                                            transition_records_ours_pride_by_p.setdefault(float(ours_th1), []).append(rec_op)
+                                        if float(pride_alpha) == 2.0:
+                                            transition_records_ours_pride_by_p.setdefault(float(th1_f), []).append(rec_op)
                                     except Exception:
                                         pass
 
@@ -4230,7 +4252,8 @@ def main():
                 avg_f = float(np.mean(all_f)) if nf > 0 else float("nan")
                 t_to_f_pct = (tot_t_to_f / nt * 100.0) if nt > 0 else 0.0
                 f_to_t_pct = (tot_f_to_t / nf * 100.0) if nf > 0 else 0.0
-                logger.info(f"{int(p):3d}% | {avg_t:.4f} | {avg_f:.4f} | {tot_t_to_f} | {tot_f_to_t} | {t_to_f_pct:.2f}% | {f_to_t_pct:.2f}%")
+                p_str = f"{float(p):g}%"
+                logger.info(f"{p_str:>6} | {avg_t:.4f} | {avg_f:.4f} | {tot_t_to_f} | {tot_f_to_t} | {t_to_f_pct:.2f}% | {f_to_t_pct:.2f}%")
             logger.info("======================================================\n")
 
         if transition_records_default_pride_by_p:
@@ -4248,8 +4271,8 @@ def main():
                     out_dir += f"_id-{args.option_id_set}"
                 os.makedirs(out_dir, exist_ok=True)
                 cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
-                pride_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
-                pride_prefix = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100] or [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+                pride_fracs = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
+                pride_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0] or [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
                 _plot_three_curves_acc_recall_std(
                     derived_records_by_p,
                     derived_records_pride_by_p if len(derived_records_pride_by_p) > 0 else {},
@@ -4257,7 +4280,7 @@ def main():
                     out_dir,
                     args.task,
                     cyclic_fractions=cyclic_fracs or [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
-                    pride_ours_fractions=pride_fracs or [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                    pride_ours_fractions=pride_fracs or [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0],
                     pride_prefix_list=pride_prefix,
                     wandb_ok=wandb_ok,
                     wandb_run=wandb_run,
@@ -4290,7 +4313,16 @@ def main():
                 return mean, std
 
             def get_cyclic_stats(cobjs, p):
-                key = f"cyclic_random_{int(p)}"
+                pf = float(p)
+                key_candidates = [f"cyclic_random_{pf}", f"cyclic_random_{pf:g}"]
+                # pick first key that exists in at least one cobj
+                key = None
+                for kk in key_candidates:
+                    if any((kk in c) for c in (cobjs or [])):
+                        key = kk
+                        break
+                if key is None:
+                    key = key_candidates[0]
                 costs, accs, rstds = [], [], []
                 for c in cobjs:
                     if key in c and "costs" in c[key] and "accuracies" in c[key]:

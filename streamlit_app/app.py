@@ -186,7 +186,7 @@ def _curve_series_from_payload(
     payload: dict,
     curve_key: str,
     y_key: str,
-    ours_pride_alpha: Optional[int] = None,
+    ours_pride_alpha: Optional[float] = None,
     ours_pride_variant: Optional[str] = None,
 ) -> Dict[float, Dict[str, float]]:
     """
@@ -203,7 +203,7 @@ def _curve_series_from_payload(
         ours_pride_data = curves.get("ours_pride", {}) or {}
         by_alpha = ours_pride_data.get("by_alpha") or {}
         if by_alpha:
-            alpha_key = str(ours_pride_alpha) if ours_pride_alpha is not None else (list(by_alpha.keys())[0] if by_alpha else None)
+            alpha_key = (f"{float(ours_pride_alpha):g}" if ours_pride_alpha is not None else (list(by_alpha.keys())[0] if by_alpha else None))
             if alpha_key and alpha_key in by_alpha:
                 alpha_curves = by_alpha[alpha_key]
                 if isinstance(alpha_curves, dict):
@@ -339,7 +339,7 @@ def _plot_groups(
     max_pct_by_curve: Optional[Dict[str, float]] = None,
     n_runs_flattened: int = 0,
     show_overall_band: bool = False,
-    ours_pride_alphas: Optional[List[int]] = None,
+    ours_pride_alphas: Optional[List[float]] = None,
     ours_pride_base_label: str = "Ours+PRIDE",
 ):
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=160)
@@ -632,7 +632,7 @@ with col_p5:
         key="max_ours_pride_sqrt",
     )
 
-pride_alpha_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+pride_alpha_options = [0.5, 1.0, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 ours_pride_alphas = st.multiselect(
     "Ours+PRIDE PriDe α (prefix)",
     options=pride_alpha_options,
