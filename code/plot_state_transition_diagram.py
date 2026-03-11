@@ -566,7 +566,7 @@ def main():
     ax.set_ylim(0, 10)
     ax.axis("off")
 
-    col_width = 1.5
+    col_width = 1.0
     
     col1_data = [
         {"h": float(counts_init.get((0,), 0)), "text": "(0)"},
