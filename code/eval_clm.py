@@ -3363,10 +3363,10 @@ def main():
         try:
             # Use the same fractions as real plotting
             cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
-            pride_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0 <= int(x) <= 100]
+            pride_fracs = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
         except Exception:
             cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-            pride_fracs = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+            pride_fracs = [0.5, 1.0, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
         logger.info(_orange("[develop] Skipping model/data eval. Writing dummy three-curves plots/points."))
 
@@ -3431,7 +3431,7 @@ def main():
                     }]
                     derived_records_by_p[float(p)] = [cobj]  # 1 "subject"
 
-                pride_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0] or [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+                pride_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0] or [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
                 derived_records_pride_by_p = {}
                 derived_records_pride_by_alpha = {}
                 for alpha in pride_prefix:
@@ -3902,12 +3902,12 @@ def main():
                         curve_objs_baseline = []
                         curve_objs_pride = []
 
-                        pride_prefix_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
+                        pride_prefix_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
                         if not pride_prefix_list:
-                            pride_prefix_list = [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
-                        ours_th1_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
+                            pride_prefix_list = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+                        ours_th1_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
                         if not ours_th1_list:
-                            ours_th1_list = [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+                            ours_th1_list = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
 
                         # n_runs>1이면 외부 run_idx당 1회만 (이미 다른 결과). n_runs==1이면 n_runs번 curve variation
                         inner_run_indices = [run_idx] if use_run_suffix else list(range(n_runs))
@@ -4271,8 +4271,8 @@ def main():
                     out_dir += f"_id-{args.option_id_set}"
                 os.makedirs(out_dir, exist_ok=True)
                 cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
-                pride_fracs = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
-                pride_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0] or [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+                pride_fracs = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
+                pride_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0] or [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
                 _plot_three_curves_acc_recall_std(
                     derived_records_by_p,
                     derived_records_pride_by_p if len(derived_records_pride_by_p) > 0 else {},
@@ -4392,7 +4392,9 @@ def main():
                 mean_nc = float(np.mean(nc)) if nc else 0.0
                 return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
 
-            pride_fracs = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+            pride_fracs = [float(x) for x in _parse_percent_value_list(
+                getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")
+            ) if 0.0 <= float(x) <= 100.0] or [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
             # Cyclic 레포트: 항상 0,10,20,...,100 전체 구간 출력 (plot_cyclic_fractions와 무관)
             cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
             pride_alphas = sorted(derived_records_pride_by_alpha.keys()) if derived_records_pride_by_alpha else []
@@ -4406,7 +4408,8 @@ def main():
                 cobjs = derived_records_pride_by_alpha[alpha]
                 p = alpha  # Default+PRIDE: prefix α% = cyclic fraction, 하나의 파라미터만 사용
                 cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(cobjs, p)
-                logger.info(f"default_pride_α{alpha}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
+                a_str = f"{float(alpha):g}"
+                logger.info(f"default_pride_α{a_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
 
             # 2. ours + pride (per alpha): th1/2 and Online Sqrt
             logger.info("---- ours + pride (th1/2) ----")
@@ -4414,20 +4417,25 @@ def main():
                 cobjs = derived_records_pride_by_alpha[alpha]
                 for p in pride_fracs:
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, "th1/2")
-                    logger.info(f"ours_pride_th12_α{alpha}_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                    a_str = f"{float(alpha):g}"
+                    p_str = f"{float(p):g}"
+                    logger.info(f"ours_pride_th12_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
             logger.info("---- ours + pride (Online Sqrt) ----")
             for alpha in pride_alphas:
                 cobjs = derived_records_pride_by_alpha[alpha]
                 for p in pride_fracs:
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, "online_sqrt_all")
-                    logger.info(f"ours_pride_sqrt_α{alpha}_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                    a_str = f"{float(alpha):g}"
+                    p_str = f"{float(p):g}"
+                    logger.info(f"ours_pride_sqrt_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 3. ours
             logger.info("---- ours ----")
             for p in pride_fracs:
                 if float(p) in derived_records_by_p:
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], "th1/2")
-                    logger.info(f"ours_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                    p_str = f"{float(p):g}"
+                    logger.info(f"ours_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 4. cyclic
             logger.info("---- cyclic ----")
