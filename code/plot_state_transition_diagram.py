@@ -89,22 +89,22 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.5):
 
     labels_info = []
 
-    # 각 상태별 패턴 매핑
+    # 각 상태별 패턴 매핑: 0, 1 만 있는 순수 상태는 패턴 제거("")
     hatch_dict = {
-        "(0)": "///",
-        "(1)": "///",
-        "(0, 0)": "///",
+        "(0)": "",
+        "(1)": "",
+        "(0, 0)": "",
         "(0, 1)": "...",
         "(1, 0)": "...",
-        "(1, 1)": "///",
-        "(0, 0, 0)": "///",
+        "(1, 1)": "",
+        "(0, 0, 0)": "",
         "(0, 0, 1)": "...",
         "(0, 1, 0)": "|||",
         "(0, 1, 1)": "\\\\\\",
         "(1, 0, 0)": "\\\\\\",
         "(1, 0, 1)": "|||",
         "(1, 1, 0)": "...",
-        "(1, 1, 1)": "///"
+        "(1, 1, 1)": ""
     }
 
     # 1) 블록 그리기 및 라벨 정보 수집
@@ -477,8 +477,8 @@ def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--out", type=str, default="state_transition_diagram.png", help="Output PNG path")
     ap.add_argument("--dpi", type=int, default=300)
-    # 가로 길이를 대폭 늘려서 라벨이 들어갈 충분한 공간을 확보합니다.
-    ap.add_argument("--width", type=float, default=13.0) 
+    # 간격 조절을 위해 가로 폭(width)을 11.0으로 설정
+    ap.add_argument("--width", type=float, default=11.0) 
     ap.add_argument("--height", type=float, default=10.0)
     ap.add_argument("--wandb", action="store_true", help="Upload PNG to W&B using wandb.Image.")
     ap.add_argument("--wandb_project", type=str, default=None)
@@ -544,8 +544,8 @@ def main():
 
     fig, ax = plt.subplots(figsize=(float(args.width), float(args.height)))
     
-    # 겹침 방지를 위해 전체 범위를 넓게 씁니다.
-    ax.set_xlim(0, 15.0)
+    # 간격 조절: 전체 범위를 적절히 설정
+    ax.set_xlim(0, 12.0)
     ax.set_ylim(0, 10)
     ax.axis("off")
 
@@ -566,17 +566,17 @@ def main():
         (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1),
     ]]
 
-    # 간격을 아주 넓게(x_pos 0.5 -> 5.5 -> 10.5) 배치하여 글씨가 겹칠 일이 없도록 합니다.
+    # 사이 간격을 전보다 좁게 (0.5 -> 3.5 -> 6.5) 배치
     draw_state_column(ax, 0.5, "Initial\n(Default)", col1_data, width=col_width)
-    draw_state_column(ax, 5.5, "Only Flip", col2_data, width=col_width)
+    draw_state_column(ax, 3.5, "Only Flip", col2_data, width=col_width)
     
     if np.isfinite(avg_cost):
-        draw_state_column(ax, 10.5, f"Ours+PRIDE\nOnline Sqrt\n(Cost={avg_cost:.2f})", col3_data, width=col_width)
+        draw_state_column(ax, 6.5, f"Ours+PRIDE\nOnline Sqrt\n(Cost={avg_cost:.2f})", col3_data, width=col_width)
     else:
-        draw_state_column(ax, 10.5, "Ours+PRIDE\nOnline Sqrt", col3_data, width=col_width)
+        draw_state_column(ax, 6.5, "Ours+PRIDE\nOnline Sqrt", col3_data, width=col_width)
 
-    # 범례: 네모 칸 안에 글씨가 넉넉히 들어가게 너비/높이 조정
-    leg_x, leg_y = 12.5, 4.0
+    # 범례: 라벨 텍스트와 겹치지 않게 완전히 우측으로 분리
+    leg_x, leg_y = 9.5, 4.0
     leg_w, leg_h = 2.0, 1.4
     leg_box = patches.Rectangle(
         (leg_x, leg_y),
@@ -588,12 +588,12 @@ def main():
     )
     ax.add_patch(leg_box)
     
-    # 0 = incorrect (Pastel Red, hatch)
-    ax.add_patch(patches.Rectangle((leg_x + 0.15, leg_y + leg_h - 0.5), 0.3, 0.3, facecolor="#ffb3ba", edgecolor="#555555", linewidth=1.2, hatch="///"))
+    # 0 = incorrect (Pastel Pink, 패턴 없음)
+    ax.add_patch(patches.Rectangle((leg_x + 0.15, leg_y + leg_h - 0.5), 0.3, 0.3, facecolor="#ffb3ba", edgecolor="#555555", linewidth=1.2))
     ax.text(leg_x + 0.55, leg_y + leg_h - 0.35, "0: Incorrect", ha="left", va="center", fontsize=11, fontweight="normal", color="black")
     
-    # 1 = correct (Pastel Blue, hatch)
-    ax.add_patch(patches.Rectangle((leg_x + 0.15, leg_y + leg_h - 1.1), 0.3, 0.3, facecolor="#bae1ff", edgecolor="#555555", linewidth=1.2, hatch="///"))
+    # 1 = correct (Pastel Blue, 패턴 없음)
+    ax.add_patch(patches.Rectangle((leg_x + 0.15, leg_y + leg_h - 1.1), 0.3, 0.3, facecolor="#bae1ff", edgecolor="#555555", linewidth=1.2))
     ax.text(leg_x + 0.55, leg_y + leg_h - 0.95, "1: Correct", ha="left", va="center", fontsize=11, fontweight="normal", color="black")
 
     plt.tight_layout()
