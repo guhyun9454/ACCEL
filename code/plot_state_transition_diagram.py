@@ -44,10 +44,41 @@ def _set_font():
         pass
 
 
+def _place_labels_no_overlap(items, x_base, label_height=0.28, col_step=1.0):
+    """
+    items: list of (y_center, display_text). Sorted by y_center before processing.
+    Returns list of (x_label, y_center, display_text) with x_label chosen to avoid overlap.
+    """
+    if not items:
+        return []
+    items = sorted(items, key=lambda t: t[0])
+    # 각 레이블이 차지하는 y 범위: [y - h/2, y + h/2]
+    # 겹치면 다음 컬럼으로 밀어냄
+    columns = []  # [(y_min, y_max), ...] per column
+    result = []
+    for y_center, display_text in items:
+        y_lo, y_hi = y_center - label_height / 2, y_center + label_height / 2
+        x_use = x_base
+        for col_idx in range(len(columns) + 1):
+            if col_idx >= len(columns):
+                columns.append([])
+            occupied = columns[col_idx]
+            overlaps = any(
+                not (y_hi <= oy_lo or oy_hi <= y_lo)
+                for oy_lo, oy_hi in occupied
+            )
+            if not overlaps:
+                x_use = x_base + col_idx * col_step
+                occupied.append((y_lo, y_hi))
+                break
+        result.append((x_use, y_center, display_text))
+    return result
+
+
 def draw_state_column(ax, x_pos, title, blocks, width=1.2):
     """
     Draw one column of stacked blocks at x_pos, including percentages and colors.
-    Skips 0% blocks. Puts text to the right when block is too narrow to avoid overlap.
+    Skips 0% blocks. Thin blocks: labels placed to the right with non-overlapping layout.
     """
     # 0% 블록 제외
     blocks = [b for b in blocks if float(b.get("h", 0)) > 0]
@@ -69,13 +100,15 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.2):
         fontweight="normal",
     )
 
-    # 바닥에서부터 위로 쌓기 위해 역순으로 그림
+    min_height_for_inside = 0.55
+    thin_items = []  # (y_center, display_text) for blocks that need external labels
+
+    # 1) 블록 그리기 + thin 블록 정보 수집
     for block in reversed(blocks):
         h_raw = float(block["h"])
         h_norm = (h_raw / total_val) * col_height
         pct = (h_raw / total_val) * 100
 
-        # 텍스트의 마지막 숫자가 1이면 초록색(정답), 0이면 빨간색(오답)
         text_str = str(block["text"])
         if text_str.endswith("1)"):
             facecolor = "#d4edda"
@@ -84,7 +117,6 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.2):
         else:
             facecolor = "#e2e3e5"
 
-        # 박스 그리기
         rect = patches.Rectangle(
             (x_pos, y_curr),
             width,
@@ -98,20 +130,34 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.2):
         text_y = y_curr + (h_norm / 2)
         display_text = f"{text_str}\n{pct:.1f}%"
 
-        # 블록이 좁으면 텍스트를 박스 오른쪽으로 빼서 겹침 방지
-        min_height_for_inside = 0.55
         if h_norm >= min_height_for_inside:
             ax.text(
                 x_pos + width / 2, text_y, display_text,
                 ha="center", va="center", fontsize=9, color="#212529", fontweight="normal"
             )
         else:
-            ax.text(
-                x_pos + width + 0.12, text_y, display_text,
-                ha="left", va="center", fontsize=8, color="#212529", fontweight="normal"
-            )
+            thin_items.append((text_y, display_text))
 
         y_curr += h_norm
+
+    # 2) thin 블록 레이블: 겹치지 않게 배치 + 가이드선
+    if thin_items:
+        x_base = x_pos + width + 0.08
+        placements = _place_labels_no_overlap(thin_items, x_base, label_height=0.26, col_step=1.05)
+        for x_label, y_center, display_text in placements:
+            # 가이드선: 블록 오른쪽 끝 -> 레이블
+            ax.plot(
+                [x_pos + width, x_label - 0.05],
+                [y_center, y_center],
+                color="#888888",
+                linewidth=0.8,
+                linestyle="-",
+                zorder=0,
+            )
+            ax.text(
+                x_label, y_center, display_text,
+                ha="left", va="center", fontsize=8, color="#212529", fontweight="normal"
+            )
 
 
 def _rotations(k: int):
@@ -508,7 +554,7 @@ def main():
         avg_cost = float("nan")
 
     fig, ax = plt.subplots(figsize=(float(args.width), float(args.height)))
-    ax.set_xlim(0, 7.5)
+    ax.set_xlim(0, 9.0)
     ax.set_ylim(0, 10)
     ax.axis("off")
 
@@ -541,17 +587,24 @@ def main():
     else:
         draw_state_column(ax, 4.7, "Ours+PRIDE\nOnline Sqrt", col3_data, width=col_width)
 
-    # 범례 (regular font)
-    ax.text(
-        6.8,
-        1.0,
-        "0 = incorrect (Red)\n1 = correct (Green)",
-        ha="center",
-        va="top",
-        fontsize=9,
-        color="#555555",
-        fontweight="normal",
+    # 범례: 네모 칸 안에, 바 옆에 플롯 형태로 (색상 패치 + 텍스트)
+    leg_x, leg_y = 7.2, 4.5
+    leg_w, leg_h = 1.5, 1.4
+    leg_box = patches.Rectangle(
+        (leg_x, leg_y),
+        leg_w,
+        leg_h,
+        linewidth=1.2,
+        edgecolor="#555555",
+        facecolor="white",
     )
+    ax.add_patch(leg_box)
+    # 0 = incorrect (빨간색 패치)
+    ax.add_patch(patches.Rectangle((leg_x + 0.08, leg_y + leg_h - 0.45), 0.2, 0.2, facecolor="#f8d7da", edgecolor="#555555", linewidth=0.8))
+    ax.text(leg_x + 0.35, leg_y + leg_h - 0.35, "0 = incorrect", ha="left", va="center", fontsize=9, color="#212529", fontweight="normal")
+    # 1 = correct (초록색 패치)
+    ax.add_patch(patches.Rectangle((leg_x + 0.08, leg_y + leg_h - 0.95), 0.2, 0.2, facecolor="#d4edda", edgecolor="#555555", linewidth=0.8))
+    ax.text(leg_x + 0.35, leg_y + leg_h - 0.85, "1 = correct", ha="left", va="center", fontsize=9, color="#212529", fontweight="normal")
 
     plt.tight_layout()
 
