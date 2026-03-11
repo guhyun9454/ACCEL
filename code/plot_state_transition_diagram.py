@@ -64,7 +64,8 @@ def _resolve_overlap(ys, min_dist):
 
 def draw_state_column(ax, x_pos, title, blocks, width=1.5):
     """
-    막대 그래프 컬럼을 그리고, 모든 라벨을 막대 우측으로 깔끔하게 정렬합니다.
+    막대 그래프 컬럼을 그립니다. 
+    Y축을 60%부터 시작하게 확대(Zoom-in)하여 상단의 미세한 차이를 강조합니다.
     """
     # 0% 블록 제외
     blocks = [b for b in blocks if float(b.get("h", 0)) > 0]
@@ -72,8 +73,12 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.5):
         return
 
     total_val = sum([float(b["h"]) for b in blocks])
+    
+    # 60% ~ 100% 구간을 전체 높이(6.0)로 매핑
+    y_min_pct = 60.0
+    y_range_pct = 100.0 - y_min_pct
     col_height = 6.0
-    y_curr = 2.0
+    y_base = 2.0
 
     # 컬럼 제목 (기본 굵기, 검정색)
     ax.text(
@@ -91,27 +96,19 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.5):
 
     # 각 상태별 패턴 매핑: 0, 1 만 있는 순수 상태는 패턴 제거("")
     hatch_dict = {
-        "(0)": "",
-        "(1)": "",
-        "(0, 0)": "",
-        "(0, 1)": "...",
-        "(1, 0)": "...",
-        "(1, 1)": "",
-        "(0, 0, 0)": "",
-        "(0, 0, 1)": "...",
-        "(0, 1, 0)": "|||",
-        "(0, 1, 1)": "\\\\\\",
-        "(1, 0, 0)": "\\\\\\",
-        "(1, 0, 1)": "|||",
-        "(1, 1, 0)": "...",
-        "(1, 1, 1)": ""
+        "(0)": "", "(1)": "",
+        "(0, 0)": "", "(0, 1)": "...", "(1, 0)": "...", "(1, 1)": "",
+        "(0, 0, 0)": "", "(0, 0, 1)": "...", "(0, 1, 0)": "|||", "(0, 1, 1)": "\\\\\\",
+        "(1, 0, 0)": "\\\\\\", "(1, 0, 1)": "|||", "(1, 1, 0)": "...", "(1, 1, 1)": ""
     }
+
+    current_bottom_pct = 0.0
 
     # 1) 블록 그리기 및 라벨 정보 수집
     for block in reversed(blocks):
         h_raw = float(block["h"])
-        h_norm = (h_raw / total_val) * col_height
-        pct = (h_raw / total_val) * 100
+        pct = (h_raw / total_val) * 100.0
+        block_top_pct = current_bottom_pct + pct
 
         text_str = str(block["text"])
         
@@ -125,22 +122,35 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.5):
 
         hatch_pattern = hatch_dict.get(text_str, "")
 
-        rect = patches.Rectangle(
-            (x_pos, y_curr),
-            width,
-            h_norm,
-            linewidth=1.2,
-            edgecolor="#555555",  # 약간 회색 선
-            facecolor=facecolor,
-            hatch=hatch_pattern
-        )
-        ax.add_patch(rect)
+        # 60% 이상의 영역만 그리기 위한 범위 계산
+        visible_bottom = max(current_bottom_pct, y_min_pct)
+        visible_top = min(block_top_pct, 100.0)
+        visible_h = visible_top - visible_bottom
 
-        text_y = y_curr + (h_norm / 2.0)
-        display_text = f"{text_str} ({pct:.1f}%)"
-        labels_info.append((text_y, display_text))
+        # 화면에 표시될 부분이 있는 경우에만 렌더링
+        if visible_h > 0:
+            h_norm = (visible_h / y_range_pct) * col_height
+            rect_y = y_base + ((visible_bottom - y_min_pct) / y_range_pct) * col_height
+            
+            rect = patches.Rectangle(
+                (x_pos, rect_y),
+                width,
+                h_norm,
+                linewidth=1.2,
+                edgecolor="#555555",
+                facecolor=facecolor,
+                hatch=hatch_pattern
+            )
+            ax.add_patch(rect)
 
-        y_curr += h_norm
+            text_y = rect_y + (h_norm / 2.0)
+            display_text = f"{text_str} ({pct:.1f}%)"
+            labels_info.append((text_y, display_text))
+
+        current_bottom_pct = block_top_pct
+
+    # 절취선 기준 텍스트 (60%) 표시
+    ax.text(x_pos - 0.05, y_base, "60% -", ha="right", va="center", fontsize=10, color="#555555", fontweight="bold")
 
     # 2) 라벨들이 겹치지 않게 Y 좌표 조정 및 라벨/가이드선 그리기
     if labels_info:
@@ -570,15 +580,16 @@ def main():
     draw_state_column(ax, 0.5, "Initial\n(Default)", col1_data, width=col_width)
     draw_state_column(ax, 3.5, "Only Flip", col2_data, width=col_width)
     
+    # 세 번째 컬럼 타이틀: Ours + Cost로만 깔끔하게 출력
     if np.isfinite(avg_cost):
-        draw_state_column(ax, 6.5, f"Ours+PRIDE\nOnline Sqrt\n(Cost={avg_cost:.2f})", col3_data, width=col_width)
+        draw_state_column(ax, 6.5, f"Ours\n(Cost={avg_cost:.2f})", col3_data, width=col_width)
     else:
-        draw_state_column(ax, 6.5, "Ours+PRIDE\nOnline Sqrt", col3_data, width=col_width)
+        draw_state_column(ax, 6.5, "Ours", col3_data, width=col_width)
 
     # =========================================================
     # 범례 박스 설정 (우측으로 멀리 이동 & 내부 가운데 정렬 완벽 적용)
     # =========================================================
-    leg_x = 10.5  # 기존 9.5에서 10.5로 이동하여 텍스트와의 간격 대폭 확보
+    leg_x = 10.5  # 텍스트와 겹치지 않게 우측으로 확 뺐습니다.
     leg_y = 4.0
     leg_w = 2.4   # 박스 너비 여유롭게 확장
     leg_h = 1.6   # 박스 높이 여유롭게 확장
@@ -595,7 +606,6 @@ def main():
     item1_center_y = leg_y + (leg_h * 0.30)  # 아래쪽 아이템 중앙
 
     # 0 = Incorrect (Pastel Pink)
-    # y축 중심(item0_center_y)에서 높이(0.3)의 절반(0.15)을 빼서 바닥 좌표 설정
     ax.add_patch(patches.Rectangle((leg_x + 0.35, item0_center_y - 0.15), 0.3, 0.3, facecolor="#ffb3ba", edgecolor="#555555", linewidth=1.2))
     ax.text(leg_x + 0.8, item0_center_y, "0: Incorrect", ha="left", va="center", fontsize=11, fontweight="normal", color="black")
     
