@@ -44,41 +44,27 @@ def _set_font():
         pass
 
 
-def _place_labels_no_overlap(items, x_base, label_height=0.28, col_step=1.0):
+def _resolve_overlap(ys, min_dist):
     """
-    items: list of (y_center, display_text). Sorted by y_center before processing.
-    Returns list of (x_label, y_center, display_text) with x_label chosen to avoid overlap.
+    y 좌표 리스트가 주어지면, 최소 간격(min_dist)을 유지하도록 위아래로 밀어냅니다.
     """
-    if not items:
-        return []
-    items = sorted(items, key=lambda t: t[0])
-    # 각 레이블이 차지하는 y 범위: [y - h/2, y + h/2]
-    # 겹치면 다음 컬럼으로 밀어냄
-    columns = []  # [(y_min, y_max), ...] per column
-    result = []
-    for y_center, display_text in items:
-        y_lo, y_hi = y_center - label_height / 2, y_center + label_height / 2
-        x_use = x_base
-        for col_idx in range(len(columns) + 1):
-            if col_idx >= len(columns):
-                columns.append([])
-            occupied = columns[col_idx]
-            overlaps = any(
-                not (y_hi <= oy_lo or oy_hi <= y_lo)
-                for oy_lo, oy_hi in occupied
-            )
-            if not overlaps:
-                x_use = x_base + col_idx * col_step
-                occupied.append((y_lo, y_hi))
-                break
-        result.append((x_use, y_center, display_text))
-    return result
+    ys = np.array(ys, dtype=float)
+    for _ in range(100):
+        changed = False
+        for i in range(len(ys) - 1):
+            if ys[i+1] - ys[i] < min_dist:
+                diff = min_dist - (ys[i+1] - ys[i])
+                ys[i] -= diff / 2.0
+                ys[i+1] += diff / 2.0
+                changed = True
+        if not changed:
+            break
+    return ys.tolist()
 
 
-def draw_state_column(ax, x_pos, title, blocks, width=1.2):
+def draw_state_column(ax, x_pos, title, blocks, width=1.0):
     """
-    Draw one column of stacked blocks at x_pos, including percentages and colors.
-    Skips 0% blocks. Thin blocks: labels placed to the right with non-overlapping layout.
+    막대 그래프 컬럼을 그리고, 모든 라벨을 막대 우측으로 깔끔하게 정렬합니다.
     """
     # 0% 블록 제외
     blocks = [b for b in blocks if float(b.get("h", 0)) > 0]
@@ -89,21 +75,20 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.2):
     col_height = 6.0
     y_curr = 2.0
 
-    # 컬럼 제목 (regular font)
+    # 컬럼 제목 (굵은 폰트로 가시성 향상)
     ax.text(
-        x_pos + width / 2,
-        8.8,
+        x_pos + width / 2.0,
+        8.4,
         title,
         ha="center",
         va="bottom",
-        fontsize=11,
-        fontweight="normal",
+        fontsize=12,
+        fontweight="bold",
     )
 
-    min_height_for_inside = 0.55
-    thin_items = []  # (y_center, display_text) for blocks that need external labels
+    labels_info = []
 
-    # 1) 블록 그리기 + thin 블록 정보 수집
+    # 1) 블록 그리기 및 라벨 정보 수집
     for block in reversed(blocks):
         h_raw = float(block["h"])
         h_norm = (h_raw / total_val) * col_height
@@ -111,9 +96,9 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.2):
 
         text_str = str(block["text"])
         if text_str.endswith("1)"):
-            facecolor = "#d4edda"
+            facecolor = "#3b82f6"  # 파란색 (Correct)
         elif text_str.endswith("0)"):
-            facecolor = "#f8d7da"
+            facecolor = "#ef4444"  # 빨간색 (Incorrect)
         else:
             facecolor = "#e2e3e5"
 
@@ -121,42 +106,41 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.2):
             (x_pos, y_curr),
             width,
             h_norm,
-            linewidth=1.2,
-            edgecolor="#555555",
+            linewidth=1.5,
+            edgecolor="black",
             facecolor=facecolor,
         )
         ax.add_patch(rect)
 
-        text_y = y_curr + (h_norm / 2)
-        display_text = f"{text_str}\n{pct:.1f}%"
-
-        if h_norm >= min_height_for_inside:
-            ax.text(
-                x_pos + width / 2, text_y, display_text,
-                ha="center", va="center", fontsize=9, color="#212529", fontweight="normal"
-            )
-        else:
-            thin_items.append((text_y, display_text))
+        text_y = y_curr + (h_norm / 2.0)
+        display_text = f"{text_str} ({pct:.1f}%)"
+        labels_info.append((text_y, display_text))
 
         y_curr += h_norm
 
-    # 2) thin 블록 레이블: 겹치지 않게 배치 + 가이드선
-    if thin_items:
-        x_base = x_pos + width + 0.08
-        placements = _place_labels_no_overlap(thin_items, x_base, label_height=0.26, col_step=1.05)
-        for x_label, y_center, display_text in placements:
-            # 가이드선: 블록 오른쪽 끝 -> 레이블
+    # 2) 라벨들이 겹치지 않게 Y 좌표 조정 및 라벨/가이드선 그리기
+    if labels_info:
+        label_height = 0.35  # 글자 간 최소 Y 간격
+        labels_info = sorted(labels_info, key=lambda t: t[0])
+        target_ys = [info[0] for info in labels_info]
+        actual_ys = _resolve_overlap(target_ys, label_height)
+
+        for (target_y, text), actual_y in zip(labels_info, actual_ys):
+            label_x = x_pos + width + 0.15
+            
+            # 블록 오른쪽에서 라벨로 이어지는 가이드선
             ax.plot(
-                [x_pos + width, x_label - 0.05],
-                [y_center, y_center],
-                color="#888888",
-                linewidth=0.8,
-                linestyle="-",
+                [x_pos + width, label_x - 0.05],
+                [target_y, actual_y],
+                color="black",
+                linewidth=1.0,
                 zorder=0,
             )
+            
+            # 라벨 텍스트
             ax.text(
-                x_label, y_center, display_text,
-                ha="left", va="center", fontsize=8, color="#212529", fontweight="normal"
+                label_x, actual_y, text,
+                ha="left", va="center", fontsize=10, color="black", fontweight="bold"
             )
 
 
@@ -467,7 +451,7 @@ def _compute_transition_counts(
 
 def main():
     ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("--out", type=str, default="state_transition_diagram.png", help="Output PNG path (default saved into results_dir when eval args provided)")
+    ap.add_argument("--out", type=str, default="state_transition_diagram.png", help="Output PNG path")
     ap.add_argument("--dpi", type=int, default=300)
     ap.add_argument("--width", type=float, default=8.0)
     ap.add_argument("--height", type=float, default=10.0)
@@ -483,32 +467,27 @@ def main():
     ap.add_argument("--option_id_set", type=str, default=None)
     ap.add_argument("--n_runs", type=int, default=1)
     ap.add_argument("--force", action="store_true")
-    ap.add_argument("--th1_percent", type=float, default=30.0, help="th1 percentile for Online Sqrt All (default: 30)")
-    ap.add_argument("--pride_prefix_ratio", type=float, default=0.02, help="PRIDE prefix ratio (default: 0.02)")
-    ap.add_argument("--pride_seed", type=int, default=0, help="PRIDE seed offset (default: 0)")
+    ap.add_argument("--th1_percent", type=float, default=30.0, help="th1 percentile for Online Sqrt All")
+    ap.add_argument("--pride_prefix_ratio", type=float, default=0.02, help="PRIDE prefix ratio")
+    ap.add_argument("--pride_seed", type=int, default=0, help="PRIDE seed offset")
 
     args, unknown = ap.parse_known_args()
-
     _set_font()
 
     results_dir = None
     if str(args.pretrained_model_path).strip() and args.eval_names:
+        # 기존 로직 유지 (데이터 로드 등)
         eval_clm_path = str(args.eval_clm_path).strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_clm.py")
         if not os.path.exists(eval_clm_path):
             raise SystemExit(f"eval_clm.py not found: {eval_clm_path}")
         code_dir = os.path.dirname(os.path.abspath(eval_clm_path))
-
         eval_name = str(args.eval_names[0])
         results_dir = _compute_results_dir(code_dir, eval_name, str(args.pretrained_model_path), args.option_id_set)
 
         try:
             _ = _compute_transition_counts(
-                results_dir,
-                int(args.n_runs),
-                args.option_id_set,
-                float(args.pride_prefix_ratio),
-                int(args.pride_seed),
-                float(args.th1_percent),
+                results_dir, int(args.n_runs), args.option_id_set,
+                float(args.pride_prefix_ratio), int(args.pride_seed), float(args.th1_percent),
             )
             cache_ok = True
         except Exception:
@@ -518,33 +497,19 @@ def main():
             cmd = [sys.executable, os.path.abspath(eval_clm_path)]
             cmd += ["--pretrained_model_path", str(args.pretrained_model_path)]
             cmd += ["--eval_names", eval_name]
-            if args.option_id_set:
-                cmd += ["--option_id_set", str(args.option_id_set)]
-            if int(args.n_runs) != 1:
-                cmd += ["--n_runs", str(int(args.n_runs))]
-            if bool(args.force):
-                cmd += ["--force"]
-            if bool(args.wandb):
-                cmd += ["--wandb"]
-            if args.wandb_project:
-                cmd += ["--wandb_project", str(args.wandb_project)]
-            if args.wandb_entity:
-                cmd += ["--wandb_entity", str(args.wandb_entity)]
-            if args.wandb_run_name:
-                cmd += ["--wandb_run_name", str(args.wandb_run_name)]
+            if args.option_id_set: cmd += ["--option_id_set", str(args.option_id_set)]
+            if int(args.n_runs) != 1: cmd += ["--n_runs", str(int(args.n_runs))]
+            if bool(args.force): cmd += ["--force"]
+            if bool(args.wandb): cmd += ["--wandb"]
+            if args.wandb_project: cmd += ["--wandb_project", str(args.wandb_project)]
+            if args.wandb_entity: cmd += ["--wandb_entity", str(args.wandb_entity)]
+            if args.wandb_run_name: cmd += ["--wandb_run_name", str(args.wandb_run_name)]
             cmd += list(unknown)
-            print("==== Running eval_clm.py ====")
-            print("cwd:", code_dir)
-            print("cmd:", " ".join(cmd))
             subprocess.run(cmd, cwd=code_dir, check=True)
 
         k, counts_init, counts_flip, counts_cyc, avg_cost = _compute_transition_counts(
-            results_dir,
-            int(args.n_runs),
-            args.option_id_set,
-            float(args.pride_prefix_ratio),
-            int(args.pride_seed),
-            float(args.th1_percent),
+            results_dir, int(args.n_runs), args.option_id_set,
+            float(args.pride_prefix_ratio), int(args.pride_seed), float(args.th1_percent),
         )
     else:
         k = 4
@@ -558,7 +523,8 @@ def main():
     ax.set_ylim(0, 10)
     ax.axis("off")
 
-    col_width = 1.2
+    col_width = 1.0  # 컬럼 폭을 약간 줄여서 우측 라벨 공간 확보
+    
     col1_data = [
         {"h": float(counts_init.get((0,), 0)), "text": "(0)"},
         {"h": float(counts_init.get((1,), 0)), "text": "(1)"},
@@ -570,41 +536,39 @@ def main():
         {"h": float(counts_flip.get((1, 1), 0)), "text": "(1, 1)"},
     ]
     col3_data = [{"h": float(counts_cyc.get(t, 0)), "text": str(t)} for t in [
-        (0, 0, 0),
-        (0, 0, 1),
-        (0, 1, 0),
-        (0, 1, 1),
-        (1, 0, 0),
-        (1, 0, 1),
-        (1, 1, 0),
-        (1, 1, 1),
+        (0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1),
+        (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1),
     ]]
 
-    draw_state_column(ax, 0.3, "Initial\n(Default)", col1_data, width=col_width)
-    draw_state_column(ax, 2.5, "Only Flip", col2_data, width=col_width)
+    # 간격을 시원하게 배치합니다.
+    draw_state_column(ax, 0.5, "Initial\n(Default)", col1_data, width=col_width)
+    draw_state_column(ax, 2.8, "Only Flip", col2_data, width=col_width)
+    
     if np.isfinite(avg_cost):
-        draw_state_column(ax, 4.7, f"Ours+PRIDE\nOnline Sqrt (Cost={avg_cost:.2f})", col3_data, width=col_width)
+        draw_state_column(ax, 5.1, f"Ours+PRIDE\nOnline Sqrt\n(Cost={avg_cost:.2f})", col3_data, width=col_width)
     else:
-        draw_state_column(ax, 4.7, "Ours+PRIDE\nOnline Sqrt", col3_data, width=col_width)
+        draw_state_column(ax, 5.1, "Ours+PRIDE\nOnline Sqrt", col3_data, width=col_width)
 
-    # 범례: 네모 칸 안에, 바 옆에 플롯 형태로 (색상 패치 + 텍스트)
-    leg_x, leg_y = 7.2, 4.5
-    leg_w, leg_h = 1.5, 1.4
+    # 범례: 네모 칸 안에, 바 옆에 플롯 형태로 직관적 배치
+    leg_x, leg_y = 7.4, 4.5
+    leg_w, leg_h = 1.4, 1.2
     leg_box = patches.Rectangle(
         (leg_x, leg_y),
         leg_w,
         leg_h,
-        linewidth=1.2,
-        edgecolor="#555555",
+        linewidth=1.5,
+        edgecolor="black",
         facecolor="white",
     )
     ax.add_patch(leg_box)
-    # 0 = incorrect (빨간색 패치)
-    ax.add_patch(patches.Rectangle((leg_x + 0.08, leg_y + leg_h - 0.45), 0.2, 0.2, facecolor="#f8d7da", edgecolor="#555555", linewidth=0.8))
-    ax.text(leg_x + 0.35, leg_y + leg_h - 0.35, "0 = incorrect", ha="left", va="center", fontsize=9, color="#212529", fontweight="normal")
-    # 1 = correct (초록색 패치)
-    ax.add_patch(patches.Rectangle((leg_x + 0.08, leg_y + leg_h - 0.95), 0.2, 0.2, facecolor="#d4edda", edgecolor="#555555", linewidth=0.8))
-    ax.text(leg_x + 0.35, leg_y + leg_h - 0.85, "1 = correct", ha="left", va="center", fontsize=9, color="#212529", fontweight="normal")
+    
+    # 0 = incorrect (Red)
+    ax.add_patch(patches.Rectangle((leg_x + 0.1, leg_y + leg_h - 0.45), 0.25, 0.25, facecolor="#ef4444", edgecolor="black", linewidth=1.5))
+    ax.text(leg_x + 0.45, leg_y + leg_h - 0.32, "0: Incorrect", ha="left", va="center", fontsize=11, fontweight="bold")
+    
+    # 1 = correct (Blue)
+    ax.add_patch(patches.Rectangle((leg_x + 0.1, leg_y + leg_h - 0.95), 0.25, 0.25, facecolor="#3b82f6", edgecolor="black", linewidth=1.5))
+    ax.text(leg_x + 0.45, leg_y + leg_h - 0.82, "1: Correct", ha="left", va="center", fontsize=11, fontweight="bold")
 
     plt.tight_layout()
 
@@ -616,27 +580,6 @@ def main():
     if results_dir:
         print(f"results_dir: {results_dir}")
     print(f"Saved: {out_path}")
-
-    if bool(getattr(args, "wandb", False)):
-        wandb = _try_import_wandb()
-        if wandb is None:
-            print("[warn] wandb not available; skipping upload.")
-            return
-        run = wandb.init(
-            project=getattr(args, "wandb_project", None) or None,
-            entity=getattr(args, "wandb_entity", None) or None,
-            name=getattr(args, "wandb_run_name", None) or None,
-            job_type="state_transition_diagram",
-            reinit=True,
-        )
-        try:
-            wandb.log({"diagram/state_transition": wandb.Image(out_path)})
-        except Exception as e:
-            print(f"[warn] failed to upload diagram image: {e}")
-        try:
-            run.finish()
-        except Exception:
-            pass
 
 if __name__ == "__main__":
     main()
