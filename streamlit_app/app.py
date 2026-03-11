@@ -589,7 +589,7 @@ curve_keys = st.multiselect(
 
 st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
 cyclic_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-pride_ours_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+pride_ours_options = [0.5, 1.0, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
 with col_p1:
     max_pct_cyclic = st.selectbox(
