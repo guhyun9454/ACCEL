@@ -64,21 +64,24 @@ def _resolve_overlap(ys, min_dist):
 
 def draw_state_column(ax, x_pos, title, blocks, width=1.5):
     """
-    막대 그래프 컬럼을 그립니다.
-    파란색(Correct, 1)이 아래쪽으로, 빨간색(Incorrect, 0)이 위쪽으로 가도록 정렬합니다.
-    Y축을 60%부터 시작하도록 자르고(Zoom-in), 상단 부분을 확대해서 표시합니다.
+    막대 그래프 컬럼을 그립니다. 
+    Y축을 60%부터 시작하게 확대(Zoom-in)하여 상단의 미세한 차이를 강조합니다.
     """
     # 0% 블록 제외
     blocks = [b for b in blocks if float(b.get("h", 0)) > 0]
     if not blocks:
         return
 
-    # 파란색(1로 끝남)이 아래로, 빨간색(0으로 끝남)이 위로 가도록 정렬
-    # (주의: 그릴 때는 아래(y_base)에서 위로 쌓아가므로 리스트의 앞쪽이 막대 아래에 그려짐)
-    blocks_correct = [b for b in blocks if str(b["text"]).endswith("1)")]
-    blocks_incorrect = [b for b in blocks if str(b["text"]).endswith("0)")]
+    # ============================================================
+    # 정렬 로직 완벽 수정:
+    # 1. 1로 끝나는 파란색 그룹을 먼저(아래에) 그립니다. 
+    #    (1, 1, 1)이 가장 먼저 그려지도록 텍스트 역순 정렬을 합니다.
+    # 2. 0으로 끝나는 빨간색 그룹을 나중에(위에) 그립니다.
+    #    (0, 0, 0)이 가장 마지막(제일 위)에 그려지도록 역시 텍스트 역순 정렬을 합니다.
+    # ============================================================
+    blocks_correct = sorted([b for b in blocks if str(b["text"]).endswith("1)")], key=lambda x: str(x["text"]), reverse=True)
+    blocks_incorrect = sorted([b for b in blocks if str(b["text"]).endswith("0)")], key=lambda x: str(x["text"]), reverse=True)
     
-    # 두 리스트를 합침 (Correct 먼저 -> Incorrect 나중)
     sorted_blocks = blocks_correct + blocks_incorrect
 
     total_val = sum([float(b["h"]) for b in sorted_blocks])
@@ -113,7 +116,7 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.5):
 
     current_bottom_pct = 0.0
 
-    # 1) 정렬된 블록 그리기 및 라벨 정보 수집 (아래에서 위로)
+    # 1) 정렬된 블록 그리기 및 라벨 정보 수집
     for block in sorted_blocks:
         h_raw = float(block["h"])
         pct = (h_raw / total_val) * 100.0
@@ -493,7 +496,6 @@ def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--out", type=str, default="state_transition_diagram.png", help="Output PNG path")
     ap.add_argument("--dpi", type=int, default=300)
-    # 가로축 공간을 더 확보하여 겹침을 방지합니다.
     ap.add_argument("--width", type=float, default=12.0) 
     ap.add_argument("--height", type=float, default=10.0)
     ap.add_argument("--wandb", action="store_true", help="Upload PNG to W&B using wandb.Image.")
@@ -586,19 +588,19 @@ def main():
     draw_state_column(ax, 0.5, "Initial\n(Default)", col1_data, width=col_width)
     draw_state_column(ax, 3.5, "Only Flip", col2_data, width=col_width)
     
-    # 세 번째 컬럼 타이틀: Ours + Cost로만 깔끔하게 출력
+    # 세 번째 컬럼 타이틀
     if np.isfinite(avg_cost):
         draw_state_column(ax, 6.5, f"Ours\n(Cost={avg_cost:.2f})", col3_data, width=col_width)
     else:
         draw_state_column(ax, 6.5, "Ours", col3_data, width=col_width)
 
     # =========================================================
-    # 범례 박스 설정 (우측으로 멀리 이동 & 내부 가운데 정렬 완벽 적용)
+    # 범례 박스 설정
     # =========================================================
-    leg_x = 10.5  # 텍스트와 겹치지 않게 우측으로 확 뺐습니다.
+    leg_x = 10.5
     leg_y = 4.0
-    leg_w = 2.4   # 박스 너비 여유롭게 확장
-    leg_h = 1.6   # 박스 높이 여유롭게 확장
+    leg_w = 2.4
+    leg_h = 1.6
     
     # 겉 테두리 박스
     leg_box = patches.Rectangle(
@@ -607,15 +609,15 @@ def main():
     )
     ax.add_patch(leg_box)
     
-    # 박스 내 수직 가운데 정렬을 위해 영역을 상/하로 나누어 중앙점 계산
-    item0_center_y = leg_y + (leg_h * 0.70)  # 위쪽 아이템 중앙
-    item1_center_y = leg_y + (leg_h * 0.30)  # 아래쪽 아이템 중앙
+    # 범례 텍스트 가운데 정렬
+    item0_center_y = leg_y + (leg_h * 0.70)
+    item1_center_y = leg_y + (leg_h * 0.30)
 
-    # 0 = Incorrect (Pastel Pink)
+    # 0 = Incorrect
     ax.add_patch(patches.Rectangle((leg_x + 0.35, item0_center_y - 0.15), 0.3, 0.3, facecolor="#ffb3ba", edgecolor="#555555", linewidth=1.2))
     ax.text(leg_x + 0.8, item0_center_y, "0: Incorrect", ha="left", va="center", fontsize=11, fontweight="normal", color="black")
     
-    # 1 = Correct (Pastel Blue)
+    # 1 = Correct
     ax.add_patch(patches.Rectangle((leg_x + 0.35, item1_center_y - 0.15), 0.3, 0.3, facecolor="#bae1ff", edgecolor="#555555", linewidth=1.2))
     ax.text(leg_x + 0.8, item1_center_y, "1: Correct", ha="left", va="center", fontsize=11, fontweight="normal", color="black")
 
