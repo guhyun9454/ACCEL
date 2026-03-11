@@ -11,7 +11,6 @@ from typing import Optional
 
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
-
 import numpy as np
 import zlib
 
@@ -45,18 +44,18 @@ def _set_font():
         pass
 
 
-def draw_state_column(ax, x_pos, title, blocks):
+def draw_state_column(ax, x_pos, title, blocks, width=1.8):
     """
-    Draw one column of stacked blocks at x_pos.
+    Draw one column of stacked blocks at x_pos, including percentages and colors.
     """
-    # 컬럼 제목
+    # 컬럼 제목 (가운데 정렬)
     ax.text(
-        x_pos + 0.4,
-        8.5,
+        x_pos + width / 2,
+        8.8,
         title,
         ha="center",
         va="bottom",
-        fontsize=14,
+        fontsize=12,
         fontweight="bold",
     )
 
@@ -65,20 +64,42 @@ def draw_state_column(ax, x_pos, title, blocks):
 
     # 바닥에서부터 위로 쌓기 위해 역순으로 그림
     for block in reversed(blocks):
-        h_norm = (float(block["h"]) / total_val) * 6.0
+        h_raw = float(block["h"])
+        if h_raw <= 0:
+            continue
+            
+        h_norm = (h_raw / total_val) * 6.0
+        pct = (h_raw / total_val) * 100
+        
+        # 텍스트의 마지막 숫자가 1이면 초록색(정답), 0이면 빨간색(오답)으로 예쁘게 칠하기
+        text_str = str(block["text"])
+        if text_str.endswith("1)"):
+            facecolor = "#d4edda"  # 연한 초록색
+        elif text_str.endswith("0)"):
+            facecolor = "#f8d7da"  # 연한 빨간색
+        else:
+            facecolor = "#e2e3e5"  # 기본 회색
 
+        # 박스 그리기
         rect = patches.Rectangle(
             (x_pos, y_curr),
-            0.8,
+            width,
             h_norm,
-            linewidth=2,
-            edgecolor="black",
-            facecolor="none",
+            linewidth=1.2,
+            edgecolor="#555555",
+            facecolor=facecolor,
         )
         ax.add_patch(rect)
 
+        # 박스 내부에 텍스트와 퍼센테이지 중앙 정렬
         text_y = y_curr + (h_norm / 2)
-        ax.text(x_pos + 1.0, text_y, str(block["text"]), va="center", fontsize=12)
+        display_text = f"{text_str}\n{pct:.1f}%"
+        
+        # 박스 높이가 너무 낮으면 텍스트 크기를 조절하여 겹치지 않게 처리
+        if h_norm > 0.4:
+            ax.text(x_pos + width / 2, text_y, display_text, ha="center", va="center", fontsize=10, color="#212529")
+        elif h_norm > 0.2:
+            ax.text(x_pos + width / 2, text_y, display_text, ha="center", va="center", fontsize=8, color="#212529")
 
         y_curr += h_norm
 
@@ -88,12 +109,6 @@ def _rotations(k: int):
 
 
 def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
-    """
-    probs_seq: list/array of length = (#permutations used)
-      each element: length k (letter-space probs)
-    permuted_indices: list of permutations p where p[j] is content-index at letter position j.
-    Returns: agg (k,) content-space aggregated probs (mean over permutations)
-    """
     agg = np.zeros(k, dtype=np.float64)
     for perm_idx, p in enumerate(permuted_indices):
         letter_probs = np.asarray(probs_seq[perm_idx], dtype=np.float64)
@@ -105,7 +120,6 @@ def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
 
 
 def _probe_shift_put_top2_into_top1_slot(base_probs, k: int):
-    """shift s = (t2 - t1) mod k, with s!=0 when possible."""
     bp = np.asarray(base_probs, dtype=np.float64)
     sidx = np.argsort(bp)[::-1]
     t1 = int(sidx[0])
@@ -123,7 +137,6 @@ def _infer_perm_list(k: int, perm_count: int):
         return list(sorted(permutations(range(k)))), True
     if perm_count == k:
         return _rotations(k), False
-    # unknown: prefix of full
     full = list(sorted(permutations(range(k))))
     if perm_count <= len(full):
         return full[:perm_count], False
@@ -171,10 +184,6 @@ def _pride_correct_row(row: np.ndarray, prior: np.ndarray, eps: float = 1e-12) -
 
 
 def _estimate_pride_prior_random_prefix_mean(per_sample_probs, cyclic_indices, k: int, prefix_ratio: float, seed: int, eps: float = 1e-12):
-    """
-    Mirror eval_clm.py: estimate a global prior from a random prefix subset, using debias_utils.simple on cyclic observations.
-    Returns (prior, meta{prefix_ids}).
-    """
     N = len(per_sample_probs)
     if N <= 0 or debias_simple is None:
         prior = np.ones((k,), dtype=np.float64) / float(k)
@@ -187,8 +196,8 @@ def _estimate_pride_prior_random_prefix_mean(per_sample_probs, cyclic_indices, k
     priors = []
     used = 0
     for i in prefix_ids:
-        ps = np.asarray(per_sample_probs[i], dtype=np.float64)  # (P,k)
-        observed = np.asarray([ps[j] for j in cyclic_indices], dtype=np.float64)  # (k,k) if cyclic_indices are rotations
+        ps = np.asarray(per_sample_probs[i], dtype=np.float64)
+        observed = np.asarray([ps[j] for j in cyclic_indices], dtype=np.float64)
         try:
             _, _, prior_i = debias_simple(observed)
         except Exception:
@@ -217,9 +226,6 @@ def _run_online_sqrt_policy_with_preds(
     th1_percent: float,
     forced_cyclic_ids: Optional[set] = None,
 ):
-    """
-    Copy of eval_clm.py logic (pred-returning). Returns (avg_cost, acc, preds_idx).
-    """
     N = len(labels_idx)
     if N == 0:
         return float("nan"), float("nan"), []
@@ -267,24 +273,14 @@ def _compute_transition_counts(
     pride_seed: int,
     th1_percent: float,
 ):
-    """
-    Compute counts for:
-      - Initial: (base)
-      - OnlyFlip: (base, probe2)
-      - Cyclic: (base, probe2, cyclic)
-    Aggregated over all subject files in results_dir.
-    """
-    # Pick one run by default to avoid mixing run distributions
     run_suffix = "_run0" if int(n_runs) > 1 else ""
     pattern = os.path.join(results_dir, f"*{run_suffix}.jsonl")
     files = [p for p in sorted(glob.glob(pattern)) if p.endswith(".jsonl") and not p.endswith("_curve.jsonl") and not p.endswith("_pride_curve.jsonl")]
     if not files:
-        # fallback: any jsonl
         files = [p for p in sorted(glob.glob(os.path.join(results_dir, "*.jsonl"))) if p.endswith(".jsonl") and not p.endswith("_curve.jsonl") and not p.endswith("_pride_curve.jsonl")]
     if not files:
         raise FileNotFoundError(f"No result jsonl files found under: {results_dir}")
 
-    # Determine k from the first file
     first = _read_results_jsonl(files[0])
     if not first:
         raise ValueError(f"Empty results: {files[0]}")
@@ -293,7 +289,6 @@ def _compute_transition_counts(
         raise ValueError("Cannot infer k from results.")
     option_ids = list(option_id_set) if option_id_set else (list("ABCDE"[:k]) if k in (4, 5) else [str(i) for i in range(k)])
 
-    # Default: Ours+PRIDE online_sqrt_all transitions (base, probe2, ours).
     counts_init = {(0,): 0, (1,): 0}
     counts_flip = {(0, 0): 0, (0, 1): 0, (1, 0): 0, (1, 1): 0}
     counts_third = {t: 0 for t in [(a, b, c) for a in (0, 1) for b in (0, 1) for c in (0, 1)]}
@@ -312,12 +307,10 @@ def _compute_transition_counts(
         identity = tuple(range(k))
         identity_idx = perm_list.index(identity) if identity in perm_list else 0
 
-        # cyclic indices within perm_list
         cyc_perms = _rotations(k)
         cyc_idxs = [perm_list.index(p) for p in cyc_perms if p in perm_list]
         cyc_perm_list = [perm_list[i] for i in cyc_idxs]
 
-        # Build per-sample probs array for PRIDE prior estimation
         per_sample_probs = []
         ideals = []
         for d in rows:
@@ -333,11 +326,9 @@ def _compute_transition_counts(
         if not per_sample_probs:
             continue
 
-        # PRIDE prior from random prefix (default 2%)
         subj = os.path.basename(fp)
         if subj.endswith(".jsonl"):
             subj = subj[:-5]
-        # Align with eval_clm.py: stable seed by subject + pride_seed
         seed = _stable_u32_seed(str(subj), int(pride_seed))
         prior, meta = _estimate_pride_prior_random_prefix_mean(
             per_sample_probs=per_sample_probs,
@@ -348,7 +339,6 @@ def _compute_transition_counts(
         )
         prefix_ids_set = set(int(x) for x in (meta.get("prefix_ids") or []))
 
-        # Build corrected arrays + online_sqrt preds
         base_pred_idx_list = []
         cyclic_pred_idx_list = []
         probe2_pred_idx_list = []
@@ -368,7 +358,6 @@ def _compute_transition_counts(
             base_corr = 1 if option_ids[base_pred_idx] == ideal else 0
             base_corrs.append(base_corr)
 
-            # cyclic ensemble (all rotations)
             if cyc_idxs:
                 probs_c = [ps_corr[j].tolist() for j in cyc_idxs]
                 perms_c = [perm_list[j] for j in cyc_idxs]
@@ -378,7 +367,6 @@ def _compute_transition_counts(
                 cyc_pred_idx = base_pred_idx
             cyclic_pred_idx_list.append(cyc_pred_idx)
 
-            # gaps from corrected base / probe mean
             vals = np.sort(base_row_corr)[::-1]
             default_conf.append((float(vals[0]) if len(vals) > 0 else 0.0) - (float(vals[1]) if len(vals) > 1 else 0.0))
             shift = _probe_shift_put_top2_into_top1_slot(base_row_corr, k)
@@ -397,7 +385,6 @@ def _compute_transition_counts(
 
             labels_idx.append(option_ids.index(ideal))
 
-        # Online Sqrt All policy preds (th1 fixed at 30 by default)
         avg_cost, _, preds_ours = _run_online_sqrt_policy_with_preds(
             default_conf=np.asarray(default_conf, dtype=np.float64),
             mean_conf=np.asarray(mean_conf, dtype=np.float64),
@@ -428,13 +415,11 @@ def main():
     ap.add_argument("--dpi", type=int, default=300)
     ap.add_argument("--width", type=float, default=14.0)
     ap.add_argument("--height", type=float, default=6.0)
-    # Optional W&B upload (keep flags aligned with other scripts)
     ap.add_argument("--wandb", action="store_true", help="Upload PNG to W&B using wandb.Image.")
     ap.add_argument("--wandb_project", type=str, default=None)
     ap.add_argument("--wandb_entity", type=str, default="capde")
     ap.add_argument("--wandb_run_name", type=str, default=None)
 
-    # Optional: eval+plot wrapper (similar to analyze_perm_noise.py)
     ap.add_argument("--eval_clm_path", type=str, default="", help="Path to eval_clm.py (to run if cache missing).")
     ap.add_argument("--skip_eval", action="store_true", help="Do not run eval_clm even if cache missing.")
     ap.add_argument("--pretrained_model_path", type=str, default="", help="HF model id/path (required for eval+plot).")
@@ -450,7 +435,6 @@ def main():
 
     _set_font()
 
-    # If eval args are provided, ensure cache exists (run eval_clm if needed) and compute heights from data.
     results_dir = None
     if str(args.pretrained_model_path).strip() and args.eval_names:
         eval_clm_path = str(args.eval_clm_path).strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_clm.py")
@@ -458,11 +442,9 @@ def main():
             raise SystemExit(f"eval_clm.py not found: {eval_clm_path}")
         code_dir = os.path.dirname(os.path.abspath(eval_clm_path))
 
-        # Only use first eval_name for this diagram
         eval_name = str(args.eval_names[0])
         results_dir = _compute_results_dir(code_dir, eval_name, str(args.pretrained_model_path), args.option_id_set)
 
-        # Check cache exists; if not, run eval_clm
         try:
             _ = _compute_transition_counts(
                 results_dir,
@@ -500,7 +482,6 @@ def main():
             print("cmd:", " ".join(cmd))
             subprocess.run(cmd, cwd=code_dir, check=True)
 
-        # Now compute transition counts
         k, counts_init, counts_flip, counts_cyc, avg_cost = _compute_transition_counts(
             results_dir,
             int(args.n_runs),
@@ -510,7 +491,6 @@ def main():
             float(args.th1_percent),
         )
     else:
-        # Fallback: static example heights
         k = 4
         counts_init = {(0,): 1, (1,): 1}
         counts_flip = {(0, 0): 2, (0, 1): 1, (1, 0): 1, (1, 1): 2}
@@ -518,11 +498,10 @@ def main():
         avg_cost = float("nan")
 
     fig, ax = plt.subplots(figsize=(float(args.width), float(args.height)))
-    ax.set_xlim(0, 12)
+    ax.set_xlim(0, 10)  # 간격을 조금 좁혀 표 형태로 밀도있게 조정
     ax.set_ylim(0, 10)
     ax.axis("off")
 
-    # Build plot blocks from counts (bottom->top order handled by draw_state_column)
     col1_data = [
         {"h": float(counts_init.get((0,), 0)), "text": "(0)"},
         {"h": float(counts_init.get((1,), 0)), "text": "(1)"},
@@ -544,27 +523,28 @@ def main():
         (1, 1, 1),
     ]]
 
-    draw_state_column(ax, 0.5, "Initial\n(Default)", col1_data)
-    draw_state_column(ax, 3.5, "Only\nFlip (Cost=2)", col2_data)
+    # 그려질 X 좌표와 너비를 지정하여 깔끔하게 정렬
+    draw_state_column(ax, 1.0, "Initial\n(Default)", col1_data, width=1.8)
+    draw_state_column(ax, 4.0, "Only Flip", col2_data, width=1.8)  # Cost 문구 제거
     if np.isfinite(avg_cost):
-        draw_state_column(ax, 7.5, f"Ours+PRIDE\nOnline Sqrt (avg cost={avg_cost:.2f})", col3_data)
+        draw_state_column(ax, 7.0, f"Ours+PRIDE\nOnline Sqrt (Cost={avg_cost:.2f})", col3_data, width=1.8)
     else:
-        draw_state_column(ax, 7.5, "Ours+PRIDE\nOnline Sqrt", col3_data)
+        draw_state_column(ax, 7.0, "Ours+PRIDE\nOnline Sqrt", col3_data, width=1.8)
 
-    # Legend / note
+    # 범례 텍스트 위치 조정
     ax.text(
-        9.2,
-        1.1,
-        "0 = incorrect\n1 = correct",
-        ha="left",
-        va="bottom",
-        fontsize=12,
+        8.8,
+        1.0,
+        "0 = incorrect (Red)\n1 = correct (Green)",
+        ha="center",
+        va="top",
+        fontsize=10,
+        color="#555555"
     )
 
     plt.tight_layout()
 
     out_path = str(args.out)
-    # When eval args are provided, always save relative outputs under results_dir.
     if results_dir and (not os.path.isabs(out_path)):
         out_path = os.path.join(results_dir, out_path)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -593,7 +573,6 @@ def main():
             run.finish()
         except Exception:
             pass
-
 
 if __name__ == "__main__":
     main()
