@@ -64,8 +64,8 @@ def _resolve_overlap(ys, min_dist):
 
 def draw_state_column(ax, x_pos, title, blocks, width=1.5):
     """
-    막대 그래프 컬럼을 그립니다. 
-    Y축을 60%부터 시작하게 확대(Zoom-in)하여 상단의 미세한 차이를 강조합니다.
+    막대 그래프 컬럼을 그립니다.
+    Y축을 60%부터 시작하도록 자르고(Zoom-in), 상단 부분을 확대해서 표시합니다.
     """
     # 0% 블록 제외
     blocks = [b for b in blocks if float(b.get("h", 0)) > 0]
@@ -96,15 +96,25 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.5):
 
     # 각 상태별 패턴 매핑: 0, 1 만 있는 순수 상태는 패턴 제거("")
     hatch_dict = {
-        "(0)": "", "(1)": "",
-        "(0, 0)": "", "(0, 1)": "...", "(1, 0)": "...", "(1, 1)": "",
-        "(0, 0, 0)": "", "(0, 0, 1)": "...", "(0, 1, 0)": "|||", "(0, 1, 1)": "\\\\\\",
-        "(1, 0, 0)": "\\\\\\", "(1, 0, 1)": "|||", "(1, 1, 0)": "...", "(1, 1, 1)": ""
+        "(0)": "",
+        "(1)": "",
+        "(0, 0)": "",
+        "(0, 1)": "...",
+        "(1, 0)": "...",
+        "(1, 1)": "",
+        "(0, 0, 0)": "",
+        "(0, 0, 1)": "...",
+        "(0, 1, 0)": "|||",
+        "(0, 1, 1)": "\\\\\\",
+        "(1, 0, 0)": "\\\\\\",
+        "(1, 0, 1)": "|||",
+        "(1, 1, 0)": "...",
+        "(1, 1, 1)": ""
     }
 
     current_bottom_pct = 0.0
 
-    # 1) 블록 그리기 및 라벨 정보 수집
+    # 1) 블록 그리기 및 라벨 정보 수집 (아래에서 위로)
     for block in reversed(blocks):
         h_raw = float(block["h"])
         pct = (h_raw / total_val) * 100.0
@@ -148,9 +158,6 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.5):
             labels_info.append((text_y, display_text))
 
         current_bottom_pct = block_top_pct
-
-    # 절취선 기준 텍스트 (60%) 표시
-    ax.text(x_pos - 0.05, y_base, "60% -", ha="right", va="center", fontsize=10, color="#555555", fontweight="bold")
 
     # 2) 라벨들이 겹치지 않게 Y 좌표 조정 및 라벨/가이드선 그리기
     if labels_info:
