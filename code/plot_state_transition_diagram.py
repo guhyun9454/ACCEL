@@ -44,41 +44,45 @@ def _set_font():
         pass
 
 
-def draw_state_column(ax, x_pos, title, blocks, width=1.8):
+def draw_state_column(ax, x_pos, title, blocks, width=1.2):
     """
     Draw one column of stacked blocks at x_pos, including percentages and colors.
+    Skips 0% blocks. Puts text to the right when block is too narrow to avoid overlap.
     """
-    # 컬럼 제목 (가운데 정렬)
+    # 0% 블록 제외
+    blocks = [b for b in blocks if float(b.get("h", 0)) > 0]
+    if not blocks:
+        return
+
+    total_val = sum([float(b["h"]) for b in blocks])
+    col_height = 6.0
+    y_curr = 2.0
+
+    # 컬럼 제목 (regular font)
     ax.text(
         x_pos + width / 2,
         8.8,
         title,
         ha="center",
         va="bottom",
-        fontsize=12,
-        fontweight="bold",
+        fontsize=11,
+        fontweight="normal",
     )
-
-    total_val = sum([float(b["h"]) for b in blocks]) if blocks else 1.0
-    y_curr = 2.0
 
     # 바닥에서부터 위로 쌓기 위해 역순으로 그림
     for block in reversed(blocks):
         h_raw = float(block["h"])
-        if h_raw <= 0:
-            continue
-            
-        h_norm = (h_raw / total_val) * 6.0
+        h_norm = (h_raw / total_val) * col_height
         pct = (h_raw / total_val) * 100
-        
-        # 텍스트의 마지막 숫자가 1이면 초록색(정답), 0이면 빨간색(오답)으로 예쁘게 칠하기
+
+        # 텍스트의 마지막 숫자가 1이면 초록색(정답), 0이면 빨간색(오답)
         text_str = str(block["text"])
         if text_str.endswith("1)"):
-            facecolor = "#d4edda"  # 연한 초록색
+            facecolor = "#d4edda"
         elif text_str.endswith("0)"):
-            facecolor = "#f8d7da"  # 연한 빨간색
+            facecolor = "#f8d7da"
         else:
-            facecolor = "#e2e3e5"  # 기본 회색
+            facecolor = "#e2e3e5"
 
         # 박스 그리기
         rect = patches.Rectangle(
@@ -91,15 +95,21 @@ def draw_state_column(ax, x_pos, title, blocks, width=1.8):
         )
         ax.add_patch(rect)
 
-        # 박스 내부에 텍스트와 퍼센테이지 중앙 정렬
         text_y = y_curr + (h_norm / 2)
         display_text = f"{text_str}\n{pct:.1f}%"
-        
-        # 박스 높이가 너무 낮으면 텍스트 크기를 조절하여 겹치지 않게 처리
-        if h_norm > 0.4:
-            ax.text(x_pos + width / 2, text_y, display_text, ha="center", va="center", fontsize=10, color="#212529")
-        elif h_norm > 0.2:
-            ax.text(x_pos + width / 2, text_y, display_text, ha="center", va="center", fontsize=8, color="#212529")
+
+        # 블록이 좁으면 텍스트를 박스 오른쪽으로 빼서 겹침 방지
+        min_height_for_inside = 0.55
+        if h_norm >= min_height_for_inside:
+            ax.text(
+                x_pos + width / 2, text_y, display_text,
+                ha="center", va="center", fontsize=9, color="#212529", fontweight="normal"
+            )
+        else:
+            ax.text(
+                x_pos + width + 0.12, text_y, display_text,
+                ha="left", va="center", fontsize=8, color="#212529", fontweight="normal"
+            )
 
         y_curr += h_norm
 
@@ -413,8 +423,8 @@ def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--out", type=str, default="state_transition_diagram.png", help="Output PNG path (default saved into results_dir when eval args provided)")
     ap.add_argument("--dpi", type=int, default=300)
-    ap.add_argument("--width", type=float, default=14.0)
-    ap.add_argument("--height", type=float, default=6.0)
+    ap.add_argument("--width", type=float, default=8.0)
+    ap.add_argument("--height", type=float, default=10.0)
     ap.add_argument("--wandb", action="store_true", help="Upload PNG to W&B using wandb.Image.")
     ap.add_argument("--wandb_project", type=str, default=None)
     ap.add_argument("--wandb_entity", type=str, default="capde")
@@ -498,10 +508,11 @@ def main():
         avg_cost = float("nan")
 
     fig, ax = plt.subplots(figsize=(float(args.width), float(args.height)))
-    ax.set_xlim(0, 10)  # 간격을 조금 좁혀 표 형태로 밀도있게 조정
+    ax.set_xlim(0, 7.5)
     ax.set_ylim(0, 10)
     ax.axis("off")
 
+    col_width = 1.2
     col1_data = [
         {"h": float(counts_init.get((0,), 0)), "text": "(0)"},
         {"h": float(counts_init.get((1,), 0)), "text": "(1)"},
@@ -523,23 +534,23 @@ def main():
         (1, 1, 1),
     ]]
 
-    # 그려질 X 좌표와 너비를 지정하여 깔끔하게 정렬
-    draw_state_column(ax, 1.0, "Initial\n(Default)", col1_data, width=1.8)
-    draw_state_column(ax, 4.0, "Only Flip", col2_data, width=1.8)  # Cost 문구 제거
+    draw_state_column(ax, 0.3, "Initial\n(Default)", col1_data, width=col_width)
+    draw_state_column(ax, 2.5, "Only Flip", col2_data, width=col_width)
     if np.isfinite(avg_cost):
-        draw_state_column(ax, 7.0, f"Ours+PRIDE\nOnline Sqrt (Cost={avg_cost:.2f})", col3_data, width=1.8)
+        draw_state_column(ax, 4.7, f"Ours+PRIDE\nOnline Sqrt (Cost={avg_cost:.2f})", col3_data, width=col_width)
     else:
-        draw_state_column(ax, 7.0, "Ours+PRIDE\nOnline Sqrt", col3_data, width=1.8)
+        draw_state_column(ax, 4.7, "Ours+PRIDE\nOnline Sqrt", col3_data, width=col_width)
 
-    # 범례 텍스트 위치 조정
+    # 범례 (regular font)
     ax.text(
-        8.8,
+        6.8,
         1.0,
         "0 = incorrect (Red)\n1 = correct (Green)",
         ha="center",
         va="top",
-        fontsize=10,
-        color="#555555"
+        fontsize=9,
+        color="#555555",
+        fontweight="normal",
     )
 
     plt.tight_layout()
