@@ -389,7 +389,7 @@ def _save_plot(reports_dict: Dict[str, dict], out_path: str, title: str):
     ax.set_ylabel("Rate", fontsize=20)
     ax.set_title(title, fontsize=20)
     ax.grid(True, linestyle="--", alpha=0.35)
-    ax.legend(loc="best", fontsize=24)
+    ax.legend(loc="best", fontsize=20)
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
