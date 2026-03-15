@@ -140,14 +140,14 @@ def _pairwise_disagree(preds: List[int]) -> float:
     return float(diff) / float(tot) if tot > 0 else 0.0
 
 
-def _load_one_file(fp: str, option_id_set: Optional[str], require_cyclic: bool = True):
+def _load_one_file(fp: str, option_id_set: Optional[str], require_cyclic: bool = True, flip_only: bool = False):
     """
     Returns dict with arrays:
       conf_gap: (N,)
       flip_any: (N,)
       pair_disagree: (N,)
-      t_to_f: (N,)  - identity correct, some rotation wrong
-      f_to_t: (N,)  - identity wrong, some rotation correct
+      t_to_f: (N,) or None if flip_only
+      f_to_t: (N,) or None if flip_only
     """
     gaps: List[float] = []
     flip_any: List[float] = []
@@ -162,9 +162,10 @@ def _load_one_file(fp: str, option_id_set: Optional[str], require_cyclic: bool =
     cyc_indices = None
 
     for d in _iter_result_rows(fp):
-        ideal = d.get("ideal", None)
-        if not isinstance(ideal, str):
-            continue
+        if not flip_only:
+            ideal = d.get("ideal", None)
+            if not isinstance(ideal, str):
+                continue
         probs = d.get("probs", None)
         if not isinstance(probs, list) or len(probs) == 0:
             continue
@@ -223,14 +224,15 @@ def _load_one_file(fp: str, option_id_set: Optional[str], require_cyclic: bool =
         if not preds_content:
             continue
 
-        if ideal not in option_ids_local:
-            continue
-        ideal_idx = int(option_ids_local.index(ideal))
-        correct_identity = int(preds_content[0]) == int(ideal_idx)
-        any_rotation_correct = any(int(preds_content[i]) == int(ideal_idx) for i in range(len(preds_content)))
-        any_rotation_wrong = any(int(preds_content[i]) != int(ideal_idx) for i in range(len(preds_content)))
-        t_to_f.append(1.0 if (correct_identity and any_rotation_wrong) else 0.0)
-        f_to_t_list.append(1.0 if ((not correct_identity) and any_rotation_correct) else 0.0)
+        if not flip_only:
+            if ideal not in option_ids_local:
+                continue
+            ideal_idx = int(option_ids_local.index(ideal))
+            correct_identity = int(preds_content[0]) == int(ideal_idx)
+            any_rotation_correct = any(int(preds_content[i]) == int(ideal_idx) for i in range(len(preds_content)))
+            any_rotation_wrong = any(int(preds_content[i]) != int(ideal_idx) for i in range(len(preds_content)))
+            t_to_f.append(1.0 if (correct_identity and any_rotation_wrong) else 0.0)
+            f_to_t_list.append(1.0 if ((not correct_identity) and any_rotation_correct) else 0.0)
 
         gaps.append(float(gap))
         flip_any.append(1.0 if len(set(preds_content)) > 1 else 0.0)
@@ -238,16 +240,21 @@ def _load_one_file(fp: str, option_id_set: Optional[str], require_cyclic: bool =
 
     if k_local is None or len(gaps) == 0:
         return None
-    return {
+    out: Dict = {
         "file": fp,
         "k": int(k_local),
         "option_ids": option_ids_local,
         "gap": np.asarray(gaps, dtype=np.float64),
         "flip_any": np.asarray(flip_any, dtype=np.float64),
         "pair_disagree": np.asarray(pair_dis, dtype=np.float64),
-        "t_to_f": np.asarray(t_to_f, dtype=np.float64),
-        "f_to_t": np.asarray(f_to_t_list, dtype=np.float64),
     }
+    if flip_only:
+        out["t_to_f"] = None
+        out["f_to_t"] = None
+    else:
+        out["t_to_f"] = np.asarray(t_to_f, dtype=np.float64)
+        out["f_to_t"] = np.asarray(f_to_t_list, dtype=np.float64)
+    return out
 
 
 def _analyze_files(
@@ -255,11 +262,12 @@ def _analyze_files(
     option_id_set: Optional[str],
     n_bins: int,
     min_bin_n: int,
+    flip_only: bool = False,
 ):
     per_file = []
     skipped = 0
     for fp in files:
-        obj = _load_one_file(fp, option_id_set=option_id_set, require_cyclic=True)
+        obj = _load_one_file(fp, option_id_set=option_id_set, require_cyclic=True, flip_only=flip_only)
         if obj is None:
             skipped += 1
             continue
@@ -278,12 +286,13 @@ def _analyze_files(
 
     bins_by_i: Dict[int, List[dict]] = {i: [] for i in range(int(n_bins))}
     n_total = 0
+    has_tf_ft = bool(per_file and per_file[0].get("t_to_f") is not None)
     for o in per_file:
         gap = o["gap"]
         flip = o["flip_any"]
         pair = o["pair_disagree"]
-        t2f = o["t_to_f"]
-        f2t = o["f_to_t"]
+        t2f = o.get("t_to_f")
+        f2t = o.get("f_to_t")
         n_total += int(gap.size)
         order = np.argsort(gap, kind="mergesort")  # low conf first
         idx_bins = _equal_count_bins(order, int(n_bins))
@@ -291,16 +300,16 @@ def _analyze_files(
             N = int(idx.size)
             if N < int(min_bin_n):
                 continue
-            bins_by_i[i].append(
-                {
-                    "n": N,
-                    "gap_mean": float(np.mean(gap[idx])),
-                    "flip": float(np.mean(flip[idx])),
-                    "pair": float(np.mean(pair[idx])),
-                    "t_to_f": float(np.mean(t2f[idx])),
-                    "f_to_t": float(np.mean(f2t[idx])),
-                }
-            )
+            row: Dict = {
+                "n": N,
+                "gap_mean": float(np.mean(gap[idx])),
+                "flip": float(np.mean(flip[idx])),
+                "pair": float(np.mean(pair[idx])),
+            }
+            if t2f is not None and f2t is not None:
+                row["t_to_f"] = float(np.mean(t2f[idx]))
+                row["f_to_t"] = float(np.mean(f2t[idx]))
+            bins_by_i[i].append(row)
 
     rows = []
     for i in range(int(n_bins)):
@@ -309,28 +318,28 @@ def _analyze_files(
             continue
         flips = np.asarray([it["flip"] for it in items], dtype=np.float64)
         pairs = np.asarray([it["pair"] for it in items], dtype=np.float64)
-        t2f = np.asarray([it["t_to_f"] for it in items], dtype=np.float64)
-        f2t = np.asarray([it["f_to_t"] for it in items], dtype=np.float64)
         gaps = np.asarray([it["gap_mean"] for it in items], dtype=np.float64)
         Ns = np.asarray([it["n"] for it in items], dtype=np.float64)
-        rows.append(
-            {
-                "bin": int(i),
-                "pct_hi": int((i + 1) * (100 / int(n_bins))),
-                "n_files": int(len(items)),
-                "n_mean": float(np.mean(Ns)),
-                "gap_mean": float(np.mean(gaps)),
-                "gap_std": float(np.std(gaps)) if len(gaps) > 1 else 0.0,
-                "flip_mean": float(np.mean(flips)),
-                "flip_std": float(np.std(flips)) if len(flips) > 1 else 0.0,
-                "pair_mean": float(np.mean(pairs)),
-                "pair_std": float(np.std(pairs)) if len(pairs) > 1 else 0.0,
-                "t_to_f_mean": float(np.mean(t2f)),
-                "t_to_f_std": float(np.std(t2f)) if len(t2f) > 1 else 0.0,
-                "f_to_t_mean": float(np.mean(f2t)),
-                "f_to_t_std": float(np.std(f2t)) if len(f2t) > 1 else 0.0,
-            }
-        )
+        r: Dict = {
+            "bin": int(i),
+            "pct_hi": int((i + 1) * (100 / int(n_bins))),
+            "n_files": int(len(items)),
+            "n_mean": float(np.mean(Ns)),
+            "gap_mean": float(np.mean(gaps)),
+            "gap_std": float(np.std(gaps)) if len(gaps) > 1 else 0.0,
+            "flip_mean": float(np.mean(flips)),
+            "flip_std": float(np.std(flips)) if len(flips) > 1 else 0.0,
+            "pair_mean": float(np.mean(pairs)),
+            "pair_std": float(np.std(pairs)) if len(pairs) > 1 else 0.0,
+        }
+        if has_tf_ft and items[0].get("t_to_f") is not None:
+            t2f = np.asarray([it["t_to_f"] for it in items], dtype=np.float64)
+            f2t = np.asarray([it["f_to_t"] for it in items], dtype=np.float64)
+            r["t_to_f_mean"] = float(np.mean(t2f))
+            r["t_to_f_std"] = float(np.std(t2f)) if len(t2f) > 1 else 0.0
+            r["f_to_t_mean"] = float(np.mean(f2t))
+            r["f_to_t_std"] = float(np.std(f2t)) if len(f2t) > 1 else 0.0
+        rows.append(r)
     rows = sorted(rows, key=lambda r: int(r["bin"]))
 
     return {
@@ -340,18 +349,28 @@ def _analyze_files(
         "n_files": int(len(per_file)),
         "n_files_skipped": int(skipped),
         "n_bins": int(n_bins),
+        "has_tf_ft": has_tf_ft,
         "bins": rows,
     }
 
 
 def _print_table(rep: dict):
-    print("pct_hi\tbin\tn_files\tN_mean\tgap_mean\tflip_mean±std\tpair_mean±std\tT→F_mean±std\tF→T_mean±std")
-    for r in rep["bins"]:
-        print(
-            f"{r['pct_hi']}%\t{r['bin']}\t{r['n_files']}\t{r['n_mean']:.1f}\t{r['gap_mean']:.4f}\t"
-            f"{r['flip_mean']:.4f}±{r['flip_std']:.4f}\t{r['pair_mean']:.4f}±{r['pair_std']:.4f}\t"
-            f"{r['t_to_f_mean']:.4f}±{r['t_to_f_std']:.4f}\t{r['f_to_t_mean']:.4f}±{r['f_to_t_std']:.4f}"
-        )
+    has_tf_ft = rep.get("has_tf_ft", False)
+    if has_tf_ft:
+        print("pct_hi\tbin\tn_files\tN_mean\tgap_mean\tflip_mean±std\tpair_mean±std\tT→F_mean±std\tF→T_mean±std")
+        for r in rep["bins"]:
+            print(
+                f"{r['pct_hi']}%\t{r['bin']}\t{r['n_files']}\t{r['n_mean']:.1f}\t{r['gap_mean']:.4f}\t"
+                f"{r['flip_mean']:.4f}±{r['flip_std']:.4f}\t{r['pair_mean']:.4f}±{r['pair_std']:.4f}\t"
+                f"{r['t_to_f_mean']:.4f}±{r['t_to_f_std']:.4f}\t{r['f_to_t_mean']:.4f}±{r['f_to_t_std']:.4f}"
+            )
+    else:
+        print("pct_hi\tbin\tn_files\tN_mean\tgap_mean\tflip_mean±std\tpair_mean±std")
+        for r in rep["bins"]:
+            print(
+                f"{r['pct_hi']}%\t{r['bin']}\t{r['n_files']}\t{r['n_mean']:.1f}\t{r['gap_mean']:.4f}\t"
+                f"{r['flip_mean']:.4f}±{r['flip_std']:.4f}\t{r['pair_mean']:.4f}±{r['pair_std']:.4f}"
+            )
 
 
 def _save_plot(rep: dict, out_path: str, title: str):
@@ -362,22 +381,24 @@ def _save_plot(rep: dict, out_path: str, title: str):
     bins = rep["bins"]
     if not bins:
         return None
+    has_tf_ft = rep.get("has_tf_ft", False)
     xs = np.asarray([b["pct_hi"] for b in bins], dtype=np.float64)
     y_flip = np.asarray([b["flip_mean"] for b in bins], dtype=np.float64)
     y_flip_std = np.asarray([b["flip_std"] for b in bins], dtype=np.float64)
-    y_t2f = np.asarray([b["t_to_f_mean"] for b in bins], dtype=np.float64)
-    y_t2f_std = np.asarray([b["t_to_f_std"] for b in bins], dtype=np.float64)
-    y_f2t = np.asarray([b["f_to_t_mean"] for b in bins], dtype=np.float64)
-    y_f2t_std = np.asarray([b["f_to_t_std"] for b in bins], dtype=np.float64)
 
-    fig, ax = plt.subplots(1, 1, figsize=(9.0, 5.2), dpi=170)
-    ax.plot(xs, y_flip, marker="o", linewidth=2.0, color="#C0392B", label="Flip rate (any change)")
+    fig, ax = plt.subplots(1, 1, figsize=(9.0, 5.2) if has_tf_ft else (8.5, 4.8), dpi=170)
+    ax.plot(xs, y_flip, marker="o", linewidth=2.0, color="#C0392B", label="Flip rate")
     ax.fill_between(xs, y_flip - y_flip_std, y_flip + y_flip_std, color="#C0392B", alpha=0.18, linewidth=0)
-    ax.plot(xs, y_t2f, marker="s", linewidth=1.8, color="#8E44AD", label="T→F (correct→wrong)")
-    ax.fill_between(xs, y_t2f - y_t2f_std, y_t2f + y_t2f_std, color="#8E44AD", alpha=0.18, linewidth=0)
-    ax.plot(xs, y_f2t, marker="^", linewidth=1.8, color="#27AE60", label="F→T (wrong→correct)")
-    ax.fill_between(xs, y_f2t - y_f2t_std, y_f2t + y_f2t_std, color="#27AE60", alpha=0.18, linewidth=0)
-    ax.set_xlabel("Confidence percentile bin (per-file, equal-count)")
+    if has_tf_ft:
+        y_t2f = np.asarray([b["t_to_f_mean"] for b in bins], dtype=np.float64)
+        y_t2f_std = np.asarray([b["t_to_f_std"] for b in bins], dtype=np.float64)
+        y_f2t = np.asarray([b["f_to_t_mean"] for b in bins], dtype=np.float64)
+        y_f2t_std = np.asarray([b["f_to_t_std"] for b in bins], dtype=np.float64)
+        ax.plot(xs, y_t2f, marker="s", linewidth=1.8, color="#8E44AD", label="T→F (correct→wrong)")
+        ax.fill_between(xs, y_t2f - y_t2f_std, y_t2f + y_t2f_std, color="#8E44AD", alpha=0.18, linewidth=0)
+        ax.plot(xs, y_f2t, marker="^", linewidth=1.8, color="#27AE60", label="F→T (wrong→correct)")
+        ax.fill_between(xs, y_f2t - y_f2t_std, y_f2t + y_f2t_std, color="#27AE60", alpha=0.18, linewidth=0)
+    ax.set_xlabel("Confidence percentile bin (top1-top2 probability gap)")
     ax.set_ylabel("Rate")
     ax.set_title(title)
     ax.grid(True, linestyle="--", alpha=0.35)
@@ -401,6 +422,7 @@ def main():
     ap.add_argument("--eval_name", type=str, default="", help="Eval name like 'arc,0,full'. Used when --models is set.")
     ap.add_argument("--option_id_set", type=str, default=None)
 
+    ap.add_argument("--flip_only", action="store_true", help="Only flip rate (and pairwise disagree); skip T→F / F→T.")
     ap.add_argument("--n_bins", type=int, default=10)
     ap.add_argument("--min_bin_n", type=int, default=1)
     ap.add_argument("--out", type=str, default="flip_rate_deciles.png")
@@ -492,6 +514,7 @@ def main():
         option_id_set=args.option_id_set,
         n_bins=int(args.n_bins),
         min_bin_n=int(args.min_bin_n),
+        flip_only=bool(args.flip_only),
     )
     _print_table(rep)
 
@@ -519,7 +542,7 @@ def main():
         )
         try:
             for r in rep["bins"]:
-                wandb.log({
+                log_dict = {
                     "pct_hi": int(r["pct_hi"]),
                     "n_files": int(r["n_files"]),
                     "n_mean": float(r["n_mean"]),
@@ -528,11 +551,13 @@ def main():
                     "flip_std": float(r["flip_std"]),
                     "pair_mean": float(r["pair_mean"]),
                     "pair_std": float(r["pair_std"]),
-                    "t_to_f_mean": float(r["t_to_f_mean"]),
-                    "t_to_f_std": float(r["t_to_f_std"]),
-                    "f_to_t_mean": float(r["f_to_t_mean"]),
-                    "f_to_t_std": float(r["f_to_t_std"]),
-                })
+                }
+                if rep.get("has_tf_ft"):
+                    log_dict["t_to_f_mean"] = float(r["t_to_f_mean"])
+                    log_dict["t_to_f_std"] = float(r["t_to_f_std"])
+                    log_dict["f_to_t_mean"] = float(r["f_to_t_mean"])
+                    log_dict["f_to_t_std"] = float(r["f_to_t_std"])
+                wandb.log(log_dict)
             if out_plot:
                 wandb.log({"plots/flip_rate": wandb.Image(out_plot)})
         except Exception as e:
