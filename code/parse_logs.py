@@ -1,18 +1,32 @@
 #!/usr/bin/env python3
 """
-15개 모델의 터미널 로그(.log / .txt)에서 report_three_methods 출력을 파싱해
-모델별 평균·표준편차를 다시 평균 내어 한 번에 출력합니다.
-JSON/curve를 다시 뽑지 않아도 로그만 있으면 논문용 테이블 수치를 얻을 수 있습니다.
+eval_clm.py FINAL CONDENSED REPORT 로그에서 Cyclic / PriDe / Ours(α=2) 구간별 수치를 파싱합니다.
+여러 로그(15개 모델)를 넣으면 CSV로 뽑아서 직접 평균 내기 좋게 하고, 옵션으로 N개 평균 요약도 출력합니다.
 
-실행: python parse_logs.py --logs model1.log model2.log ...
-      python parse_logs.py --logs my_logs/*.txt
+구간:
+  - Cyclic: 10, 20, 30, 40, 50, 60, 70, 80, 90, 100
+  - PriDe:   2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100  (default_pride_αX%)
+  - Ours:    2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100  (ours_pride_sqrt_α2_X%, α=2 고정)
+
+실행:
+  python parse_logs.py --logs model1.log model2.log ...
+  python parse_logs.py --logs my_logs/*.log --csv parsed.csv
+  python parse_logs.py --logs my_logs/*.log --aggregate   # N개 로그에 대해 평균 요약 출력
 """
 
+import argparse
+import csv
 import re
 import sys
-import argparse
-import numpy as np
 from collections import defaultdict
+
+import numpy as np
+
+
+# 목표 구간 (사용자 지정과 동일)
+CYCLIC_FRACS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+PRIDE_OURS_FRACS = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+OURS_ALPHA = 2
 
 
 def parse_val(s):
@@ -23,104 +37,192 @@ def parse_val(s):
     if "±" in s:
         parts = s.split("±", 1)
         return float(parts[0]), float(parts[1])
-    return float(s), 0.0
+    try:
+        return float(s), 0.0
+    except ValueError:
+        return None, None
+
+
+def parse_eval_clm_log(content: str, log_name: str):
+    """
+    eval_clm.py 로그 본문에서 다음 형식 파싱:
+      ---- default + pride ----
+      default_pride_α2% : cost=..., acc=..., recall_std=...
+      ---- ours + pride (Online Sqrt) ----
+      ours_pride_sqrt_α2_002% : cost=..., acc=..., recall_std=...
+      ---- ours ----
+      ours_002% : ...
+      ---- cyclic ----
+      cyclic_010% : cost=..., acc=..., recall_std=...
+
+    반환: list of dict { "model": log_name, "method": "Cyclic"|"PriDe"|"Ours", "p": int|float, "acc": float, "acc_std": float, "recall_std": float, "recall_std_std": float, "cost": float, "cost_std": float }
+    """
+    rows = []
+    # 로그 앞에 [timestamp] [eval_clm.py:xxxx] 가 올 수 있음
+    # 패턴: 라인 안에 cyclic_010% : cost=1.401, acc=0.8035±0.0007, recall_std=0.0364±0.0022
+    cyclic_re = re.compile(
+        r"cyclic_(\d{3})%\s*:\s*cost=([\d\.±]+)(?:,\s*acc=([\d\.±]+))?(?:,\s*recall_std=([\d\.±]+))?"
+    )
+    default_pride_re = re.compile(
+        r"default_pride_α([\d\.]+)%\s*:\s*cost=([\d\.±]+)(?:,\s*acc=([\d\.±]+))?(?:,\s*recall_std=([\d\.±]+))?"
+    )
+    ours_pride_sqrt_re = re.compile(
+        r"ours_pride_sqrt_α2_(\d+)%\s*:\s*cost=([\d\.±]+)(?:,\s*acc=([\d\.±]+))?(?:,\s*recall_std=([\d\.±]+))?"
+    )
+
+    for line in content.splitlines():
+        line = line.strip()
+        # Cyclic: cyclic_010%, cyclic_020%, ...
+        m = cyclic_re.search(line)
+        if m:
+            p = int(m.group(1))
+            if p in CYCLIC_FRACS:
+                cost_m, cost_s = parse_val(m.group(2))
+                acc_m, acc_s = parse_val(m.group(3)) if m.group(3) else (None, None)
+                r_m, r_s = parse_val(m.group(4)) if m.group(4) else (None, None)
+                if acc_m is not None or cost_m is not None:
+                    rows.append({
+                        "model": log_name,
+                        "method": "Cyclic",
+                        "p": p,
+                        "acc": acc_m,
+                        "acc_std": acc_s if acc_s is not None else 0.0,
+                        "recall_std": r_m,
+                        "recall_std_std": r_s if r_s is not None else 0.0,
+                        "cost": cost_m,
+                        "cost_std": cost_s if cost_s is not None else 0.0,
+                    })
+            continue
+
+        # PriDe: default_pride_α2%, α5%, ...
+        m = default_pride_re.search(line)
+        if m:
+            p = float(m.group(1)) if "." in m.group(1) else int(m.group(1))
+            if p in PRIDE_OURS_FRACS:
+                cost_m, cost_s = parse_val(m.group(2))
+                acc_m, acc_s = parse_val(m.group(3)) if m.group(3) else (None, None)
+                r_m, r_s = parse_val(m.group(4)) if m.group(4) else (None, None)
+                if acc_m is not None or cost_m is not None:
+                    rows.append({
+                        "model": log_name,
+                        "method": "PriDe",
+                        "p": p,
+                        "acc": acc_m,
+                        "acc_std": acc_s if acc_s is not None else 0.0,
+                        "recall_std": r_m,
+                        "recall_std_std": r_s if r_s is not None else 0.0,
+                        "cost": cost_m,
+                        "cost_std": cost_s if cost_s is not None else 0.0,
+                    })
+            continue
+
+        # Ours (α=2): ours_pride_sqrt_α2_002%, ...
+        m = ours_pride_sqrt_re.search(line)
+        if m:
+            p = int(m.group(1))
+            if p in PRIDE_OURS_FRACS:
+                cost_m, cost_s = parse_val(m.group(2))
+                acc_m, acc_s = parse_val(m.group(3)) if m.group(3) else (None, None)
+                r_m, r_s = parse_val(m.group(4)) if m.group(4) else (None, None)
+                if acc_m is not None or cost_m is not None:
+                    rows.append({
+                        "model": log_name,
+                        "method": "Ours",
+                        "p": p,
+                        "acc": acc_m,
+                        "acc_std": acc_s if acc_s is not None else 0.0,
+                        "recall_std": r_m,
+                        "recall_std_std": r_s if r_s is not None else 0.0,
+                        "cost": cost_m,
+                        "cost_std": cost_s if cost_s is not None else 0.0,
+                    })
+            continue
+
+    return rows
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Parse report_three_methods log output from multiple models and aggregate.")
-    ap.add_argument("--logs", nargs="+", required=True, help="로그 파일 경로들 (예: logs/*.log)")
+    ap = argparse.ArgumentParser(
+        description="Parse eval_clm.py FINAL CONDENSED REPORT from log files. Cyclic 10..100, PriDe 2..100, Ours(α=2) 2..100."
+    )
+    ap.add_argument("--logs", nargs="+", required=True, help="로그 파일 경로 (예: logs/*.log)")
+    ap.add_argument("--csv", type=str, default="", help="CSV로 저장 (열: model, method, p, acc, acc_std, recall_std, recall_std_std, cost, cost_std)")
+    ap.add_argument("--aggregate", action="store_true", help="N개 로그에 대해 (method, p)별 평균 요약 출력")
     args = ap.parse_args()
 
-    # data[method][p] = { "acc_m": [], "acc_s": [], "rstd_m": [], "rstd_s": [], "cost_m": [], "cost_s": [] }
-    data = defaultdict(lambda: defaultdict(lambda: {"acc_m": [], "acc_s": [], "rstd_m": [], "rstd_s": [], "cost_m": [], "cost_s": []}))
-
-    # report_three_methods 출력: "  10% : acc=0.8035±0.0007, recall_std=0.0364±0.0022, cost=1.4013±0.0000"
-    line_pattern = re.compile(
-        r"^\s*(\d+)%\s*:\s*acc=([\d\.±]+)"
-        r"(?:,\s*recall_std=([\d\.±]+))?"
-        r"(?:,\s*cost=([\d\.±]+))?\s*$"
-    )
-
-    section_pattern = re.compile(r"^---\s*(Cyclic|PriDe|Ours \(Online Sqrt, α=2)\)\s*---")
-
-    parsed_models = 0
+    all_rows = []
     for log_path in args.logs:
         try:
             with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
+                content = f.read()
         except Exception as e:
             print(f"[warn] Skip {log_path}: {e}", file=sys.stderr)
             continue
+        name = log_path.split("/")[-1].split("\\")[-1]
+        rows = parse_eval_clm_log(content, name)
+        all_rows.extend(rows)
 
-        current_method = None
-        for line in lines:
-            line = line.rstrip()
-            m_section = section_pattern.search(line)
-            if m_section:
-                current_method = m_section.group(1)
-                continue
-            if current_method is None:
-                continue
-            m = line_pattern.search(line)
-            if m:
-                p_key = int(m.group(1))
-                acc_m, acc_s = parse_val(m.group(2))
-                rstd_m, rstd_s = parse_val(m.group(3)) if m.group(3) else (None, None)
-                cost_m, cost_s = parse_val(m.group(4)) if m.group(4) else (None, None)
+    if not all_rows:
+        print("Error: No lines parsed from any log.", file=sys.stderr)
+        sys.exit(1)
 
-                if acc_m is None:
+    # CSV 저장 (15개 평균 내기 좋게)
+    if args.csv:
+        with open(args.csv, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(
+                f,
+                fieldnames=["model", "method", "p", "acc", "acc_std", "recall_std", "recall_std_std", "cost", "cost_std"],
+                extrasaction="ignore",
+            )
+            w.writeheader()
+            for r in all_rows:
+                w.writerow({k: ("" if v is None else v) for k, v in r.items()})
+        print(f"Wrote {len(all_rows)} rows to {args.csv}", file=sys.stderr)
+
+    # 집계 요약 (--aggregate 시)
+    if args.aggregate:
+        # (method, p) -> lists of acc, recall_std, cost
+        agg = defaultdict(lambda: {"acc": [], "acc_std": [], "recall_std": [], "recall_std_std": [], "cost": [], "cost_std": []})
+        for r in all_rows:
+            k = (r["method"], r["p"])
+            if r.get("acc") is not None:
+                agg[k]["acc"].append(r["acc"])
+                agg[k]["acc_std"].append(r.get("acc_std") or 0.0)
+            if r.get("recall_std") is not None:
+                agg[k]["recall_std"].append(r["recall_std"])
+                agg[k]["recall_std_std"].append(r.get("recall_std_std") or 0.0)
+            if r.get("cost") is not None:
+                agg[k]["cost"].append(r["cost"])
+                agg[k]["cost_std"].append(r.get("cost_std") or 0.0)
+
+        n_models = len(set(r["model"] for r in all_rows))
+        print(f"\n==== AGGREGATED OVER {n_models} MODELS (eval_clm log parse) ====")
+        method_order = ["Cyclic", "PriDe", "Ours"]
+        for method in method_order:
+            fracs = CYCLIC_FRACS if method == "Cyclic" else PRIDE_OURS_FRACS
+            print(f"\n--- {method} ---")
+            for p in fracs:
+                k = (method, p)
+                if k not in agg:
                     continue
-                data[current_method][p_key]["acc_m"].append(acc_m)
-                data[current_method][p_key]["acc_s"].append(acc_s)
-                if rstd_m is not None:
-                    data[current_method][p_key]["rstd_m"].append(rstd_m)
-                    data[current_method][p_key]["rstd_s"].append(rstd_s)
-                if cost_m is not None:
-                    data[current_method][p_key]["cost_m"].append(cost_m)
-                    data[current_method][p_key]["cost_s"].append(cost_s)
-
-        parsed_models += 1
-
-    if parsed_models == 0:
-        print("Error: No log file could be read.", file=sys.stderr)
-        return
-
-    print(f"\n==== 15 MODELS AGGREGATED REPORT (parsed from {parsed_models} logs) ====")
-    print("목표: 각 모델에서 뽑힌 (평균±표준편차)에서, 15개 모델에 대해 평균들의 평균, 표준편차들의 평균.\n")
-
-    method_order = ["Cyclic", "PriDe", "Ours (Online Sqrt, α=2)"]
-    cyclic_fracs = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-    pride_fracs = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-
-    for method in method_order:
-        if method not in data or not data[method]:
-            continue
-        print(f"--- {method} ---")
-        fracs = cyclic_fracs if method == "Cyclic" else pride_fracs
-        for p in fracs:
-            if p not in data[method]:
-                continue
-            d = data[method][p]
-            acc_m_list = d["acc_m"]
-            if not acc_m_list:
-                continue
-            n_count = len(acc_m_list)
-
-            acc_m_avg = float(np.mean(acc_m_list))
-            acc_s_avg = float(np.mean(d["acc_s"])) if d["acc_s"] else 0.0
-            rstd_m_avg = float(np.mean(d["rstd_m"])) if d["rstd_m"] else None
-            rstd_s_avg = float(np.mean(d["rstd_s"])) if d["rstd_s"] else 0.0
-            cost_m_avg = float(np.mean(d["cost_m"])) if d["cost_m"] else None
-            cost_s_avg = float(np.mean(d["cost_s"])) if d["cost_s"] else 0.0
-
-            acc_str = f"{acc_m_avg:.4f}±{acc_s_avg:.4f}"
-            rstr = f", recall_std={rstd_m_avg:.4f}±{rstd_s_avg:.4f}" if rstd_m_avg is not None else ""
-            cstr = f", cost={cost_m_avg:.4f}±{cost_s_avg:.4f}" if cost_m_avg is not None else ""
-
-            print(f"  {p}% : acc={acc_str}{rstr}{cstr}")
-        print()
-
-    print("=========================================================================\n")
+                d = agg[k]
+                acc_list = d["acc"]
+                if not acc_list:
+                    continue
+                acc_m = float(np.mean(acc_list))
+                acc_s = float(np.mean(d["acc_std"])) if d["acc_std"] else 0.0
+                r_m = float(np.mean(d["recall_std"])) if d["recall_std"] else None
+                r_s = float(np.mean(d["recall_std_std"])) if d["recall_std_std"] else 0.0
+                c_m = float(np.mean(d["cost"])) if d["cost"] else None
+                c_s = float(np.mean(d["cost_std"])) if d["cost_std"] else 0.0
+                acc_str = f"{acc_m:.4f}±{acc_s:.4f}"
+                rstr = f", recall_std={r_m:.4f}±{r_s:.4f}" if r_m is not None else ""
+                cstr = f", cost={c_m:.4f}±{c_s:.4f}" if c_m is not None else ""
+                print(f"  {p}% : acc={acc_str}{rstr}{cstr}")
+        print("\n=========================================================================\n")
+    else:
+        n_models = len(set(r["model"] for r in all_rows))
+        print(f"Parsed {len(all_rows)} rows from {n_models} log(s). Use --csv out.csv to save, --aggregate to print mean.", file=sys.stderr)
 
 
 if __name__ == "__main__":

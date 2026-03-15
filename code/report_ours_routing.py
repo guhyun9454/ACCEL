@@ -2,6 +2,7 @@
 """
 Ours (th1/2) 정책만 대상: 구간별(2,5,10,20,...,100%) routing 비율과 T→F, F→T, F→F, T→T 비율 리포트.
 *_curve.jsonl (baseline)에서 heuristic_points(label=th1/2)와 transition을 읽어 subject 평균으로 출력.
+run0만 사용: *_run0_curve.jsonl이 있으면 run0만 읽고, 없으면 run 접미사 없는 *_curve.jsonl 사용.
 
 Usage:
   python report_ours_routing.py --results_dir results_mmlu/0s_Model/mmlu_full_id-ABCD
@@ -45,9 +46,17 @@ def _get_mmlu_subject_set() -> Optional[set]:
         return None
 
 
-def _discover_curve_files(results_dir: str) -> List[str]:
-    base = os.path.join(results_dir, "*_curve.jsonl")
-    return sorted(glob.glob(base))
+def _discover_curve_files(results_dir: str, run0_only: bool = True) -> List[str]:
+    """run0_only=True면 *_run0_curve.jsonl만 사용. 없으면 *_curve.jsonl 중 run 접미사 없는 것만."""
+    run0_pattern = os.path.join(results_dir, "*_run0_curve.jsonl")
+    run0_files = sorted(glob.glob(run0_pattern))
+    if run0_files:
+        return run0_files
+    all_base = sorted(glob.glob(os.path.join(results_dir, "*_curve.jsonl")))
+    all_base = [p for p in all_base if not p.endswith("_pride_curve.jsonl")]
+    if run0_only:
+        all_base = [p for p in all_base if "_run" not in os.path.basename(p) or p.endswith("_run0_curve.jsonl")]
+    return all_base
 
 
 def _subject_from_path(path: str, suffix: str = "_curve.jsonl") -> str:
@@ -123,16 +132,15 @@ def run(
     if max_subjects is not None:
         subjects = subjects[: max_subjects]
 
-    # per p: list of (base_ratio, probe2_ratio, cyclic_ratio) per subject (subject당 1개, run은 평균)
-    routing_by_p: Dict[float, List[Tuple[float, float, float]]] = {p: [] for p in OURS_PERCENTS}
+    # per p: (n_base, n_probe2, n_cyclic)만 수집 → 합산 후 비율 한 번만 계산
+    routing_by_p: Dict[float, List[Tuple[int, int, int]]] = {p: [] for p in OURS_PERCENTS}
     transition_by_p: Dict[float, List[Tuple[int, int, int, int]]] = {p: [] for p in OURS_PERCENTS}
 
     for subj in subjects:
         paths = canon_to_paths.get(subj, [])
         if not paths:
             continue
-        # run 파일들에서 p별로 (n_base, n_probe2, n_cyclic), transition 수집 후 run 평균
-        per_p_routing: Dict[float, List[Tuple[int, int, int]]] = {p: [] for p in OURS_PERCENTS}
+        per_p_counts: Dict[float, List[Tuple[int, int, int]]] = {p: [] for p in OURS_PERCENTS}
         per_p_trans: Dict[float, List[Tuple[int, int, int, int]]] = {p: [] for p in OURS_PERCENTS}
         for path in paths:
             lines = _read_jsonl(path)
@@ -141,11 +149,11 @@ def run(
                 if row is None:
                     continue
                 p, n_base, n_probe2, n_cyclic, trans = row
-                if p not in per_p_routing:
+                if p not in per_p_counts:
                     continue
                 N = n_base + n_probe2 + n_cyclic
                 if N > 0:
-                    per_p_routing[p].append((n_base, n_probe2, n_cyclic))
+                    per_p_counts[p].append((n_base, n_probe2, n_cyclic))
                 if trans is not None:
                     bt = int(trans.get("base_t_count", 0))
                     bf = int(trans.get("base_f_count", 0))
@@ -153,18 +161,17 @@ def run(
                     f_to_t = int(trans.get("f_to_t_count", 0))
                     per_p_trans[p].append((bt - t_to_f, t_to_f, f_to_t, bf - f_to_t))
         for p in OURS_PERCENTS:
-            if per_p_routing[p]:
-                nb = np.mean([x[0] for x in per_p_routing[p]])
-                np2 = np.mean([x[1] for x in per_p_routing[p]])
-                nc = np.mean([x[2] for x in per_p_routing[p]])
-                tot = nb + np2 + nc
-                if tot > 0:
-                    routing_by_p[p].append((float(nb / tot), float(np2 / tot), float(nc / tot)))
+            if per_p_counts[p]:
+                # subject당 run이 여러 개면 평균한 하나의 (nb, np2, nc)로 취급
+                nb = int(np.round(np.mean([x[0] for x in per_p_counts[p]])))
+                np2 = int(np.round(np.mean([x[1] for x in per_p_counts[p]])))
+                nc = int(np.round(np.mean([x[2] for x in per_p_counts[p]])))
+                routing_by_p[p].append((nb, np2, nc))
             if per_p_trans[p]:
-                t2t = float(np.mean([x[0] for x in per_p_trans[p]]))
-                t2f = float(np.mean([x[1] for x in per_p_trans[p]]))
-                f2t = float(np.mean([x[2] for x in per_p_trans[p]]))
-                f2f = float(np.mean([x[3] for x in per_p_trans[p]]))
+                t2t = int(np.round(np.mean([x[0] for x in per_p_trans[p]])))
+                t2f = int(np.round(np.mean([x[1] for x in per_p_trans[p]])))
+                f2t = int(np.round(np.mean([x[2] for x in per_p_trans[p]])))
+                f2f = int(np.round(np.mean([x[3] for x in per_p_trans[p]])))
                 transition_by_p[p].append((t2t, t2f, f2t, f2f))
 
     n_used = max(len(routing_by_p.get(p, [])) for p in OURS_PERCENTS) if OURS_PERCENTS else 0
@@ -175,32 +182,35 @@ def run(
         if not rlist:
             out[p] = {"routing": None, "transition": None}
             continue
-        base_ratios = [x[0] for x in rlist]
-        probe2_ratios = [x[1] for x in rlist]
-        cyclic_ratios = [x[2] for x in rlist]
-        routing = {
-            "base_ratio": float(np.mean(base_ratios)),
-            "probe2_ratio": float(np.mean(probe2_ratios)),
-            "cyclic_ratio": float(np.mean(cyclic_ratios)),
-        }
+        # (n_base, n_probe2, n_cyclic) 합산 후 비율 한 번만 계산
+        sum_nb = sum(x[0] for x in rlist)
+        sum_np2 = sum(x[1] for x in rlist)
+        sum_nc = sum(x[2] for x in rlist)
+        tot = sum_nb + sum_np2 + sum_nc
+        if tot > 0:
+            routing = {
+                "base_ratio": float(sum_nb) / tot,
+                "probe2_ratio": float(sum_np2) / tot,
+                "cyclic_ratio": float(sum_nc) / tot,
+            }
+        else:
+            routing = None
         tlist = transition_by_p.get(p, [])
         if not tlist:
             out[p] = {"routing": routing, "transition": None}
             continue
-        # 비율: 전체 샘플 대비 T→T, T→F, F→T, F→F (subject별 비율의 평균)
-        trans_ratios = []
-        for (t_to_t, t_to_f, f_to_t, f_to_f) in tlist:
-            total = t_to_t + t_to_f + f_to_t + f_to_f
-            if total > 0:
-                trans_ratios.append((
-                    t_to_t / total, t_to_f / total, f_to_t / total, f_to_f / total
-                ))
-        if trans_ratios:
+        # transition도 개수 합산 후 비율 한 번만 계산
+        sum_t2t = sum(x[0] for x in tlist)
+        sum_t2f = sum(x[1] for x in tlist)
+        sum_f2t = sum(x[2] for x in tlist)
+        sum_f2f = sum(x[3] for x in tlist)
+        ttot = sum_t2t + sum_t2f + sum_f2t + sum_f2f
+        if ttot > 0:
             transition = {
-                "t_to_t_ratio": float(np.mean([x[0] for x in trans_ratios])),
-                "t_to_f_ratio": float(np.mean([x[1] for x in trans_ratios])),
-                "f_to_t_ratio": float(np.mean([x[2] for x in trans_ratios])),
-                "f_to_f_ratio": float(np.mean([x[3] for x in trans_ratios])),
+                "t_to_t_ratio": float(sum_t2t) / ttot,
+                "t_to_f_ratio": float(sum_t2f) / ttot,
+                "f_to_t_ratio": float(sum_f2t) / ttot,
+                "f_to_f_ratio": float(sum_f2f) / ttot,
             }
         else:
             transition = None
