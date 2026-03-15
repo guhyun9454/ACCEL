@@ -26,7 +26,11 @@ def _compute_results_dir(code_dir: str, eval_name: str, model_path: str, option_
     num_few = int(parts[1]) if len(parts) > 1 else 0
     setting = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
     model_name = str(model_path).split("/")[-1]
-    path = f"results_{task}/{num_few}s_{model_name}/{task}"
+    # 저장 폴더 컨벤션:
+    # - 0-shot: 0_shot_<model>
+    # - 그 외: 기존 컨벤션 유지 (예: 5s_<model>)
+    few_dir = f"{num_few}_shot_{model_name}" if int(num_few) == 0 else f"{num_few}s_{model_name}"
+    path = f"results_{task}/{few_dir}/{task}"
     if setting:
         path += f"_{setting}"
     if option_id_set:
@@ -45,7 +49,70 @@ def _get_mmlu_subject_set() -> Optional[set]:
 def _discover_curve_files(results_dir: str) -> Tuple[List[str], List[str]]:
     base = os.path.join(results_dir, "*_curve.jsonl")
     pride = os.path.join(results_dir, "*_pride_curve.jsonl")
-    return sorted(glob.glob(base)), sorted(glob.glob(pride))
+    pride_files = sorted(glob.glob(pride))
+    base_files = sorted(glob.glob(base))
+    # 중요: "*_curve.jsonl"은 "*_pride_curve.jsonl"도 매칭하므로 제외해야 run 파싱이 망가지지 않음
+    base_files = [p for p in base_files if not p.endswith("_pride_curve.jsonl")]
+    return base_files, pride_files
+
+
+def _has_run_curve_files(results_dir: str) -> bool:
+    """run0/run1/run2 형태의 curve 파일이 실제로 존재하는지 체크."""
+    if not results_dir or not os.path.isdir(results_dir):
+        return False
+    return bool(glob.glob(os.path.join(results_dir, "*_run*_curve.jsonl"))) or bool(
+        glob.glob(os.path.join(results_dir, "*_run*_pride_curve.jsonl"))
+    )
+
+
+def _parse_eval_name(eval_name: str) -> Tuple[str, int, Optional[str]]:
+    parts = str(eval_name).strip().split(",")
+    task = parts[0].strip()
+    num_few = int(parts[1]) if len(parts) > 1 and str(parts[1]).strip() != "" else 0
+    setting = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
+    return task, num_few, setting
+
+
+def _find_results_dir_for_model_and_eval(
+    results_root: str,
+    model_name: str,
+    eval_name: str,
+    option_id_set: Optional[str],
+) -> Optional[str]:
+    """results_root 아래에서 (model, task, setting, option_id_set)까지 맞는 run-curve 디렉터리를 탐색."""
+    model_key = model_name.split("/")[-1].strip()
+    root = os.path.abspath(results_root)
+    if not os.path.isdir(root):
+        return None
+    task, _, setting = _parse_eval_name(eval_name)
+    req = f"{task}" + (f"_{setting}" if setting else "") + (f"_id-{option_id_set}" if option_id_set else "")
+    req_l = req.lower()
+
+    found_dirs = set()
+    for pattern in ["*_run*_curve.jsonl", "*_run*_pride_curve.jsonl"]:
+        for path in glob.glob(os.path.join(root, "**", pattern), recursive=True):
+            found_dirs.add(os.path.dirname(path))
+
+    candidates = []
+    for d in found_dirs:
+        if model_key not in d:
+            continue
+        base = os.path.basename(d.rstrip(os.sep)).lower()
+        if req_l not in base:
+            continue
+        candidates.append(d)
+    if not candidates:
+        return None
+
+    def score(d: str) -> Tuple[int, int, int]:
+        # 0s_ModelName/... 또는 0_shot_ModelName/... 형태 우선
+        prefer_0s = 1 if (("0s_" + model_key in d) or ("0_shot_" + model_key in d)) else 0
+        base, pride = _discover_curve_files(d)
+        n = len(base) + len(pride)
+        depth = d.count(os.sep)
+        return (prefer_0s, n, -depth)
+
+    return max(candidates, key=score)
 
 
 def _find_results_dir_for_model(results_root: str, model_name: str) -> Optional[str]:
@@ -71,8 +138,8 @@ def _find_results_dir_for_model(results_root: str, model_name: str) -> Optional[
         base, pride = _discover_curve_files(d)
         n = len(base) + len(pride)
         depth = d.count(os.sep)
-        # 0s_Llama-3.2-3B/arc_full_id-ABCD 형태 우선
-        prefer_0s = 1 if ("0s_" + model_key in d) else 0
+        # 0s_<model>/... 또는 0_shot_<model>/... 형태 우선
+        prefer_0s = 1 if (("0s_" + model_key in d) or ("0_shot_" + model_key in d)) else 0
         return (prefer_0s, n, -depth)
 
     return max(candidates, key=score)
@@ -266,7 +333,22 @@ def main():
         root = str(args.results_root).strip() or os.path.dirname(os.path.abspath(__file__))
         model_list = [str(m).strip() for m in args.models if str(m).strip()]
         if args.eval_name:
-            dirs_to_run = [(_compute_results_dir(root, args.eval_name, m, args.option_id_set), m.split("/")[-1]) for m in model_list]
+            dirs_to_run = []
+            for m in model_list:
+                computed = _compute_results_dir(root, args.eval_name, m, args.option_id_set)
+                if _has_run_curve_files(computed) or os.path.isdir(computed):
+                    # run curve가 있으면 그대로, (혹시 run 없이도 존재하면) 일단 사용
+                    dirs_to_run.append((computed, m.split("/")[-1]))
+                    continue
+                # fallback: results_root 아래에서 task/setting/id까지 맞는 디렉터리 자동 탐색
+                found = _find_results_dir_for_model_and_eval(root, m, args.eval_name, args.option_id_set)
+                if found:
+                    dirs_to_run.append((found, m.split("/")[-1]))
+                else:
+                    print(f"Warning: 디렉터리를 찾지 못함 (model={m}, computed={computed})", file=sys.stderr)
+            if not dirs_to_run:
+                print("Error: 어떤 모델에 대해서도 디렉터리를 찾지 못했습니다.", file=sys.stderr)
+                sys.exit(1)
         else:
             dirs_to_run = []
             for m in model_list:
