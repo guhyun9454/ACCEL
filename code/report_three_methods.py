@@ -26,10 +26,9 @@ def _compute_results_dir(code_dir: str, eval_name: str, model_path: str, option_
     num_few = int(parts[1]) if len(parts) > 1 else 0
     setting = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
     model_name = str(model_path).split("/")[-1]
-    # 저장 폴더 컨벤션:
-    # - 0-shot: 0_shot_<model>
-    # - 그 외: 기존 컨벤션 유지 (예: 5s_<model>)
-    few_dir = f"{num_few}s_{model_name}" if int(num_few) == 0 else f"{num_few}s_{model_name}"
+    # 저장 폴더 컨벤션: 0s_<model>, 5s_<model>, ...
+    # (만약 과거 실험이 0_shot_<model> 형태로 저장되어 있어도, 자동 탐색 fallback에서 잡히도록 유지)
+    few_dir = f"{num_few}s_{model_name}"
     path = f"results_{task}/{few_dir}/{task}"
     if setting:
         path += f"_{setting}"
