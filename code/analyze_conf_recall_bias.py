@@ -155,6 +155,42 @@ def _quantile_bin_edges(x: np.ndarray, n_bins: int) -> List[float]:
     return edges
 
 
+def _bin_indices(conf: np.ndarray, n_bins: int, mode: str) -> Tuple[List[np.ndarray], Optional[List[float]]]:
+    """
+    Returns:
+      - list of index arrays (one per bin, in increasing-confidence order)
+      - optional edges (only for quantile mode)
+
+    mode:
+      - "equal_count": sort by conf, split into exactly equal-sized bins (±1 due to remainder)
+      - "quantile": threshold by quantiles (can create empty bins when many ties)
+    """
+    conf = np.asarray(conf, dtype=np.float64)
+    N = int(conf.size)
+    if N <= 0:
+        return [], None
+    nb = int(max(1, int(n_bins)))
+    m = str(mode or "equal_count").strip().lower()
+
+    if m == "quantile":
+        edges = _quantile_bin_edges(conf, nb)
+        idx_bins: List[np.ndarray] = []
+        for i in range(nb):
+            lo, hi = edges[i], edges[i + 1]
+            if i < nb - 1:
+                mask = (conf >= lo) & (conf < hi)
+            else:
+                mask = (conf >= lo) & (conf <= hi)
+            idx = np.nonzero(mask)[0]
+            idx_bins.append(idx)
+        return idx_bins, edges
+
+    # equal_count (default): stable sort, then split indices
+    order = np.argsort(conf, kind="mergesort")
+    chunks = np.array_split(order, nb)
+    return [c.astype(np.int64) for c in chunks], None
+
+
 def _recall_by_class(y_true: np.ndarray, y_pred: np.ndarray, k: int, mask: np.ndarray) -> np.ndarray:
     rec = np.full((k,), np.nan, dtype=np.float64)
     for c in range(k):
@@ -172,6 +208,8 @@ def _analyze(
     n_bins: int,
     min_bin_n: int,
     aggregate_mode: str = "pooled",  # "pooled" | "mean_over_files"
+    binning_mode: str = "equal_count",  # "equal_count" | "quantile"
+    binning_scope: str = "global",  # "global" | "per_file" (only meaningful for mean_over_files)
 ):
     def _load_one_file(fp: str):
         confs1: List[float] = []
@@ -240,7 +278,16 @@ def _analyze(
             raise ValueError("Mixed option id sets across files; pass --option_id_set or use consistent runs.")
 
     if str(aggregate_mode) == "mean_over_files":
-        # Each file: build its own quantile bins (deciles by file). Then average metrics by bin index.
+        scope = str(binning_scope or "global").strip().lower()
+        mode = str(binning_mode or "equal_count").strip().lower()
+        # For global scope, we compute ONE set of percentile edges over ALL samples (all files/models),
+        # then apply those edges to each file and average per-bin metrics across files.
+        # This ensures bins correspond to p10, p20, ..., p100 over the combined population.
+        global_edges: Optional[List[float]] = None
+        if scope == "global":
+            conf_all = np.concatenate([o["conf"] for o in per_file], axis=0)
+            global_edges = _quantile_bin_edges(conf_all, int(n_bins))
+
         bins_by_i: Dict[int, List[dict]] = {i: [] for i in range(int(n_bins))}
         n_total = 0
         for o in per_file:
@@ -248,23 +295,33 @@ def _analyze(
             yt = o["yt"]
             yp = o["yp"]
             n_total += int(conf.size)
-            edges = _quantile_bin_edges(conf, int(n_bins))
-            for i in range(int(n_bins)):
-                lo, hi = edges[i], edges[i + 1]
-                if i < int(n_bins) - 1:
-                    m = (conf >= lo) & (conf < hi)
-                else:
-                    m = (conf >= lo) & (conf <= hi)
-                N = int(np.sum(m))
+            if scope == "global" and global_edges is not None:
+                idx_bins = []
+                edges = global_edges
+                for i in range(int(n_bins)):
+                    lo, hi = edges[i], edges[i + 1]
+                    if i < int(n_bins) - 1:
+                        mask = (conf >= lo) & (conf < hi)
+                    else:
+                        mask = (conf >= lo) & (conf <= hi)
+                    idx_bins.append(np.nonzero(mask)[0].astype(np.int64))
+            else:
+                # per_file binning (each file has its own deciles)
+                idx_bins, _ = _bin_indices(conf, int(n_bins), mode)
+
+            for i, idx in enumerate(idx_bins):
+                N = int(idx.size)
                 if N < int(min_bin_n):
                     continue
-                acc = float(np.mean((yp[m] == yt[m]).astype(np.float64)))
+                acc = float(np.mean((yp[idx] == yt[idx]).astype(np.float64)))
+                m = np.zeros((int(conf.size),), dtype=bool)
+                m[idx] = True
                 rec = _recall_by_class(yt, yp, int(k_seen), m)
                 rstd = float(np.nanstd(rec))
                 bins_by_i[i].append(
                     {
                         "n": N,
-                        "conf_mean": float(np.mean(conf[m])),
+                        "conf_mean": float(np.mean(conf[idx])),
                         "acc": acc,
                         "recall_std": rstd,
                         "recalls": rec,
@@ -303,7 +360,7 @@ def _analyze(
             "option_ids": option_ids,
             "n_total": int(n_total),
             "n_files": int(len(per_file)),
-            "conf_edges": None,
+            "conf_edges": global_edges,
             "bins": rows,
         }
 
@@ -312,27 +369,24 @@ def _analyze(
     yt = np.concatenate([o["yt"] for o in per_file], axis=0)
     yp = np.concatenate([o["yp"] for o in per_file], axis=0)
 
-    edges = _quantile_bin_edges(conf, int(n_bins))
+    idx_bins, edges = _bin_indices(conf, int(n_bins), str(binning_mode))
     rows = []
-    for i in range(int(n_bins)):
-        lo, hi = edges[i], edges[i + 1]
-        if i < int(n_bins) - 1:
-            m = (conf >= lo) & (conf < hi)
-        else:
-            m = (conf >= lo) & (conf <= hi)
-        N = int(np.sum(m))
+    for i, idx in enumerate(idx_bins):
+        N = int(idx.size)
         if N < int(min_bin_n):
             continue
-        acc = float(np.mean((yp[m] == yt[m]).astype(np.float64)))
+        acc = float(np.mean((yp[idx] == yt[idx]).astype(np.float64)))
+        m = np.zeros((int(conf.size),), dtype=bool)
+        m[idx] = True
         rec = _recall_by_class(yt, yp, int(k_seen), m)
         rstd = float(np.nanstd(rec))
         rows.append(
             {
                 "bin": int(i),
                 "n": int(N),
-                "conf_min": float(lo),
-                "conf_max": float(hi),
-                "conf_mean": float(np.mean(conf[m])),
+                "conf_min": float(np.min(conf[idx])) if N > 0 else float("nan"),
+                "conf_max": float(np.max(conf[idx])) if N > 0 else float("nan"),
+                "conf_mean": float(np.mean(conf[idx])),
                 "acc": float(acc),
                 "recall_std": float(rstd),
                 "recalls": rec,
@@ -353,22 +407,29 @@ def _print_table(rep: dict, table_mode: str = "summary"):
     option_ids = rep["option_ids"]
     mode = rep.get("aggregate_mode", "pooled")
     table_mode = str(table_mode or "summary").strip().lower()
+    n_bins = int(len(rep.get("bins", []) or [])) or 10
 
     if mode == "mean_over_files":
+        # If global edges exist, bins correspond to p10, p20, ..., p100 over pooled samples.
+        edges = rep.get("conf_edges")
+        has_edges = isinstance(edges, list) and len(edges) >= 2
         if table_mode == "full":
-            print("bin\tn_files\tN_mean\tconf_mean\tacc_mean±std\trecall_std_mean±std\t" + "\t".join([f"R_{o}" for o in option_ids]))
+            hdr = "pct_hi\tbin\tn_files\tN_mean\tconf_mean\tacc_mean±std\trecall_std_mean±std\t" + "\t".join([f"R_{o}" for o in option_ids])
+            print(hdr)
             for r in rep["bins"]:
                 rec = r["recalls"]
                 rec_str = "\t".join([f"{float(x):.3f}" if np.isfinite(x) else "nan" for x in rec])
+                pct_hi = int((int(r["bin"]) + 1) * (100 / max(1, int(n_bins))))
                 print(
-                    f"{r['bin']}\t{r['n_files']}\t{r['n_mean']:.1f}\t{r['conf_mean']:.4f}\t"
+                    f"{pct_hi}%\t{r['bin']}\t{r['n_files']}\t{r['n_mean']:.1f}\t{r['conf_mean']:.4f}\t"
                     f"{r['acc']:.4f}±{r['acc_std']:.4f}\t{r['recall_std']:.4f}±{r['recall_std_std']:.4f}\t{rec_str}"
                 )
         else:
-            print("bin\tn_files\tN_mean\tconf_mean\tacc_mean±std\trecall_std_mean±std")
+            print("pct_hi\tbin\tn_files\tN_mean\tconf_mean\tacc_mean±std\trecall_std_mean±std")
             for r in rep["bins"]:
+                pct_hi = int((int(r["bin"]) + 1) * (100 / max(1, int(n_bins))))
                 print(
-                    f"{r['bin']}\t{r['n_files']}\t{r['n_mean']:.1f}\t{r['conf_mean']:.4f}\t"
+                    f"{pct_hi}%\t{r['bin']}\t{r['n_files']}\t{r['n_mean']:.1f}\t{r['conf_mean']:.4f}\t"
                     f"{r['acc']:.4f}±{r['acc_std']:.4f}\t{r['recall_std']:.4f}±{r['recall_std_std']:.4f}"
                 )
     else:
@@ -468,6 +529,10 @@ def main():
     ap.add_argument("--title", type=str, default=None)
     ap.add_argument("--n_bins", type=int, default=10, help="Quantile bins (default: 10).")
     ap.add_argument("--min_bin_n", type=int, default=50, help="Skip bins with <N samples (default: 50).")
+    ap.add_argument("--binning_mode", type=str, default="equal_count", choices=["equal_count", "quantile"],
+                    help="equal_count: sort by confidence gap then split into equal-sized bins. quantile: use np.quantile thresholds.")
+    ap.add_argument("--binning_scope", type=str, default="global", choices=["global", "per_file"],
+                    help="For mean_over_files only. global: one set of percentile edges over ALL samples then apply to each file. per_file: compute deciles within each file.")
     ap.add_argument("--aggregate_mode", type=str, default="pooled", choices=["pooled", "mean_over_files"],
                     help="pooled: concatenate all samples. mean_over_files: compute bins per file then average metrics across files.")
     ap.add_argument("--table_mode", type=str, default="summary", choices=["summary", "full"],
@@ -585,6 +650,8 @@ def main():
         n_bins=int(args.n_bins),
         min_bin_n=int(args.min_bin_n),
         aggregate_mode=str(args.aggregate_mode),
+        binning_mode=str(args.binning_mode),
+        binning_scope=str(args.binning_scope),
     )
 
     _print_table(rep, table_mode=str(args.table_mode))
