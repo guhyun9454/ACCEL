@@ -406,7 +406,8 @@ def main():
     ap.add_argument("--jsonl_glob", type=str, default="*.jsonl")
     ap.add_argument("--run_idx", type=int, default=None)
     ap.add_argument("--models", type=str, nargs="+", default=None)
-    ap.add_argument("--results_root", type=str, default="", help="Root directory that contains results_* folders.")
+    ap.add_argument("--results_root", type=str, default="",
+                    help="Root dir containing results_<task>/ (e.g. results_csqa/, results_mmlu/). Default: script dir. Required for --models + --eval_names if results live elsewhere.")
     ap.add_argument("--eval_names", type=str, nargs="+", default=[], help="List of eval names (e.g., csqa,0 mmlu,0).")
     ap.add_argument("--option_id_set", type=str, default=None)
 
@@ -433,10 +434,13 @@ def main():
         
         print(f"[info] Running multi-dataset analysis for: {args.eval_names}")
         
+        print(f"[info] results_root = {results_root}")
         for eval_n in args.eval_names:
             files = []
+            tried_dirs = []
             for m in model_list:
                 rdir = _compute_results_dir(results_root, eval_n, m, args.option_id_set)
+                tried_dirs.append(rdir)
                 f = _discover_jsonl_files(rdir, jsonl_glob=str(args.jsonl_glob), run_idx=args.run_idx)
                 files.extend(f)
             
@@ -455,6 +459,11 @@ def main():
                     print(f"[error] Failed to analyze {eval_n}: {e}")
             else:
                 print(f"[warn] No files found for eval_name: {eval_n}")
+                print(f"[warn]   Looked under results_root: {results_root}")
+                for d in tried_dirs[:3]:
+                    print(f"[warn]     - {d}")
+                if len(tried_dirs) > 3:
+                    print(f"[warn]     ... and {len(tried_dirs) - 3} more model paths.")
 
     # 2. 기존 방식 (results_dir 단일 디렉토리나 jsonl_paths 지정 시)
     else:
