@@ -32,21 +32,21 @@ CURVE_DEFS = {
     },
     "ours": {
         "x_key": "p",
-        "label": "Ours",
+        "label": "Ours (without PriDe)",
         "color": "#5DADE2",
         "linestyle": "-.",
         "marker": "^",
     },
     "ours_pride_th1_2": {
         "x_key": "p",
-        "label": "Ours+PRIDE (th1/2)",
+        "label": "Ours (th1/2)",
         "color": "#27AE60",
         "linestyle": "--",
         "marker": "*",
     },
     "ours_pride_online_sqrt": {
         "x_key": "p",
-        "label": "Ours+PRIDE (Online Sqrt)",
+        "label": "Ours (Online Sqrt)",
         "color": "#2ECC71",
         "linestyle": "-.",
         "marker": "D",
@@ -348,6 +348,7 @@ def _plot_groups(
     max_by = max_pct_by_curve or {}
 
     _pride_keys = ("ours_pride_th1_2", "ours_pride_online_sqrt")
+    _show_pride_suffix = ("ours_pride_th1_2" in curve_keys and "ours_pride_online_sqrt" in curve_keys)
     if plot_individual:
         for gname, payloads in group_payloads.items():
             if not payloads:
@@ -355,6 +356,7 @@ def _plot_groups(
             for ck in curve_keys:
                 if ck in _pride_keys:
                     alphas = ours_pride_alphas or [2]
+                    _show_alpha = len(alphas) >= 2
                     for i, alpha in enumerate(alphas):
                         series_list = [_curve_series_from_payload(p, ck, y_key, ours_pride_alpha=alpha) for p in payloads]
                         m = max_by.get(ck)
@@ -369,8 +371,12 @@ def _plot_groups(
                         cd = CURVE_DEFS[ck]
                         color_idx = (0 if ck == "ours_pride_th1_2" else len(alphas)) + i
                         line_color = ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
-                        suffix = "th1/2" if ck == "ours_pride_th1_2" else "Online Sqrt"
-                        base_lab = f"{ours_pride_base_label} {suffix} (α={alpha})"
+                        base_lab = str(ours_pride_base_label or "Ours").strip()
+                        if _show_pride_suffix:
+                            suffix = "th1/2" if ck == "ours_pride_th1_2" else "Online Sqrt"
+                            base_lab = f"{base_lab} {suffix}"
+                        if _show_alpha:
+                            base_lab = f"{base_lab} (α={alpha})"
                         label = f"{gname} • {base_lab}" if (len(group_payloads) > 1 and (gname or "").strip()) else base_lab
                         if show_group_std and len(series_list) > 1 and ystd.size == y.size:
                             ylo = np.where(np.isfinite(ystd), y - ystd, y)
@@ -404,6 +410,7 @@ def _plot_groups(
         for ck in curve_keys:
             if ck in _pride_keys:
                 alphas = ours_pride_alphas or [2]
+                _show_alpha = len(alphas) >= 2
                 for i, alpha in enumerate(alphas):
                     all_series = []
                     for payloads in group_payloads.values():
@@ -420,8 +427,12 @@ def _plot_groups(
                     cd = CURVE_DEFS[ck]
                     color_idx = (0 if ck == "ours_pride_th1_2" else len(alphas)) + i
                     line_color = ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
-                    suffix = "th1/2" if ck == "ours_pride_th1_2" else "Online Sqrt"
-                    base_lab = f"{ours_pride_base_label} {suffix} (α={alpha})"
+                    base_lab = str(ours_pride_base_label or "Ours").strip()
+                    if _show_pride_suffix:
+                        suffix = "th1/2" if ck == "ours_pride_th1_2" else "Online Sqrt"
+                        base_lab = f"{base_lab} {suffix}"
+                    if _show_alpha:
+                        base_lab = f"{base_lab} (α={alpha})"
                     if show_overall_band and ystd.size == y.size:
                         ylo = np.where(np.isfinite(ystd), y - ystd, y)
                         yhi = np.where(np.isfinite(ystd), y + ystd, y)
@@ -455,13 +466,13 @@ def _plot_groups(
     _y_labels = {"acc": "Accuracy (%)", "delta_acc": "Δ Accuracy (%)", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
     _y_titles = {"acc": "Accuracy", "delta_acc": "Δ Accuracy", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
     subtitle = ""
-    ax.set_xlabel("Computational Cost (× of default)", fontsize=11)
-    ax.set_ylabel(_y_labels.get(y_key, y_key), fontsize=11)
-    ax.set_title(f"{task} — {_y_titles.get(y_key, y_key)}{subtitle}", fontsize=12)
+    ax.set_xlabel("Computational Cost (× of default)", fontsize=20)
+    ax.set_ylabel(_y_labels.get(y_key, y_key), fontsize=20)
+    ax.set_title(f"{task} — {_y_titles.get(y_key, y_key)}{subtitle}", fontsize=20)
     if y_key in ("delta_acc", "delta_recall_std"):
         ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax.grid(True, linestyle="--", alpha=0.35)
-    ax.legend(loc="best", fontsize=8, ncol=1)
+    ax.legend(loc="lower right", fontsize=24, ncol=1)
     fig.tight_layout()
     return fig
 
@@ -676,7 +687,7 @@ with col_c:
 with col_d:
     lab_ours = st.text_input("OURS 라벨", value=CURVE_DEFS["ours"]["label"])
 with col_e:
-    lab_ours_pride = st.text_input("OURS+PRIDE 라벨", value="Ours+PRIDE")
+    lab_ours_pride = st.text_input("Ours (PriDe 붙은 곡선) 라벨", value="Ours")
 
 curve_label_overrides = {
     "cyclic": lab_cyclic,

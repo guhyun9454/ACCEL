@@ -4399,8 +4399,9 @@ def main():
             cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
             pride_alphas = sorted(derived_records_pride_by_alpha.keys()) if derived_records_pride_by_alpha else []
 
-            _fmt = (lambda m, s: f"{m:.3f}±{s:.3f}" if np.isfinite(s) and s > 0 else f"{m:.3f}") if n_runs > 1 else (lambda m, s: f"{m:.3f}")
-            _fmt4 = (lambda m, s: f"{m:.4f}±{s:.4f}" if np.isfinite(s) and s > 0 else f"{m:.4f}") if n_runs > 1 else (lambda m, s: f"{m:.4f}")
+            # mean only (no run std) for report
+            _fmt = lambda m, s: f"{m:.3f}"
+            _fmt4 = lambda m, s: f"{m:.4f}"
 
             # 1. default + pride (per alpha only — alpha와 cyclic fraction p 동일 개념)
             logger.info("---- default + pride ----")
@@ -4443,6 +4444,27 @@ def main():
             for p in cyclic_fracs:
                 cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(base_any_cobjs, p)
                 logger.info(f"cyclic_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
+
+            # 5. THREE-METHOD REPORT: Cyclic, PriDe, Ours (Online Sqrt) — N subjects mean only (no run std)
+            logger.info(_purple("==== THREE-METHOD REPORT (macro over {} subjects, mean only, no run std) ====".format(n_subjects)))
+            # Cyclic 100%
+            _, acc_cyc, rstd_cyc, _, _, _ = get_cyclic_stats(base_any_cobjs, 100)
+            logger.info("Cyclic (100%)          : acc={:.4f}, recall_std={:.4f}".format(acc_cyc, rstd_cyc))
+            # PriDe (Default+PRIDE) 100% — use first alpha
+            if pride_alphas:
+                cobjs_pride = derived_records_pride_by_alpha.get(pride_alphas[0], [])
+                _, acc_pride, rstd_pride, _, _, _ = get_cyclic_stats(cobjs_pride, 100)
+                logger.info("PriDe (100%)           : acc={:.4f}, recall_std={:.4f}".format(acc_pride, rstd_pride))
+            else:
+                logger.info("PriDe (100%)           : (no pride data)")
+            # Ours (Online Sqrt All) 100%
+            cobjs_100 = derived_records_by_p.get(100) or derived_records_by_p.get(100.0) or []
+            if cobjs_100:
+                _, acc_ours, rstd_ours, _, _, _, _, _, _ = get_heur_stats_by_th1_p(cobjs_100, 100, "online_sqrt_all")
+                logger.info("Ours (Online Sqrt 100%): acc={:.4f}, recall_std={:.4f}".format(acc_ours, rstd_ours))
+            else:
+                logger.info("Ours (Online Sqrt 100%): (no data)")
+            logger.info("======================================================\n")
 
     # -------- finalize W&B --------
     _wandb_done = {"done": False}
