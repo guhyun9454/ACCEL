@@ -13,6 +13,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -35,6 +36,15 @@ def _compute_results_dir(code_dir: str, eval_name: str, model_path: str, option_
     return os.path.join(code_dir, path)
 
 
+def _get_mmlu_subject_set() -> Optional[set]:
+    """MMLU 표준 57개 subject 이름 집합 (report에서 subject 수 107 등 과다 방지)."""
+    try:
+        from mmlu_categories import subcategories  # type: ignore
+        return set(subcategories.keys())
+    except Exception:
+        return None
+
+
 def _discover_curve_files(results_dir: str) -> List[str]:
     base = os.path.join(results_dir, "*_curve.jsonl")
     return sorted(glob.glob(base))
@@ -45,6 +55,11 @@ def _subject_from_path(path: str, suffix: str = "_curve.jsonl") -> str:
     if basename.endswith(suffix):
         return basename[: -len(suffix)]
     return basename
+
+
+def _canonical_subject(stem: str) -> str:
+    """MMLU처럼 {subject}_run0 형태면 subject만 반환. CSQA/ARC는 stem 그대로."""
+    return re.sub(r"_run\d+$", "", stem)
 
 
 def _read_jsonl(path: str) -> List[dict]:
@@ -93,40 +108,64 @@ def run(
     if not base_files:
         return {}, 0
 
-    subjects = sorted({_subject_from_path(p, "_curve.jsonl") for p in base_files})
+    # canonical subject로 묶기: MMLU는 {subject}_run0, _run1 → subject 하나로
+    canon_to_paths: Dict[str, List[str]] = {}
+    for p in base_files:
+        stem = _subject_from_path(p, "_curve.jsonl")
+        canon = _canonical_subject(stem)
+        canon_to_paths.setdefault(canon, []).append(p)
+
+    subjects = sorted(canon_to_paths.keys())
+    if "mmlu" in results_dir:
+        mmlu_set = _get_mmlu_subject_set()
+        if mmlu_set is not None:
+            subjects = sorted(set(subjects) & mmlu_set)
     if max_subjects is not None:
         subjects = subjects[: max_subjects]
 
-    base_by_subj = {_subject_from_path(p, "_curve.jsonl"): p for p in base_files}
-
-    # per p: list of (base_ratio, probe2_ratio, cyclic_ratio) per subject
+    # per p: list of (base_ratio, probe2_ratio, cyclic_ratio) per subject (subject당 1개, run은 평균)
     routing_by_p: Dict[float, List[Tuple[float, float, float]]] = {p: [] for p in OURS_PERCENTS}
-    # per p: list of (t_to_t, t_to_f, f_to_t, f_to_f) counts per subject (then we'll normalize)
     transition_by_p: Dict[float, List[Tuple[int, int, int, int]]] = {p: [] for p in OURS_PERCENTS}
 
     for subj in subjects:
-        path = base_by_subj.get(subj)
-        if not path:
+        paths = canon_to_paths.get(subj, [])
+        if not paths:
             continue
-        lines = _read_jsonl(path)
-        for obj in lines:
-            row = _get_ours_th12_per_line(obj)
-            if row is None:
-                continue
-            p, n_base, n_probe2, n_cyclic, trans = row
-            if p not in routing_by_p:
-                continue
-            N = n_base + n_probe2 + n_cyclic
-            if N > 0:
-                routing_by_p[p].append((n_base / N, n_probe2 / N, n_cyclic / N))
-            if trans is not None:
-                bt = int(trans.get("base_t_count", 0))
-                bf = int(trans.get("base_f_count", 0))
-                t_to_f = int(trans.get("t_to_f_count", 0))
-                f_to_t = int(trans.get("f_to_t_count", 0))
-                t_to_t = bt - t_to_f
-                f_to_f = bf - f_to_t
-                transition_by_p[p].append((t_to_t, t_to_f, f_to_t, f_to_f))
+        # run 파일들에서 p별로 (n_base, n_probe2, n_cyclic), transition 수집 후 run 평균
+        per_p_routing: Dict[float, List[Tuple[int, int, int]]] = {p: [] for p in OURS_PERCENTS}
+        per_p_trans: Dict[float, List[Tuple[int, int, int, int]]] = {p: [] for p in OURS_PERCENTS}
+        for path in paths:
+            lines = _read_jsonl(path)
+            for obj in lines:
+                row = _get_ours_th12_per_line(obj)
+                if row is None:
+                    continue
+                p, n_base, n_probe2, n_cyclic, trans = row
+                if p not in per_p_routing:
+                    continue
+                N = n_base + n_probe2 + n_cyclic
+                if N > 0:
+                    per_p_routing[p].append((n_base, n_probe2, n_cyclic))
+                if trans is not None:
+                    bt = int(trans.get("base_t_count", 0))
+                    bf = int(trans.get("base_f_count", 0))
+                    t_to_f = int(trans.get("t_to_f_count", 0))
+                    f_to_t = int(trans.get("f_to_t_count", 0))
+                    per_p_trans[p].append((bt - t_to_f, t_to_f, f_to_t, bf - f_to_t))
+        for p in OURS_PERCENTS:
+            if per_p_routing[p]:
+                nb = np.mean([x[0] for x in per_p_routing[p]])
+                np2 = np.mean([x[1] for x in per_p_routing[p]])
+                nc = np.mean([x[2] for x in per_p_routing[p]])
+                tot = nb + np2 + nc
+                if tot > 0:
+                    routing_by_p[p].append((float(nb / tot), float(np2 / tot), float(nc / tot)))
+            if per_p_trans[p]:
+                t2t = float(np.mean([x[0] for x in per_p_trans[p]]))
+                t2f = float(np.mean([x[1] for x in per_p_trans[p]]))
+                f2t = float(np.mean([x[2] for x in per_p_trans[p]]))
+                f2f = float(np.mean([x[3] for x in per_p_trans[p]]))
+                transition_by_p[p].append((t2t, t2f, f2t, f2f))
 
     n_used = max(len(routing_by_p.get(p, [])) for p in OURS_PERCENTS) if OURS_PERCENTS else 0
 

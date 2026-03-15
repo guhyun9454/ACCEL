@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Cyclic, PriDe, Ours (Online Sqrt All) 3개 방법에 대해
-subject별 curve/pride_curve JSONL에서 구간별 acc/recall_std를 읽어
-N개 subject 평균(mean만, run std 없음)으로 리포트 출력.
+subject별 curve/pride_curve JSONL에서 구간별 acc/recall_std/cost를 읽어
+N개 subject 평균 및 subject 간 표준편차(mean ± std)로 리포트 출력.
 Cyclic: 10~100%, PriDe/Ours: 2,5,10,...,100%. Ours는 alpha=2 고정.
 
 Usage:
@@ -15,6 +15,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -35,6 +36,15 @@ def _compute_results_dir(code_dir: str, eval_name: str, model_path: str, option_
     return os.path.join(code_dir, path)
 
 
+def _get_mmlu_subject_set() -> Optional[set]:
+    """MMLU 표준 57개 subject 이름 집합 (report에서 subject 수 107 등 과다 방지)."""
+    try:
+        from mmlu_categories import subcategories  # type: ignore
+        return set(subcategories.keys())
+    except Exception:
+        return None
+
+
 def _discover_curve_files(results_dir: str) -> Tuple[List[str], List[str]]:
     base = os.path.join(results_dir, "*_curve.jsonl")
     pride = os.path.join(results_dir, "*_pride_curve.jsonl")
@@ -48,6 +58,11 @@ def _subject_from_path(path: str, suffix: str) -> str:
     if basename.endswith(suffix):
         return basename[: -len(suffix)]
     return basename
+
+
+def _canonical_subject(stem: str) -> str:
+    """MMLU처럼 {subject}_run0 형태면 subject만 반환. CSQA/ARC는 stem 그대로."""
+    return re.sub(r"_run\d+$", "", stem)
 
 
 def _read_jsonl(path: str) -> List[dict]:
@@ -163,12 +178,26 @@ def run(
     if not base_files:
         return {}, 0
 
-    subjects = sorted({_subject_from_path(p, "_curve.jsonl") for p in base_files})
+    # canonical subject로 묶기: MMLU는 {subject}_run0, _run1 → subject 하나로, CSQA/ARC는 파일명 그대로
+    canon_to_base: Dict[str, List[str]] = {}
+    for p in base_files:
+        stem = _subject_from_path(p, "_curve.jsonl")
+        canon = _canonical_subject(stem)
+        canon_to_base.setdefault(canon, []).append(p)
+    canon_to_pride: Dict[str, List[str]] = {}
+    for p in pride_files:
+        stem = _subject_from_path(p, "_pride_curve.jsonl")
+        canon = _canonical_subject(stem)
+        canon_to_pride.setdefault(canon, []).append(p)
+
+    subjects = sorted(canon_to_base.keys())
+    # MMLU면 표준 57개 subject만 사용
+    if "mmlu" in results_dir:
+        mmlu_set = _get_mmlu_subject_set()
+        if mmlu_set is not None:
+            subjects = sorted(set(subjects) & mmlu_set)
     if max_subjects is not None:
         subjects = subjects[: max_subjects]
-
-    base_by_subj = {_subject_from_path(p, "_curve.jsonl"): p for p in base_files}
-    pride_by_subj = {_subject_from_path(p, "_pride_curve.jsonl"): p for p in pride_files}
 
     # per-subject per-frac lists: { p: [(acc, rstd, cost), ...] }
     cyc_by_p: Dict[int, List[Tuple[float, Optional[float], Optional[float]]]] = {p: [] for p in CYCLIC_FRACS}
@@ -176,33 +205,73 @@ def run(
     ours_by_p: Dict[float, List[Tuple[float, Optional[float], Optional[float]]]] = {p: [] for p in PRIDE_OURS_FRACS}
 
     for subj in subjects:
-        base_path = base_by_subj.get(subj)
-        pride_path = pride_by_subj.get(subj)
-        if not base_path:
+        base_paths = canon_to_base.get(subj, [])
+        if not base_paths:
             continue
-        base_lines = _read_jsonl(base_path)
-        if not base_lines:
+        # run이 여러 개면 run별 값 평균 내서 subject당 하나로
+        cyc_per_run = []
+        for base_path in base_paths:
+            base_lines = _read_jsonl(base_path)
+            if not base_lines:
+                continue
+            cyc_vals = _get_cyclic_at_fracs(base_lines, CYCLIC_FRACS)
+            if cyc_vals:
+                cyc_per_run.append(cyc_vals)
+        if not cyc_per_run:
             continue
-        cyc_vals = _get_cyclic_at_fracs(base_lines, CYCLIC_FRACS)
-        for p, (acc, rstd, cost) in cyc_vals.items():
-            cyc_by_p[p].append((acc, rstd, cost))
+        for p in CYCLIC_FRACS:
+            accs = [r[p][0] for r in cyc_per_run if p in r]
+            rstds = [r[p][1] for r in cyc_per_run if p in r and r[p][1] is not None]
+            costs = [r[p][2] for r in cyc_per_run if p in r and len(r[p]) > 2 and r[p][2] is not None]
+            if accs:
+                cyc_by_p[p].append((
+                    float(np.mean(accs)),
+                    float(np.mean(rstds)) if rstds else None,
+                    float(np.mean(costs)) if costs else None,
+                ))
 
-        if pride_path:
+        pride_paths = canon_to_pride.get(subj, [])
+        if not pride_paths:
+            continue
+        pride_per_run = []
+        ours_per_run = []
+        for pride_path in pride_paths:
             pride_lines = _read_jsonl(pride_path)
-            pride_vals = _get_pride_at_fracs(pride_lines, PRIDE_OURS_FRACS)
-            for p, (acc, rstd, cost) in pride_vals.items():
-                p_key = int(p) if p == int(p) else p
-                if p_key in pride_by_p:
-                    pride_by_p[p_key].append((acc, rstd, cost))
-            ours_vals = _get_ours_online_sqrt_at_fracs(pride_lines, PRIDE_OURS_FRACS, alpha=float(OURS_ALPHA))
-            for p, (acc, rstd, cost) in ours_vals.items():
-                p_key = int(p) if p == int(p) else p
-                if p_key in ours_by_p:
-                    ours_by_p[p_key].append((acc, rstd, cost))
+            if not pride_lines:
+                continue
+            pv = _get_pride_at_fracs(pride_lines, PRIDE_OURS_FRACS)
+            ov = _get_ours_online_sqrt_at_fracs(pride_lines, PRIDE_OURS_FRACS, alpha=float(OURS_ALPHA))
+            if pv:
+                pride_per_run.append(pv)
+            if ov:
+                ours_per_run.append(ov)
+        for p in PRIDE_OURS_FRACS:
+            p_key = int(p) if p == int(p) else p
+            if pride_per_run and any(p in r for r in pride_per_run):
+                accs = [r[p][0] for r in pride_per_run if p in r]
+                rstds = [r[p][1] for r in pride_per_run if p in r and r[p][1] is not None]
+                costs = [r[p][2] for r in pride_per_run if p in r and len(r[p]) > 2 and r[p][2] is not None]
+                if accs and p_key in pride_by_p:
+                    pride_by_p[p_key].append((
+                        float(np.mean(accs)),
+                        float(np.mean(rstds)) if rstds else None,
+                        float(np.mean(costs)) if costs else None,
+                    ))
+            if ours_per_run and any(p in r for r in ours_per_run) and p_key in ours_by_p:
+                accs = [r[p][0] for r in ours_per_run if p in r]
+                rstds = [r[p][1] for r in ours_per_run if p in r and r[p][1] is not None]
+                costs = [r[p][2] for r in ours_per_run if p in r and len(r[p]) > 2 and r[p][2] is not None]
+                if accs:
+                    ours_by_p[p_key].append((
+                        float(np.mean(accs)),
+                        float(np.mean(rstds)) if rstds else None,
+                        float(np.mean(costs)) if costs else None,
+                    ))
 
     n_used = max(len(cyc_by_p.get(p, [])) for p in CYCLIC_FRACS) if CYCLIC_FRACS else 0
 
     def _mean_over_subjects(by_p: Dict) -> Dict:
+        """Returns by_p[p] = (mean_acc, std_acc, mean_rstd, std_rstd, mean_cost, std_cost). std = subject 간 분산(표준편차)."""
         result = {}
         for p, lst in by_p.items():
             if not lst:
@@ -210,10 +279,16 @@ def run(
             accs = [x[0] for x in lst]
             rstds = [x[1] for x in lst if x[1] is not None]
             costs = [x[2] for x in lst if len(x) > 2 and x[2] is not None]
+            std_acc = float(np.std(accs)) if len(accs) > 1 else None
+            std_rstd = float(np.std(rstds)) if len(rstds) > 1 else None
+            std_cost = float(np.std(costs)) if len(costs) > 1 else None
             result[p] = (
                 float(np.mean(accs)),
+                std_acc,
                 float(np.mean(rstds)) if rstds else None,
+                std_rstd,
                 float(np.mean(costs)) if costs else None,
+                std_cost,
             )
         return result
 
@@ -227,7 +302,7 @@ def run(
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Cyclic, PriDe, Ours (Online Sqrt) 3-method report from curve JSONL (mean over subjects, no run std).")
+    ap = argparse.ArgumentParser(description="Cyclic, PriDe, Ours (Online Sqrt) 3-method report from curve JSONL (mean ± std over subjects).")
     ap.add_argument("--results_dir", type=str, default="", help="Directory containing *_curve.jsonl and *_pride_curve.jsonl")
     ap.add_argument("--results_root", type=str, default="", help="Root for results_* (used with --models)")
     ap.add_argument("--models", type=str, nargs="+", default=None, help="Model names; with --eval_name to resolve results_dir")
@@ -280,32 +355,42 @@ def main():
     # 단일 디렉터리면 그대로 출력; 여러 모델이면 모델별 평균으로 한 번만 출력
     if n_models == 1:
         report, n_subj, label = reports_per_model[0]
-        print("==== THREE-METHOD REPORT: {} (mean over {} subjects, no run std) ====".format(label, n_subj))
+        print("==== THREE-METHOD REPORT: {} (mean ± std over {} subjects) ====".format(label, n_subj))
         print("results_dir:", dirs_to_run[0][0])
     else:
-        # 모델별 평균: method별 p별로 (acc, rstd, cost) 리스트의 평균
+        # 모델별 평균: method별 p별로 (acc, acc_std, rstd, rstd_std, cost, cost_std) 유지, mean은 모델 평균
         method_names = ["Cyclic", "PriDe", "Ours (Online Sqrt, α=2)"]
         all_ps = sorted(set().union(*(set(reports_per_model[i][0].get(m, {}).keys()) for i in range(n_models) for m in method_names)), key=lambda x: (float(x), x))
         report = {}
         for method_name in method_names:
             by_p = {}
             for p in all_ps:
-                accs, rstds, costs = [], [], []
+                accs, acc_stds, rstds, rstd_stds, costs, cost_stds = [], [], [], [], [], []
                 for rep, _, _ in reports_per_model:
                     if method_name not in rep or p not in rep[method_name]:
                         continue
                     t = rep[method_name][p]
+                    # t = (mean_acc, std_acc, mean_rstd, std_rstd, mean_cost, std_cost)
                     accs.append(t[0])
-                    if t[1] is not None:
-                        rstds.append(t[1])
+                    if len(t) > 1 and t[1] is not None:
+                        acc_stds.append(t[1])
                     if len(t) > 2 and t[2] is not None:
-                        costs.append(t[2])
+                        rstds.append(t[2])
+                    if len(t) > 3 and t[3] is not None:
+                        rstd_stds.append(t[3])
+                    if len(t) > 4 and t[4] is not None:
+                        costs.append(t[4])
+                    if len(t) > 5 and t[5] is not None:
+                        cost_stds.append(t[5])
                 if not accs:
                     continue
                 by_p[p] = (
                     float(np.mean(accs)),
+                    float(np.mean(acc_stds)) if acc_stds else None,
                     float(np.mean(rstds)) if rstds else None,
+                    float(np.mean(rstd_stds)) if rstd_stds else None,
                     float(np.mean(costs)) if costs else None,
+                    float(np.mean(cost_stds)) if cost_stds else None,
                 )
             report[method_name] = by_p
         print("==== THREE-METHOD REPORT: mean over {} models (avg {} subjects per model) ====".format(n_models, n_subj_avg))
@@ -319,10 +404,17 @@ def main():
             print("  (no data — need *_pride_curve.jsonl from eval_clm with --pride_mix)" if "PriDe" in method_name or "Ours" in method_name else "  (no data)")
         else:
             for p in sorted(by_p.keys(), key=lambda x: (float(x), x)):
-                acc, rstd, cost = by_p[p][0], by_p[p][1], by_p[p][2] if len(by_p[p]) > 2 else None
-                rstr = f", recall_std={rstd:.4f}" if rstd is not None else ""
-                cstr = f", cost={cost:.4f}" if cost is not None else ""
-                print("  {}% : acc={:.4f}{}{}".format(p, acc, rstr, cstr))
+                t = by_p[p]
+                acc = t[0]
+                acc_std = t[1] if len(t) > 1 else None
+                rstd = t[2] if len(t) > 2 else None
+                rstd_std = t[3] if len(t) > 3 else None
+                cost = t[4] if len(t) > 4 else None
+                cost_std = t[5] if len(t) > 5 else None
+                acc_str = f"{acc:.4f}±{acc_std:.4f}" if acc_std is not None else f"{acc:.4f}"
+                rstr = f", recall_std={rstd:.4f}±{rstd_std:.4f}" if rstd is not None and rstd_std is not None else (f", recall_std={rstd:.4f}" if rstd is not None else "")
+                cstr = f", cost={cost:.4f}±{cost_std:.4f}" if cost is not None and cost_std is not None else (f", cost={cost:.4f}" if cost is not None else "")
+                print("  {}% : acc={}{}{}".format(p, acc_str, rstr, cstr))
     print("\n======================================================")
 
 
