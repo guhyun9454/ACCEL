@@ -3,20 +3,6 @@
 Flip Rate (order sensitivity) analysis for cyclic rotations.
 
 Goal: show that low-confidence samples are more unstable under option order rotations.
-
-We define per-sample cyclic predictions as:
-  for each cyclic rotation perm p (letter-position -> content-index),
-  pred_letter = argmax(probs_letter_space)
-  pred_content = p[pred_letter]
-
-Flip metrics (per sample):
-  - flip_any: 1 if not all pred_content across rotations are identical
-  - pairwise_disagree: average_{i<j} 1[pred_i != pred_j]
-  - T→F (true→false): 1 if identity was correct but at least one cyclic rotation is wrong (lucky correct lost)
-  - F→T (false→true): 1 if identity was wrong but at least one cyclic rotation is correct (recoverable error)
-
-We then bin samples by base confidence gap (top1-top2) into equal-count deciles (per file),
-and average flip metrics across files (mean±std).
 """
 
 import argparse
@@ -52,7 +38,7 @@ def _try_import_wandb():
 def _compute_results_dir(code_dir: str, eval_name: str, pretrained_model_path: str, option_id_set: Optional[str]):
     eval_args = str(eval_name).split(",")
     task = str(eval_args[0]).strip()
-    num_few_shot = int(eval_args[1])
+    num_few_shot = int(eval_args[1]) if len(eval_args) > 1 else 0
     setting = str(eval_args[2]).strip() if len(eval_args) > 2 and str(eval_args[2]).strip() else None
     model_name = str(pretrained_model_path).split("/")[-1]
     save_path = f"results_{task}/{num_few_shot}s_{model_name}/{task}"
@@ -141,14 +127,6 @@ def _pairwise_disagree(preds: List[int]) -> float:
 
 
 def _load_one_file(fp: str, option_id_set: Optional[str], require_cyclic: bool = True, flip_only: bool = False):
-    """
-    Returns dict with arrays:
-      conf_gap: (N,)
-      flip_any: (N,)
-      pair_disagree: (N,)
-      t_to_f: (N,) or None if flip_only
-      f_to_t: (N,) or None if flip_only
-    """
     gaps: List[float] = []
     flip_any: List[float] = []
     pair_dis: List[float] = []
@@ -170,7 +148,6 @@ def _load_one_file(fp: str, option_id_set: Optional[str], require_cyclic: bool =
         if not isinstance(probs, list) or len(probs) == 0:
             continue
         if not isinstance(probs[0], list):
-            # base-only cache can't measure flip under rotations
             continue
 
         row0 = probs[0]
@@ -192,14 +169,12 @@ def _load_one_file(fp: str, option_id_set: Optional[str], require_cyclic: bool =
             identity = tuple(range(k_local))
             identity_idx = perm_list.index(identity) if identity in perm_list else 0
 
-            # cyclic rotation indices
             cyc_perms = _rotations(k_local)
             cyc_indices = []
             for p in cyc_perms:
                 if p in perm_list:
                     cyc_indices.append(perm_list.index(p))
             if require_cyclic and (len(cyc_indices) != k_local):
-                # can't form full cyclic set for flip metric
                 return None
 
         if k != k_local:
@@ -211,7 +186,6 @@ def _load_one_file(fp: str, option_id_set: Optional[str], require_cyclic: bool =
             continue
         gap = _gap_top1_top2(bp)
 
-        # cyclic predictions in content-space
         preds_content = []
         for pi in cyc_indices:
             lp = np.asarray(probs[pi], dtype=np.float64)
@@ -219,7 +193,7 @@ def _load_one_file(fp: str, option_id_set: Optional[str], require_cyclic: bool =
                 preds_content = []
                 break
             pred_letter = int(np.argmax(lp))
-            p = perm_list[pi]  # letter -> content
+            p = perm_list[pi] 
             preds_content.append(int(p[pred_letter]))
         if not preds_content:
             continue
@@ -294,7 +268,7 @@ def _analyze_files(
         t2f = o.get("t_to_f")
         f2t = o.get("f_to_t")
         n_total += int(gap.size)
-        order = np.argsort(gap, kind="mergesort")  # low conf first
+        order = np.argsort(gap, kind="mergesort") 
         idx_bins = _equal_count_bins(order, int(n_bins))
         for i, idx in enumerate(idx_bins):
             N = int(idx.size)
@@ -373,31 +347,46 @@ def _print_table(rep: dict):
             )
 
 
-def _save_plot(rep: dict, out_path: str, title: str):
+def _save_plot(reports_dict: Dict[str, dict], out_path: str, title: str):
     plt = _try_import_matplotlib()
     if plt is None:
         print("[warn] matplotlib not available; skipping plot.")
         return None
-    bins = rep["bins"]
-    if not bins:
-        return None
-    has_tf_ft = rep.get("has_tf_ft", False)
-    xs = np.asarray([b["pct_hi"] for b in bins], dtype=np.float64)
-    y_flip = np.asarray([b["flip_mean"] for b in bins], dtype=np.float64)
-    y_flip_std = np.asarray([b["flip_std"] for b in bins], dtype=np.float64)
 
-    fig, ax = plt.subplots(1, 1, figsize=(9.0, 5.2) if has_tf_ft else (8.5, 4.8), dpi=170)
-    ax.plot(xs, y_flip, marker="o", linewidth=2.0, color="#C0392B", label="Flip rate")
-    ax.fill_between(xs, y_flip - y_flip_std, y_flip + y_flip_std, color="#C0392B", alpha=0.18, linewidth=0)
-    if has_tf_ft:
-        y_t2f = np.asarray([b["t_to_f_mean"] for b in bins], dtype=np.float64)
-        y_t2f_std = np.asarray([b["t_to_f_std"] for b in bins], dtype=np.float64)
-        y_f2t = np.asarray([b["f_to_t_mean"] for b in bins], dtype=np.float64)
-        y_f2t_std = np.asarray([b["f_to_t_std"] for b in bins], dtype=np.float64)
-        ax.plot(xs, y_t2f, marker="s", linewidth=1.8, color="#8E44AD", label="T→F (correct→wrong)")
-        ax.fill_between(xs, y_t2f - y_t2f_std, y_t2f + y_t2f_std, color="#8E44AD", alpha=0.18, linewidth=0)
-        ax.plot(xs, y_f2t, marker="^", linewidth=1.8, color="#27AE60", label="F→T (wrong→correct)")
-        ax.fill_between(xs, y_f2t - y_f2t_std, y_f2t + y_f2t_std, color="#27AE60", alpha=0.18, linewidth=0)
+    # 색상 지정 (빨강, 파랑, 초록, 보라, 주황)
+    colors = ["#C0392B", "#2980B9", "#27AE60", "#8E44AD", "#F39C12"]
+    
+    # T->F 등 부가 지표를 그릴지 결정 (데이터셋이 1개일 때만 복잡한 선들을 그림)
+    plot_tf_ft = len(reports_dict) == 1
+
+    fig, ax = plt.subplots(1, 1, figsize=(9.0, 5.2) if plot_tf_ft else (8.5, 4.8), dpi=170)
+
+    for idx, (name, rep) in enumerate(reports_dict.items()):
+        bins = rep["bins"]
+        if not bins:
+            continue
+        
+        color = colors[idx % len(colors)]
+        xs = np.asarray([b["pct_hi"] for b in bins], dtype=np.float64)
+        y_flip = np.asarray([b["flip_mean"] for b in bins], dtype=np.float64)
+        y_flip_std = np.asarray([b["flip_std"] for b in bins], dtype=np.float64)
+
+        # Flip Rate 그리기
+        label_name = f"Flip rate ({name})" if len(reports_dict) > 1 else "Flip rate"
+        ax.plot(xs, y_flip, marker="o", linewidth=2.0, color=color, label=label_name)
+        ax.fill_between(xs, y_flip - y_flip_std, y_flip + y_flip_std, color=color, alpha=0.18, linewidth=0)
+
+        # 데이터셋이 1개일 때만 T->F / F->T 추가
+        if plot_tf_ft and rep.get("has_tf_ft", False):
+            y_t2f = np.asarray([b["t_to_f_mean"] for b in bins], dtype=np.float64)
+            y_t2f_std = np.asarray([b["t_to_f_std"] for b in bins], dtype=np.float64)
+            y_f2t = np.asarray([b["f_to_t_mean"] for b in bins], dtype=np.float64)
+            y_f2t_std = np.asarray([b["f_to_t_std"] for b in bins], dtype=np.float64)
+            ax.plot(xs, y_t2f, marker="s", linewidth=1.8, color="#8E44AD", label="T→F (correct→wrong)")
+            ax.fill_between(xs, y_t2f - y_t2f_std, y_t2f + y_t2f_std, color="#8E44AD", alpha=0.18, linewidth=0)
+            ax.plot(xs, y_f2t, marker="^", linewidth=1.8, color="#27AE60", label="F→T (wrong→correct)")
+            ax.fill_between(xs, y_f2t - y_f2t_std, y_f2t + y_f2t_std, color="#27AE60", alpha=0.18, linewidth=0)
+
     ax.set_xlabel("Confidence percentile bin (top1-top2 probability gap)")
     ax.set_ylabel("Rate")
     ax.set_title(title)
@@ -413,16 +402,15 @@ def _save_plot(rep: dict, out_path: str, title: str):
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--results_dir", type=str, default="", help="Directory containing cached *.jsonl results.")
-    ap.add_argument("--jsonl_paths", type=str, nargs="+", default=None, help="Explicit jsonl file paths to analyze (overrides --results_dir).")
+    ap.add_argument("--jsonl_paths", type=str, nargs="+", default=None, help="Explicit jsonl file paths to analyze.")
     ap.add_argument("--jsonl_glob", type=str, default="*.jsonl")
     ap.add_argument("--run_idx", type=int, default=None)
-    ap.add_argument("--models", type=str, nargs="+", default=None,
-                    help="Model names/ids. Auto-collect jsonl under computed results_dir for each model.")
-    ap.add_argument("--results_root", type=str, default="", help="Root directory that contains results_* folders (default: this script's directory).")
-    ap.add_argument("--eval_name", type=str, default="", help="Eval name like 'arc,0,full'. Used when --models is set.")
+    ap.add_argument("--models", type=str, nargs="+", default=None)
+    ap.add_argument("--results_root", type=str, default="", help="Root directory that contains results_* folders.")
+    ap.add_argument("--eval_names", type=str, nargs="+", default=[], help="List of eval names (e.g., csqa,0 mmlu,0).")
     ap.add_argument("--option_id_set", type=str, default=None)
 
-    ap.add_argument("--flip_only", action="store_true", help="Only flip rate (and pairwise disagree); skip T→F / F→T.")
+    ap.add_argument("--flip_only", action="store_true")
     ap.add_argument("--n_bins", type=int, default=10)
     ap.add_argument("--min_bin_n", type=int, default=1)
     ap.add_argument("--out", type=str, default="flip_rate_deciles.png")
@@ -434,140 +422,79 @@ def main():
     ap.add_argument("--wandb_entity", type=str, default="capde")
     ap.add_argument("--wandb_run_name", type=str, default=None)
 
-    # One-shot runner (optional)
-    ap.add_argument("--eval_clm_path", type=str, default="")
-    ap.add_argument("--skip_eval", action="store_true")
-    ap.add_argument("--pretrained_model_path", type=str, default="")
-    ap.add_argument("--eval_names", type=str, nargs="+", default=[])
-    ap.add_argument("--n_runs", type=int, default=1)
-    ap.add_argument("--force", action="store_true")
-
     args, unknown = ap.parse_known_args()
 
-    results_dir = str(args.results_dir).strip()
-    files: List[str] = []
+    reports = {}
 
-    if args.models:
+    # 1. 모델과 여러 eval_names가 주어졌을 때 각각 분석
+    if args.models and args.eval_names:
         results_root = str(args.results_root).strip() or os.path.dirname(os.path.abspath(__file__))
-        eval_name = str(args.eval_name).strip() or (str(args.eval_names[0]).strip() if args.eval_names else "")
-        if not eval_name:
-            raise SystemExit("When using --models, provide --eval_name (e.g., arc,0,full) or --eval_names.")
-        model_list = [str(m).strip() for m in (args.models or []) if str(m).strip()]
-        by_model: Dict[str, List[str]] = {}
-        for m in model_list:
-            rdir = _compute_results_dir(results_root, eval_name, m, args.option_id_set)
-            f = _discover_jsonl_files(rdir, jsonl_glob=str(args.jsonl_glob), run_idx=args.run_idx)
-            by_model[m] = f
-            files.extend(f)
-            if not results_dir and os.path.isdir(rdir):
-                results_dir = rdir
-        files = sorted(set(files))
-        print(f"[info] selected models={len(model_list)}, jsonl_files={len(files)}")
-        for m in model_list:
-            print(f"[info]  - {m.split('/')[-1]}: {len(by_model.get(m, []))} files")
+        model_list = [str(m).strip() for m in args.models if str(m).strip()]
+        
+        print(f"[info] Running multi-dataset analysis for: {args.eval_names}")
+        
+        for eval_n in args.eval_names:
+            files = []
+            for m in model_list:
+                rdir = _compute_results_dir(results_root, eval_n, m, args.option_id_set)
+                f = _discover_jsonl_files(rdir, jsonl_glob=str(args.jsonl_glob), run_idx=args.run_idx)
+                files.extend(f)
+            
+            files = sorted(set(files))
+            if files:
+                try:
+                    rep = _analyze_files(
+                        files=files,
+                        option_id_set=args.option_id_set,
+                        n_bins=int(args.n_bins),
+                        min_bin_n=int(args.min_bin_n),
+                        flip_only=bool(args.flip_only),
+                    )
+                    reports[eval_n] = rep
+                except Exception as e:
+                    print(f"[error] Failed to analyze {eval_n}: {e}")
+            else:
+                print(f"[warn] No files found for eval_name: {eval_n}")
 
-    if (not files) and (not results_dir) and str(args.pretrained_model_path).strip() and args.eval_names:
-        eval_clm_path = str(args.eval_clm_path).strip() or os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_clm.py")
-        code_dir = os.path.dirname(os.path.abspath(eval_clm_path))
-        eval_name = str(args.eval_names[0])
-        results_dir = _compute_results_dir(code_dir, eval_name, str(args.pretrained_model_path), args.option_id_set)
-        files = _discover_jsonl_files(results_dir, jsonl_glob=str(args.jsonl_glob), run_idx=args.run_idx)
-        if (not files) and (not bool(args.skip_eval)):
-            cmd = [sys.executable, os.path.abspath(eval_clm_path)]
-            cmd += ["--pretrained_model_path", str(args.pretrained_model_path)]
-            cmd += ["--eval_names", eval_name]
-            if args.option_id_set:
-                cmd += ["--option_id_set", str(args.option_id_set)]
-            if int(args.n_runs) != 1:
-                cmd += ["--n_runs", str(int(args.n_runs))]
-            if bool(args.force):
-                cmd += ["--force"]
-            if bool(args.wandb):
-                cmd += ["--wandb"]
-            if args.wandb_project:
-                cmd += ["--wandb_project", str(args.wandb_project)]
-            if args.wandb_entity:
-                cmd += ["--wandb_entity", str(args.wandb_entity)]
-            if args.wandb_run_name:
-                cmd += ["--wandb_run_name", str(args.wandb_run_name)]
-            cmd += list(unknown)
-            print("==== Running eval_clm.py ====")
-            print("cwd:", code_dir)
-            print("cmd:", " ".join(cmd))
-            subprocess.run(cmd, cwd=code_dir, check=True)
-
-    if not files:
+    # 2. 기존 방식 (results_dir 단일 디렉토리나 jsonl_paths 지정 시)
+    else:
+        results_dir = str(args.results_dir).strip()
+        files = []
         if args.jsonl_paths:
-            files = [os.path.abspath(p) for p in (args.jsonl_paths or [])]
+            files = [os.path.abspath(p) for p in args.jsonl_paths]
             if not results_dir and files:
                 results_dir = os.path.dirname(os.path.abspath(files[0]))
-        else:
-            if not results_dir:
-                raise SystemExit("Provide --models, --jsonl_paths, --results_dir, or eval_clm args.")
+        elif results_dir:
             files = _discover_jsonl_files(results_dir, jsonl_glob=str(args.jsonl_glob), run_idx=args.run_idx)
+        
+        if files:
+            dataset_name = args.eval_names[0] if args.eval_names else "Dataset"
+            rep = _analyze_files(
+                files=files,
+                option_id_set=args.option_id_set,
+                n_bins=int(args.n_bins),
+                min_bin_n=int(args.min_bin_n),
+                flip_only=bool(args.flip_only),
+            )
+            reports[dataset_name] = rep
 
-    if not files:
-        raise SystemExit("No jsonl files selected.")
+    if not reports:
+        raise SystemExit("No data to analyze.")
 
-    rep = _analyze_files(
-        files=files,
-        option_id_set=args.option_id_set,
-        n_bins=int(args.n_bins),
-        min_bin_n=int(args.min_bin_n),
-        flip_only=bool(args.flip_only),
-    )
-    _print_table(rep)
+    # 각 데이터셋별 테이블 출력
+    for name, rep in reports.items():
+        print(f"\n==== Results for: {name} ====")
+        _print_table(rep)
 
+    # 통합 Plot 저장
     out_plot = None
-    out_path = str(args.out)
-    if results_dir and (not os.path.isabs(out_path)):
-        out_path = os.path.join(results_dir, out_path)
     if bool(args.save_plot):
+        out_path = str(args.out)
         title = str(args.title) if args.title else "Flip rate vs confidence deciles (cyclic rotations)"
-        out_plot = _save_plot(rep, out_path, title)
+        out_plot = _save_plot(reports, out_path, title)
         if out_plot:
-            print(f"Saved plot: {out_plot}")
-
-    if bool(args.wandb):
-        wandb = _try_import_wandb()
-        if wandb is None:
-            print("[warn] wandb not available; skipping W&B logging.")
-            return
-        run = wandb.init(
-            project=getattr(args, "wandb_project", None) or None,
-            entity=getattr(args, "wandb_entity", None) or None,
-            name=getattr(args, "wandb_run_name", None) or None,
-            job_type="flip_rate",
-            reinit=True,
-        )
-        try:
-            for r in rep["bins"]:
-                log_dict = {
-                    "pct_hi": int(r["pct_hi"]),
-                    "n_files": int(r["n_files"]),
-                    "n_mean": float(r["n_mean"]),
-                    "gap_mean": float(r["gap_mean"]),
-                    "flip_mean": float(r["flip_mean"]),
-                    "flip_std": float(r["flip_std"]),
-                    "pair_mean": float(r["pair_mean"]),
-                    "pair_std": float(r["pair_std"]),
-                }
-                if rep.get("has_tf_ft"):
-                    log_dict["t_to_f_mean"] = float(r["t_to_f_mean"])
-                    log_dict["t_to_f_std"] = float(r["t_to_f_std"])
-                    log_dict["f_to_t_mean"] = float(r["f_to_t_mean"])
-                    log_dict["f_to_t_std"] = float(r["f_to_t_std"])
-                wandb.log(log_dict)
-            if out_plot:
-                wandb.log({"plots/flip_rate": wandb.Image(out_plot)})
-        except Exception as e:
-            print(f"[warn] W&B logging failed: {e}")
-        try:
-            run.finish()
-        except Exception:
-            pass
+            print(f"\nSaved plot: {out_plot}")
 
 
 if __name__ == "__main__":
     main()
-
