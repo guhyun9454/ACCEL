@@ -401,12 +401,13 @@ def main():
     ap.add_argument("--run_idx", type=int, default=None)
     ap.add_argument("--models", type=str, nargs="+", default=None)
     ap.add_argument("--results_root", type=str, default="",
-                    help="Root dir containing results_<task>/ (e.g. results_csqa/, results_mmlu/). Default: script dir. Required for --models + --eval_names if results live elsewhere.")
-    ap.add_argument("--eval_names", type=str, nargs="+", default=[], help="List of eval names (e.g., csqa,0,full mmlu,0,full).")
+                    help="Root dir containing results_<task>/ (e.g. results_csqa/, results_mmlu/, results_arc/). Default: script dir.")
+    ap.add_argument("--eval_names", type=str, nargs="+", default=[],
+                    help="List of eval names (e.g. csqa,0,full mmlu,0,full arc,0,full). Default with --models: csqa mmlu arc.")
     ap.add_argument("--option_id_set", type=str, default=None,
                     help="Option IDs for all evals (e.g. ABCD). Path becomes .../task_full_id-ABCD.")
     ap.add_argument("--option_id_sets", type=str, nargs="+", default=None,
-                    help="Per-eval option IDs, same order as --eval_names (e.g. ABCDE ABCD for csqa mmlu). Overrides --option_id_set.")
+                    help="Per-eval option IDs, same order as --eval_names (e.g. ABCDE ABCD ABCD for csqa mmlu arc). Overrides --option_id_set.")
 
     ap.add_argument("--flip_only", action="store_true")
     ap.add_argument("--n_bins", type=int, default=10)
@@ -426,19 +427,30 @@ def main():
     save_base_dir: Optional[str] = None  # where to save --out (plot) when path is relative
 
     # 1. 모델과 여러 eval_names가 주어졌을 때 각각 분석
-    if args.models and args.eval_names:
+    if args.models:
+        eval_names: List[str] = [str(x).strip() for x in args.eval_names] if args.eval_names else ["csqa,0,full", "mmlu,0,full", "arc,0,full"]
+        id_sets = getattr(args, "option_id_sets", None)
+        if id_sets is not None:
+            id_sets = [str(x).strip() for x in id_sets]
+        elif not eval_names:
+            id_sets = None
+        else:
+            # default option_id_sets when using default eval_names (csqa=ABCDE, mmlu=ABCD, arc=ABCD)
+            if eval_names == ["csqa,0,full", "mmlu,0,full", "arc,0,full"] and args.option_id_set is None:
+                id_sets = ["ABCDE", "ABCD", "ABCD"]
+            else:
+                id_sets = None
         results_root = str(args.results_root).strip() or os.path.dirname(os.path.abspath(__file__))
         save_base_dir = results_root
         model_list = [str(m).strip() for m in args.models if str(m).strip()]
-        
-        print(f"[info] Running multi-dataset analysis for: {args.eval_names}")
-        
+        print(f"[info] Running multi-dataset analysis for: {eval_names}")
         print(f"[info] results_root = {results_root}")
-        id_sets = getattr(args, "option_id_sets", None)
-        if id_sets is not None and len(id_sets) != len(args.eval_names):
-            raise SystemExit("--option_id_sets length must match --eval_names (e.g. --option_id_sets ABCDE ABCD for two evals).")
-        for idx, eval_n in enumerate(args.eval_names):
+        if id_sets is not None and len(id_sets) != len(eval_names):
+            raise SystemExit("--option_id_sets length must match --eval_names (e.g. --option_id_sets ABCDE ABCD ABCD for csqa mmlu arc).")
+        for idx, eval_n in enumerate(eval_names):
             option_id = (id_sets[idx] if id_sets is not None else args.option_id_set)
+            if option_id is None and id_sets is None:
+                raise SystemExit("Pass --option_id_set or --option_id_sets when using --eval_names.")
             files = []
             tried_dirs = []
             for m in model_list:
