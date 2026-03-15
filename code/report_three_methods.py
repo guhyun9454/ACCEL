@@ -269,6 +269,11 @@ def run(
                     ))
 
     n_used = max(len(cyc_by_p.get(p, [])) for p in CYCLIC_FRACS) if CYCLIC_FRACS else 0
+    n_pride_subjects = max(len(pride_by_p.get(p, [])) for p in PRIDE_OURS_FRACS) if pride_by_p else 0
+    if n_used >= 2 and n_pride_subjects < 2 and (pride_by_p or ours_by_p):
+        sys.stderr.write(
+            "[report_three_methods] Warning: PriDe/Ours have {} subject(s); need per-subject *_pride_curve.jsonl for mean±std.\n".format(n_pride_subjects)
+        )
 
     def _mean_over_subjects(by_p: Dict) -> Dict:
         """Returns by_p[p] = (mean_acc, std_acc, mean_rstd, std_rstd, mean_cost, std_cost). std = subject 간 분산(표준편차)."""
@@ -411,9 +416,10 @@ def main():
                 rstd_std = t[3] if len(t) > 3 else None
                 cost = t[4] if len(t) > 4 else None
                 cost_std = t[5] if len(t) > 5 else None
-                acc_str = f"{acc:.4f}±{acc_std:.4f}" if acc_std is not None else f"{acc:.4f}"
-                rstr = f", recall_std={rstd:.4f}±{rstd_std:.4f}" if rstd is not None and rstd_std is not None else (f", recall_std={rstd:.4f}" if rstd is not None else "")
-                cstr = f", cost={cost:.4f}±{cost_std:.4f}" if cost is not None and cost_std is not None else (f", cost={cost:.4f}" if cost is not None else "")
+                # acc, recall_std, cost 모두 mean±std 형식 (std 없으면 mean만 + (n=1) 표시)
+                acc_str = f"{acc:.4f}±{acc_std:.4f}" if acc_std is not None else f"{acc:.4f} (n=1)"
+                rstr = (f", recall_std={rstd:.4f}±{rstd_std:.4f}" if rstd_std is not None else f", recall_std={rstd:.4f} (n=1)") if rstd is not None else ""
+                cstr = (f", cost={cost:.4f}±{cost_std:.4f}" if cost_std is not None else f", cost={cost:.4f} (n=1)") if cost is not None else ""
                 print("  {}% : acc={}{}{}".format(p, acc_str, rstr, cstr))
     print("\n======================================================")
 
