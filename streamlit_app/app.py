@@ -371,7 +371,7 @@ def _plot_groups(
                         line_color = ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
                         suffix = "th1/2" if ck == "ours_pride_th1_2" else "Online Sqrt"
                         base_lab = f"{ours_pride_base_label} {suffix} (α={alpha})"
-                        label = f"{gname} • {base_lab}" if len(group_payloads) > 1 else base_lab
+                        label = f"{gname} • {base_lab}" if (len(group_payloads) > 1 and (gname or "").strip()) else base_lab
                         if show_group_std and len(series_list) > 1 and ystd.size == y.size:
                             ylo = np.where(np.isfinite(ystd), y - ystd, y)
                             yhi = np.where(np.isfinite(ystd), y + ystd, y)
@@ -391,7 +391,7 @@ def _plot_groups(
                         continue
                     cd = CURVE_DEFS[ck]
                     base_lab = str((curve_label_overrides or {}).get(ck) or cd["label"])
-                    label = f"{gname} • {base_lab}" if len(group_payloads) > 1 else base_lab
+                    label = f"{gname} • {base_lab}" if (len(group_payloads) > 1 and (gname or "").strip()) else base_lab
                     if show_group_std and len(series_list) > 1 and ystd.size == y.size:
                         ylo = np.where(np.isfinite(ystd), y - ystd, y)
                         yhi = np.where(np.isfinite(ystd), y + ystd, y)
@@ -428,7 +428,7 @@ def _plot_groups(
                         ax.fill_between(x, ylo, yhi, color=line_color, alpha=0.10, linewidth=0)
                     ax.plot(x, y, color=line_color, linestyle=":", marker=cd["marker"],
                             linewidth=2.5, markersize=8, alpha=0.95,
-                            label=f"{overall_curve_label} • {base_lab}")
+                            label=f"{overall_curve_label} • {base_lab}" if (overall_curve_label or "").strip() else base_lab)
             else:
                 all_series = []
                 for payloads in group_payloads.values():
@@ -450,7 +450,7 @@ def _plot_groups(
                     ax.fill_between(x, ylo, yhi, color=cd["color"], alpha=0.10, linewidth=0)
                 ax.plot(x, y, color=cd["color"], linestyle=":", marker=cd["marker"],
                         linewidth=2.5, markersize=8, alpha=0.95,
-                        label=f"{overall_curve_label} • {base_lab}")
+                        label=f"{overall_curve_label} • {base_lab}" if (overall_curve_label or "").strip() else base_lab)
 
     _y_labels = {"acc": "Accuracy (%)", "delta_acc": "Δ Accuracy (%)", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
     _y_titles = {"acc": "Accuracy", "delta_acc": "Δ Accuracy", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
