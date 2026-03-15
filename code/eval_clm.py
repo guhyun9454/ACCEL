@@ -2958,6 +2958,15 @@ def _merge_curve_objs_over_runs(cobjs: List[dict]) -> Optional[dict]:
                     entry["n_cyclic"] = int(np.mean(ncs))
                 merged_hp.append(entry)
         out["heuristic_points"] = merged_hp
+    # transition (Ours baseline): sum counts over runs
+    trans_list = [c.get("transition") for c in cobjs if isinstance(c.get("transition"), dict)]
+    if trans_list:
+        out["transition"] = {
+            "t_to_f_count": sum(int(t.get("t_to_f_count", 0)) for t in trans_list),
+            "f_to_t_count": sum(int(t.get("f_to_t_count", 0)) for t in trans_list),
+            "base_t_count": sum(int(t.get("base_t_count", 0)) for t in trans_list),
+            "base_f_count": sum(int(t.get("base_f_count", 0)) for t in trans_list),
+        }
     return out
 
 
@@ -3958,6 +3967,13 @@ def main():
                                         rec = _make_transition_record_from_preds(
                                             base_correct_list, preds_ours, labels_idx_for_curves, default_conf, subject)
                                         transition_records_ours_by_p.setdefault(perc, []).append(rec)
+                                        # curve에 transition counts만 저장 (routing 리포트용)
+                                        cobj["transition"] = {
+                                            "t_to_f_count": rec["t_to_f_count"],
+                                            "f_to_t_count": rec["f_to_t_count"],
+                                            "base_t_count": len(rec["base_t_gaps"]),
+                                            "base_f_count": len(rec["base_f_gaps"]),
+                                        }
                                     except Exception:
                                         pass
 
