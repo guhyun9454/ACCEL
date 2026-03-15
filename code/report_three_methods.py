@@ -7,7 +7,8 @@ Cyclic: 10~100%, PriDe/Ours: 2,5,10,...,100%. Ours는 alpha=2 고정.
 
 Usage:
   python report_three_methods.py --results_dir results_mmlu/0s_Model/mmlu_full_id-ABCD
-  python report_three_methods.py --results_root . --models ModelName --eval_name mmlu,0,full --option_id_set ABCD
+  python report_three_methods.py --results_root . --models M1 M2 ... M15 --eval_name mmlu,0,full --option_id_set ABCD
+  (여러 모델 지정 시 15개 모델 등 모든 모델에서 구간별 평균을 내어 한 번에 출력)
 """
 
 import argparse
@@ -258,27 +259,71 @@ def main():
             for m in model_list
         ]
 
+    # 모든 모델에서 run() 결과 수집
+    reports_per_model: List[Tuple[dict, int, str]] = []
     for res_dir, label in dirs_to_run:
         if not os.path.isdir(res_dir):
-            print("[skip] not a directory: {} ({})".format(res_dir, label))
+            print("[skip] not a directory: {} ({})".format(res_dir, label), file=sys.stderr)
             continue
         report, n_subj = run(res_dir, max_subjects=args.max_subjects)
         if not report or not any(report.values()):
-            print("[skip] No data in {} ({})".format(res_dir, label))
+            print("[skip] No data in {} ({})".format(res_dir, label), file=sys.stderr)
             continue
+        reports_per_model.append((report, n_subj, label))
+
+    if not reports_per_model:
+        print("Error: No data from any directory.", file=sys.stderr)
+        sys.exit(1)
+
+    n_models = len(reports_per_model)
+    n_subj_avg = int(np.mean([x[1] for x in reports_per_model]))
+    # 단일 디렉터리면 그대로 출력; 여러 모델이면 모델별 평균으로 한 번만 출력
+    if n_models == 1:
+        report, n_subj, label = reports_per_model[0]
         print("==== THREE-METHOD REPORT: {} (mean over {} subjects, no run std) ====".format(label, n_subj))
-        print("results_dir:", res_dir)
-        for method_name, by_p in report.items():
-            print("\n--- {} ---".format(method_name))
-            if not by_p:
-                print("  (no data — need *_pride_curve.jsonl from eval_clm with --pride_mix)" if "PriDe" in method_name or "Ours" in method_name else "  (no data)")
-            else:
-                for p in sorted(by_p.keys(), key=lambda x: (float(x), x)):
-                    acc, rstd, cost = by_p[p][0], by_p[p][1], by_p[p][2] if len(by_p[p]) > 2 else None
-                    rstr = f", recall_std={rstd:.4f}" if rstd is not None else ""
-                    cstr = f", cost={cost:.4f}" if cost is not None else ""
-                    print("  {}% : acc={:.4f}{}{}".format(p, acc, rstr, cstr))
-        print("\n======================================================")
+        print("results_dir:", dirs_to_run[0][0])
+    else:
+        # 모델별 평균: method별 p별로 (acc, rstd, cost) 리스트의 평균
+        method_names = ["Cyclic", "PriDe", "Ours (Online Sqrt, α=2)"]
+        all_ps = sorted(set().union(*(set(reports_per_model[i][0].get(m, {}).keys()) for i in range(n_models) for m in method_names)), key=lambda x: (float(x), x))
+        report = {}
+        for method_name in method_names:
+            by_p = {}
+            for p in all_ps:
+                accs, rstds, costs = [], [], []
+                for rep, _, _ in reports_per_model:
+                    if method_name not in rep or p not in rep[method_name]:
+                        continue
+                    t = rep[method_name][p]
+                    accs.append(t[0])
+                    if t[1] is not None:
+                        rstds.append(t[1])
+                    if len(t) > 2 and t[2] is not None:
+                        costs.append(t[2])
+                if not accs:
+                    continue
+                by_p[p] = (
+                    float(np.mean(accs)),
+                    float(np.mean(rstds)) if rstds else None,
+                    float(np.mean(costs)) if costs else None,
+                )
+            report[method_name] = by_p
+        print("==== THREE-METHOD REPORT: mean over {} models (avg {} subjects per model) ====".format(n_models, n_subj_avg))
+        print("results_root:", str(args.results_root).strip() or os.path.dirname(os.path.abspath(__file__)))
+        print("eval_name:", args.eval_name, "| option_id_set:", args.option_id_set)
+        print("models (n={}):".format(n_models), ", ".join(x[2] for x in reports_per_model[:5]) + (" ..." if n_models > 5 else ""))
+
+    for method_name, by_p in report.items():
+        print("\n--- {} ---".format(method_name))
+        if not by_p:
+            print("  (no data — need *_pride_curve.jsonl from eval_clm with --pride_mix)" if "PriDe" in method_name or "Ours" in method_name else "  (no data)")
+        else:
+            for p in sorted(by_p.keys(), key=lambda x: (float(x), x)):
+                acc, rstd, cost = by_p[p][0], by_p[p][1], by_p[p][2] if len(by_p[p]) > 2 else None
+                rstr = f", recall_std={rstd:.4f}" if rstd is not None else ""
+                cstr = f", cost={cost:.4f}" if cost is not None else ""
+                print("  {}% : acc={:.4f}{}{}".format(p, acc, rstr, cstr))
+    print("\n======================================================")
 
 
 if __name__ == "__main__":

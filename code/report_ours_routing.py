@@ -5,7 +5,8 @@ Ours (th1/2) 정책만 대상: 구간별(2,5,10,20,...,100%) routing 비율과 T
 
 Usage:
   python report_ours_routing.py --results_dir results_mmlu/0s_Model/mmlu_full_id-ABCD
-  python report_ours_routing.py --results_root . --models ModelName --eval_name mmlu,0,full --option_id_set ABCD
+  python report_ours_routing.py --results_root . --models M1 M2 ... M15 --eval_name mmlu,0,full --option_id_set ABCD
+  (여러 모델 지정 시 15개 모델 등 모든 모델에서 구간별 평균을 내어 한 번에 출력)
 """
 
 import argparse
@@ -195,35 +196,79 @@ def main():
         print("Error: need --results_dir or (--results_root + --models + --eval_name)", file=sys.stderr)
         sys.exit(1)
 
+    # 모든 모델에서 run() 결과 수집
+    results_per_model: List[Tuple[Dict, int, str]] = []
     for res_dir, label in dirs_to_run:
         if not os.path.isdir(res_dir):
-            print("[skip] not a directory: {} ({})".format(res_dir, label))
+            print("[skip] not a directory: {} ({})".format(res_dir, label), file=sys.stderr)
             continue
         by_p, n_subj = run(res_dir, max_subjects=args.max_subjects)
         if not by_p:
-            print("[skip] No data in {} ({})".format(res_dir, label))
+            print("[skip] No data in {} ({})".format(res_dir, label), file=sys.stderr)
             continue
+        results_per_model.append((by_p, n_subj, label))
+
+    if not results_per_model:
+        print("Error: No data from any directory.", file=sys.stderr)
+        sys.exit(1)
+
+    n_models = len(results_per_model)
+    n_subj_avg = int(np.mean([x[1] for x in results_per_model]))
+    # 단일 디렉터리면 그대로 출력; 여러 모델이면 모델별 평균으로 한 번만 출력
+    if n_models == 1:
+        by_p, n_subj, label = results_per_model[0]
         print("==== OURS (th1/2) ROUTING & TRANSITION REPORT: {} (mean over {} subjects) ====".format(label, n_subj))
-        print("results_dir:", res_dir)
-        print("\n--- Routing 비율 (base / probe2 / cyclic) ---")
+        print("results_dir:", dirs_to_run[0][0])
+    else:
+        # 모델별 평균
+        by_p = {}
         for p in OURS_PERCENTS:
-            d = by_p.get(p, {})
-            r = d.get("routing")
-            if r is None:
-                print("  {}% : (no data)".format(p))
-            else:
-                print("  {}% : base={:.4f}, probe2={:.4f}, cyclic={:.4f}".format(
-                    p, r["base_ratio"], r["probe2_ratio"], r["cyclic_ratio"]))
-        print("\n--- Transition 비율 (T→T, T→F, F→T, F→F) ---")
-        for p in OURS_PERCENTS:
-            d = by_p.get(p, {})
-            t = d.get("transition")
-            if t is None:
-                print("  {}% : (no data)".format(p))
-            else:
-                print("  {}% : T→T={:.4f}, T→F={:.4f}, F→T={:.4f}, F→F={:.4f}".format(
-                    p, t["t_to_t_ratio"], t["t_to_f_ratio"], t["f_to_t_ratio"], t["f_to_f_ratio"]))
-        print("\n======================================================")
+            base_r, probe2_r, cyclic_r = [], [], []
+            t2t_r, t2f_r, f2t_r, f2f_r = [], [], [], []
+            for bp, _, _ in results_per_model:
+                d = bp.get(p, {})
+                r = d.get("routing")
+                if r is not None:
+                    base_r.append(r["base_ratio"])
+                    probe2_r.append(r["probe2_ratio"])
+                    cyclic_r.append(r["cyclic_ratio"])
+                t = d.get("transition")
+                if t is not None:
+                    t2t_r.append(t["t_to_t_ratio"])
+                    t2f_r.append(t["t_to_f_ratio"])
+                    f2t_r.append(t["f_to_t_ratio"])
+                    f2f_r.append(t["f_to_f_ratio"])
+            routing = None
+            if base_r:
+                routing = {"base_ratio": float(np.mean(base_r)), "probe2_ratio": float(np.mean(probe2_r)), "cyclic_ratio": float(np.mean(cyclic_r))}
+            transition = None
+            if t2t_r:
+                transition = {"t_to_t_ratio": float(np.mean(t2t_r)), "t_to_f_ratio": float(np.mean(t2f_r)), "f_to_t_ratio": float(np.mean(f2t_r)), "f_to_f_ratio": float(np.mean(f2f_r))}
+            by_p[p] = {"routing": routing, "transition": transition}
+        print("==== OURS (th1/2) ROUTING & TRANSITION REPORT: mean over {} models (avg {} subjects per model) ====".format(n_models, n_subj_avg))
+        print("results_root:", str(args.results_root).strip() or os.path.dirname(os.path.abspath(__file__)))
+        print("eval_name:", args.eval_name, "| option_id_set:", args.option_id_set)
+        print("models (n={}):".format(n_models), ", ".join(x[2] for x in results_per_model[:5]) + (" ..." if n_models > 5 else ""))
+
+    print("\n--- Routing 비율 (base / probe2 / cyclic) ---")
+    for p in OURS_PERCENTS:
+        d = by_p.get(p, {})
+        r = d.get("routing")
+        if r is None:
+            print("  {}% : (no data)".format(p))
+        else:
+            print("  {}% : base={:.4f}, probe2={:.4f}, cyclic={:.4f}".format(
+                p, r["base_ratio"], r["probe2_ratio"], r["cyclic_ratio"]))
+    print("\n--- Transition 비율 (T→T, T→F, F→T, F→F) ---")
+    for p in OURS_PERCENTS:
+        d = by_p.get(p, {})
+        t = d.get("transition")
+        if t is None:
+            print("  {}% : (no data)".format(p))
+        else:
+            print("  {}% : T→T={:.4f}, T→F={:.4f}, F→T={:.4f}, F→F={:.4f}".format(
+                p, t["t_to_t_ratio"], t["t_to_f_ratio"], t["f_to_t_ratio"], t["f_to_f_ratio"]))
+    print("\n======================================================")
 
 
 if __name__ == "__main__":
