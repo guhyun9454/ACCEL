@@ -2,7 +2,11 @@
 """
 Cyclic, PriDe, Ours (Online Sqrt All) 3개 방법에 대해
 run0, run1, run2 등 여러 Run 간의 평균(mean)과 표준편차(std)를 계산하는 리포트 스크립트.
-여러 모델(--models)을 입력하면 15개 모델의 평균을 낸 뒤, Run 간의 표준편차를 보여줍니다.
+
+사용 예:
+  --models M1 ... M15 --results_root /path/to/results   (모델명으로 run* JSONL 디렉터리 자동 탐색)
+  --models M1 ... M15 --eval_name mmlu,0,full [--option_id_set ABCD]   (경로 규칙으로 계산)
+  --results_dirs dir1 dir2 ...   또는  --results_dir 단일경로
 """
 
 import argparse
@@ -42,6 +46,36 @@ def _discover_curve_files(results_dir: str) -> Tuple[List[str], List[str]]:
     base = os.path.join(results_dir, "*_curve.jsonl")
     pride = os.path.join(results_dir, "*_pride_curve.jsonl")
     return sorted(glob.glob(base)), sorted(glob.glob(pride))
+
+
+def _find_results_dir_for_model(results_root: str, model_name: str) -> Optional[str]:
+    """
+    results_root 아래에서 0s_<model>/<task>_full_id-ABCD 형태의 디렉터리 중
+    run0/run1/run2 curve JSONL(*_run*_curve.jsonl, *_run*_pride_curve.jsonl)이 있는 곳만 찾습니다.
+    """
+    model_key = model_name.split("/")[-1].strip()
+    root = os.path.abspath(results_root)
+    if not os.path.isdir(root):
+        return None
+    # run이 꼭 있는 경우만: *_run*_curve.jsonl / *_run*_pride_curve.jsonl
+    found_dirs = set()
+    for pattern in ["*_run*_curve.jsonl", "*_run*_pride_curve.jsonl"]:
+        for path in glob.glob(os.path.join(root, "**", pattern), recursive=True):
+            found_dirs.add(os.path.dirname(path))
+    # 0s_Llama-3.2-3B/arc_full_id-ABCD 형태: 경로에 모델명(0s_ 포함)이 있어야 함
+    candidates = [d for d in found_dirs if model_key in d]
+    if not candidates:
+        return None
+
+    def score(d: str) -> Tuple[int, int, int]:
+        base, pride = _discover_curve_files(d)
+        n = len(base) + len(pride)
+        depth = d.count(os.sep)
+        # 0s_Llama-3.2-3B/arc_full_id-ABCD 형태 우선
+        prefer_0s = 1 if ("0s_" + model_key in d) else 0
+        return (prefer_0s, n, -depth)
+
+    return max(candidates, key=score)
 
 
 def _parse_subject_and_run(filename: str, suffix: str) -> Tuple[str, int]:
@@ -207,21 +241,46 @@ def process_model(results_dir: str, max_subjects: Optional[int]) -> Dict[int, Di
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--results_dir", type=str, default="")
-    ap.add_argument("--results_root", type=str, default="")
-    ap.add_argument("--models", type=str, nargs="+", default=None)
-    ap.add_argument("--eval_name", type=str, default="")
+    ap.add_argument("--results_dir", type=str, default="", help="단일 결과 디렉터리 (예: .../mmlu_full_id-ABCD)")
+    ap.add_argument("--results_dirs", type=str, nargs="+", default=None,
+                    help="run0/run1/run2 JSONL이 있는 디렉터리 여러 개 (15개 모델이면 15개 디렉터리)")
+    ap.add_argument("--results_root", type=str, default="",
+                    help="모델별 디렉터리 탐색 시 루트 (--models만 줄 때 사용)")
+    ap.add_argument("--models", type=str, nargs="+", default=None,
+                    help="모델 이름 목록; results_root 아래에서 run* curve JSONL 디렉터리 자동 탐색")
+    ap.add_argument("--eval_name", type=str, default="",
+                    help="지정 시 경로 규칙으로 계산 (예: mmlu,0,full)")
     ap.add_argument("--option_id_set", type=str, default=None)
     ap.add_argument("--max_subjects", type=int, default=None)
     args = ap.parse_args()
 
     results_dir = str(args.results_dir).strip()
+    results_dirs = getattr(args, "results_dirs", None) or []
+    results_dirs = [d.strip() for d in results_dirs if d.strip()]
+
     if results_dir:
-        dirs_to_run = [(results_dir, os.path.basename(results_dir))]
-    else:
+        dirs_to_run = [(results_dir, os.path.basename(results_dir.rstrip(os.sep)))]
+    elif results_dirs:
+        dirs_to_run = [(d, os.path.basename(d.rstrip(os.sep)) or f"dir_{i}") for i, d in enumerate(results_dirs)]
+    elif args.models:
         root = str(args.results_root).strip() or os.path.dirname(os.path.abspath(__file__))
         model_list = [str(m).strip() for m in args.models if str(m).strip()]
-        dirs_to_run = [(_compute_results_dir(root, args.eval_name, m, args.option_id_set), m.split("/")[-1]) for m in model_list]
+        if args.eval_name:
+            dirs_to_run = [(_compute_results_dir(root, args.eval_name, m, args.option_id_set), m.split("/")[-1]) for m in model_list]
+        else:
+            dirs_to_run = []
+            for m in model_list:
+                found = _find_results_dir_for_model(root, m)
+                if found:
+                    dirs_to_run.append((found, m.split("/")[-1]))
+                else:
+                    print(f"Warning: run* curve 디렉터리를 찾지 못함 (model={m}, root={root})", file=sys.stderr)
+            if not dirs_to_run:
+                print("Error: 어떤 모델에 대해서도 디렉터리를 찾지 못했습니다.", file=sys.stderr)
+                sys.exit(1)
+    else:
+        print("Error: --results_dir, --results_dirs, 또는 --models 중 하나를 지정하세요.", file=sys.stderr)
+        sys.exit(1)
 
     all_models_data = []
     for res_dir, label in dirs_to_run:
@@ -300,9 +359,10 @@ def main():
             t = by_p[p]
             acc_m, acc_s, rstd_m, rstd_s, cost_m, cost_s, n_runs = t
 
-            acc_str = f"{acc_m:.4f}±{acc_s:.4f}" if acc_s is not None else f"{acc_m:.4f} (n={n_runs})"
-            rstr = f", recall_std={rstd_m:.4f}±{rstd_s:.4f}" if rstd_s is not None else (f", recall_std={rstd_m:.4f}" if rstd_m is not None else "")
-            cstr = f", cost={cost_m:.4f}±{cost_s:.4f}" if cost_s is not None else (f", cost={cost_m:.4f}" if cost_m is not None else "")
+            # 항상 acc=0.8035±0.0007, recall_std=0.0364±0.0022 형식 (std 없으면 ±0.0000)
+            acc_str = f"{acc_m:.4f}±{acc_s:.4f}" if acc_s is not None else f"{acc_m:.4f}±0.0000"
+            rstr = (f", recall_std={rstd_m:.4f}±{rstd_s:.4f}" if rstd_s is not None else f", recall_std={rstd_m:.4f}±0.0000") if rstd_m is not None else ""
+            cstr = (f", cost={cost_m:.4f}±{cost_s:.4f}" if cost_s is not None else f", cost={cost_m:.4f}±0.0000") if cost_m is not None else ""
 
             print(f"  {p}% : acc={acc_str}{rstr}{cstr}")
     print("\n======================================================")
