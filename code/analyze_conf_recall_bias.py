@@ -356,6 +356,9 @@ def _analyze(
         rows = sorted(rows, key=lambda r: int(r["bin"]))
         return {
             "aggregate_mode": "mean_over_files",
+            "binning_mode": str(binning_mode),
+            "binning_scope": str(binning_scope),
+            "n_bins": int(n_bins),
             "k": int(k_seen),
             "option_ids": option_ids,
             "n_total": int(n_total),
@@ -394,6 +397,9 @@ def _analyze(
         )
     return {
         "aggregate_mode": "pooled",
+        "binning_mode": str(binning_mode),
+        "binning_scope": "global",
+        "n_bins": int(n_bins),
         "k": int(k_seen),
         "option_ids": option_ids,
         "n_total": int(conf.size),
@@ -407,7 +413,7 @@ def _print_table(rep: dict, table_mode: str = "summary"):
     option_ids = rep["option_ids"]
     mode = rep.get("aggregate_mode", "pooled")
     table_mode = str(table_mode or "summary").strip().lower()
-    n_bins = int(len(rep.get("bins", []) or [])) or 10
+    n_bins = int(rep.get("n_bins", 10)) if int(rep.get("n_bins", 10)) > 0 else 10
 
     if mode == "mean_over_files":
         # If global edges exist, bins correspond to p10, p20, ..., p100 over pooled samples.
@@ -528,12 +534,12 @@ def main():
     ap.add_argument("--out", type=str, default="conf_recall_bias.png", help="Output PNG path (relative paths saved into results_dir when available).")
     ap.add_argument("--title", type=str, default=None)
     ap.add_argument("--n_bins", type=int, default=10, help="Quantile bins (default: 10).")
-    ap.add_argument("--min_bin_n", type=int, default=50, help="Skip bins with <N samples (default: 50).")
+    ap.add_argument("--min_bin_n", type=int, default=1, help="Skip bins with <N samples (default: 1).")
     ap.add_argument("--binning_mode", type=str, default="equal_count", choices=["equal_count", "quantile"],
                     help="equal_count: sort by confidence gap then split into equal-sized bins. quantile: use np.quantile thresholds.")
-    ap.add_argument("--binning_scope", type=str, default="global", choices=["global", "per_file"],
+    ap.add_argument("--binning_scope", type=str, default="per_file", choices=["global", "per_file"],
                     help="For mean_over_files only. global: one set of percentile edges over ALL samples then apply to each file. per_file: compute deciles within each file.")
-    ap.add_argument("--aggregate_mode", type=str, default="pooled", choices=["pooled", "mean_over_files"],
+    ap.add_argument("--aggregate_mode", type=str, default="mean_over_files", choices=["pooled", "mean_over_files"],
                     help="pooled: concatenate all samples. mean_over_files: compute bins per file then average metrics across files.")
     ap.add_argument("--table_mode", type=str, default="summary", choices=["summary", "full"],
                     help="summary: print only bin/conf/acc/recall_std. full: include per-option recalls.")
