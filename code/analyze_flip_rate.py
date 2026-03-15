@@ -408,9 +408,11 @@ def main():
     ap.add_argument("--models", type=str, nargs="+", default=None)
     ap.add_argument("--results_root", type=str, default="",
                     help="Root dir containing results_<task>/ (e.g. results_csqa/, results_mmlu/). Default: script dir. Required for --models + --eval_names if results live elsewhere.")
-    ap.add_argument("--eval_names", type=str, nargs="+", default=[], help="List of eval names (e.g., csqa,0 mmlu,0).")
+    ap.add_argument("--eval_names", type=str, nargs="+", default=[], help="List of eval names (e.g., csqa,0,full mmlu,0,full).")
     ap.add_argument("--option_id_set", type=str, default=None,
-                    help="Option IDs (e.g. ABCD). Path becomes .../task_full_id-ABCD; required if results are in *_id-ABCD dirs.")
+                    help="Option IDs for all evals (e.g. ABCD). Path becomes .../task_full_id-ABCD.")
+    ap.add_argument("--option_id_sets", type=str, nargs="+", default=None,
+                    help="Per-eval option IDs, same order as --eval_names (e.g. ABCDE ABCD for csqa mmlu). Overrides --option_id_set.")
 
     ap.add_argument("--flip_only", action="store_true")
     ap.add_argument("--n_bins", type=int, default=10)
@@ -436,21 +438,24 @@ def main():
         print(f"[info] Running multi-dataset analysis for: {args.eval_names}")
         
         print(f"[info] results_root = {results_root}")
-        for eval_n in args.eval_names:
+        id_sets = getattr(args, "option_id_sets", None)
+        if id_sets is not None and len(id_sets) != len(args.eval_names):
+            raise SystemExit("--option_id_sets length must match --eval_names (e.g. --option_id_sets ABCDE ABCD for two evals).")
+        for idx, eval_n in enumerate(args.eval_names):
+            option_id = (id_sets[idx] if id_sets is not None else args.option_id_set)
             files = []
             tried_dirs = []
             for m in model_list:
-                rdir = _compute_results_dir(results_root, eval_n, m, args.option_id_set)
+                rdir = _compute_results_dir(results_root, eval_n, m, option_id)
                 tried_dirs.append(rdir)
                 f = _discover_jsonl_files(rdir, jsonl_glob=str(args.jsonl_glob), run_idx=args.run_idx)
                 files.extend(f)
-            
             files = sorted(set(files))
             if files:
                 try:
                     rep = _analyze_files(
                         files=files,
-                        option_id_set=args.option_id_set,
+                        option_id_set=option_id,
                         n_bins=int(args.n_bins),
                         min_bin_n=int(args.min_bin_n),
                         flip_only=bool(args.flip_only),
@@ -465,8 +470,8 @@ def main():
                     print(f"[warn]     - {d}")
                 if len(tried_dirs) > 3:
                     print(f"[warn]     ... and {len(tried_dirs) - 3} more model paths.")
-                if not args.option_id_set:
-                    print(f"[warn]   If your dirs are like .../csqa_full_id-ABCD, pass --option_id_set ABCD")
+                if option_id is None:
+                    print(f"[warn]   If your dirs are like .../csqa_full_id-ABCDE or .../mmlu_full_id-ABCD, pass --option_id_set or --option_id_sets.")
 
     # 2. 기존 방식 (results_dir 단일 디렉토리나 jsonl_paths 지정 시)
     else:
