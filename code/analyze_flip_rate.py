@@ -409,7 +409,8 @@ def main():
     ap.add_argument("--results_root", type=str, default="",
                     help="Root dir containing results_<task>/ (e.g. results_csqa/, results_mmlu/). Default: script dir. Required for --models + --eval_names if results live elsewhere.")
     ap.add_argument("--eval_names", type=str, nargs="+", default=[], help="List of eval names (e.g., csqa,0 mmlu,0).")
-    ap.add_argument("--option_id_set", type=str, default=None)
+    ap.add_argument("--option_id_set", type=str, default=None,
+                    help="Option IDs (e.g. ABCD). Path becomes .../task_full_id-ABCD; required if results are in *_id-ABCD dirs.")
 
     ap.add_argument("--flip_only", action="store_true")
     ap.add_argument("--n_bins", type=int, default=10)
@@ -464,6 +465,8 @@ def main():
                     print(f"[warn]     - {d}")
                 if len(tried_dirs) > 3:
                     print(f"[warn]     ... and {len(tried_dirs) - 3} more model paths.")
+                if not args.option_id_set:
+                    print(f"[warn]   If your dirs are like .../csqa_full_id-ABCD, pass --option_id_set ABCD")
 
     # 2. 기존 방식 (results_dir 단일 디렉토리나 jsonl_paths 지정 시)
     else:
