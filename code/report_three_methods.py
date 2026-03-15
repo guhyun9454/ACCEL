@@ -2,7 +2,8 @@
 """
 Cyclic, PriDe, Ours (Online Sqrt All) 3개 방법에 대해
 subject별 curve/pride_curve JSONL에서 구간별 acc/recall_std/cost를 읽어
-N개 subject 평균 및 subject 간 표준편차(mean ± std)로 리포트 출력.
+N개 subject 평균 및 run 간 표준편차(mean ± std)로 리포트 출력.
+run0/run1/run2가 있으면 subject별 3개 run에 대한 std를 구한 뒤 그 평균을 ±로 씀.
 Cyclic: 10~100%, PriDe/Ours: 2,5,10,...,100%. Ours는 alpha=2 고정.
 
 Usage:
@@ -17,6 +18,7 @@ import json
 import os
 import re
 import sys
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -199,102 +201,90 @@ def run(
     if max_subjects is not None:
         subjects = subjects[: max_subjects]
 
-    # per-subject per-frac lists: { p: [(acc, rstd, cost), ...] }
-    cyc_by_p: Dict[int, List[Tuple[float, Optional[float], Optional[float]]]] = {p: [] for p in CYCLIC_FRACS}
-    pride_by_p: Dict[float, List[Tuple[float, Optional[float], Optional[float]]]] = {p: [] for p in PRIDE_OURS_FRACS}
-    ours_by_p: Dict[float, List[Tuple[float, Optional[float], Optional[float]]]] = {p: [] for p in PRIDE_OURS_FRACS}
+    # per p: list of (acc, rstd, cost, subj) — run별로 하나씩 넣어서 run 간 std 계산 가능
+    cyc_by_p: Dict[int, List[Tuple[float, Optional[float], Optional[float], str]]] = {p: [] for p in CYCLIC_FRACS}
+    pride_by_p: Dict[float, List[Tuple[float, Optional[float], Optional[float], str]]] = {p: [] for p in PRIDE_OURS_FRACS}
+    ours_by_p: Dict[float, List[Tuple[float, Optional[float], Optional[float], str]]] = {p: [] for p in PRIDE_OURS_FRACS}
 
     for subj in subjects:
         base_paths = canon_to_base.get(subj, [])
         if not base_paths:
             continue
-        # run이 여러 개면 run별 값 평균 내서 subject당 하나로
-        cyc_per_run = []
+        # run별로 값 넣기 (나중에 subject별 run 3개 std → 평균으로 ± 표시)
         for base_path in base_paths:
             base_lines = _read_jsonl(base_path)
             if not base_lines:
                 continue
             cyc_vals = _get_cyclic_at_fracs(base_lines, CYCLIC_FRACS)
-            if cyc_vals:
-                cyc_per_run.append(cyc_vals)
-        if not cyc_per_run:
-            continue
-        for p in CYCLIC_FRACS:
-            accs = [r[p][0] for r in cyc_per_run if p in r]
-            rstds = [r[p][1] for r in cyc_per_run if p in r and r[p][1] is not None]
-            costs = [r[p][2] for r in cyc_per_run if p in r and len(r[p]) > 2 and r[p][2] is not None]
-            if accs:
-                cyc_by_p[p].append((
-                    float(np.mean(accs)),
-                    float(np.mean(rstds)) if rstds else None,
-                    float(np.mean(costs)) if costs else None,
-                ))
+            if not cyc_vals:
+                continue
+            for p in CYCLIC_FRACS:
+                if p not in cyc_vals:
+                    continue
+                a, r, c = cyc_vals[p][0], cyc_vals[p][1], cyc_vals[p][2] if len(cyc_vals[p]) > 2 else None
+                cyc_by_p[p].append((float(a), r, c, subj))
 
         pride_paths = canon_to_pride.get(subj, [])
         if not pride_paths:
             continue
-        pride_per_run = []
-        ours_per_run = []
         for pride_path in pride_paths:
             pride_lines = _read_jsonl(pride_path)
             if not pride_lines:
                 continue
             pv = _get_pride_at_fracs(pride_lines, PRIDE_OURS_FRACS)
             ov = _get_ours_online_sqrt_at_fracs(pride_lines, PRIDE_OURS_FRACS, alpha=float(OURS_ALPHA))
-            if pv:
-                pride_per_run.append(pv)
-            if ov:
-                ours_per_run.append(ov)
-        for p in PRIDE_OURS_FRACS:
-            p_key = int(p) if p == int(p) else p
-            if pride_per_run and any(p in r for r in pride_per_run):
-                accs = [r[p][0] for r in pride_per_run if p in r]
-                rstds = [r[p][1] for r in pride_per_run if p in r and r[p][1] is not None]
-                costs = [r[p][2] for r in pride_per_run if p in r and len(r[p]) > 2 and r[p][2] is not None]
-                if accs and p_key in pride_by_p:
-                    pride_by_p[p_key].append((
-                        float(np.mean(accs)),
-                        float(np.mean(rstds)) if rstds else None,
-                        float(np.mean(costs)) if costs else None,
-                    ))
-            if ours_per_run and any(p in r for r in ours_per_run) and p_key in ours_by_p:
-                accs = [r[p][0] for r in ours_per_run if p in r]
-                rstds = [r[p][1] for r in ours_per_run if p in r and r[p][1] is not None]
-                costs = [r[p][2] for r in ours_per_run if p in r and len(r[p]) > 2 and r[p][2] is not None]
-                if accs:
-                    ours_by_p[p_key].append((
-                        float(np.mean(accs)),
-                        float(np.mean(rstds)) if rstds else None,
-                        float(np.mean(costs)) if costs else None,
-                    ))
+            for p in PRIDE_OURS_FRACS:
+                p_key = int(p) if p == int(p) else p
+                if pv and p in pv and p_key in pride_by_p:
+                    a, r, c = pv[p][0], pv[p][1], pv[p][2] if len(pv[p]) > 2 else None
+                    pride_by_p[p_key].append((float(a), r, c, subj))
+                if ov and p in ov and p_key in ours_by_p:
+                    a, r, c = ov[p][0], ov[p][1], ov[p][2] if len(ov[p]) > 2 else None
+                    ours_by_p[p_key].append((float(a), r, c, subj))
 
-    n_used = max(len(cyc_by_p.get(p, [])) for p in CYCLIC_FRACS) if CYCLIC_FRACS else 0
-    n_pride_subjects = max(len(pride_by_p.get(p, [])) for p in PRIDE_OURS_FRACS) if pride_by_p else 0
+    n_used = len(set(x[3] for p in CYCLIC_FRACS for x in cyc_by_p.get(p, []))) if CYCLIC_FRACS else 0
+    n_pride_subjects = len(set(x[3] for p in PRIDE_OURS_FRACS for x in (pride_by_p.get(p, []) + ours_by_p.get(p, [])))) if (pride_by_p or ours_by_p) else 0
     if n_used >= 2 and n_pride_subjects < 2 and (pride_by_p or ours_by_p):
         sys.stderr.write(
             "[report_three_methods] Warning: PriDe/Ours have {} subject(s); need per-subject *_pride_curve.jsonl for mean±std.\n".format(n_pride_subjects)
         )
 
     def _mean_over_subjects(by_p: Dict) -> Dict:
-        """Returns by_p[p] = (mean_acc, std_acc, mean_rstd, std_rstd, mean_cost, std_cost). std = subject 간 분산(표준편차)."""
+        """by_p[p] = [(acc, rstd, cost, subj), ...]. Returns (mean, run_std) per metric.
+        run_std = subject별 run들(3개)에 대한 std를 구한 뒤, 그 std들의 평균 (run 간 변동).
+        """
         result = {}
         for p, lst in by_p.items():
             if not lst:
                 continue
-            accs = [x[0] for x in lst]
-            rstds = [x[1] for x in lst if x[1] is not None]
-            costs = [x[2] for x in lst if len(x) > 2 and x[2] is not None]
-            std_acc = float(np.std(accs)) if len(accs) > 1 else None
-            std_rstd = float(np.std(rstds)) if len(rstds) > 1 else None
-            std_cost = float(np.std(costs)) if len(costs) > 1 else None
-            result[p] = (
-                float(np.mean(accs)),
-                std_acc,
-                float(np.mean(rstds)) if rstds else None,
-                std_rstd,
-                float(np.mean(costs)) if costs else None,
-                std_cost,
-            )
+            # (acc, rstd, cost, subj) → subj별로 묶기
+            by_subj: Dict[str, List[Tuple[float, Optional[float], Optional[float]]]] = defaultdict(list)
+            for x in lst:
+                subj = x[3] if len(x) > 3 else ""
+                by_subj[subj].append((x[0], x[1], x[2] if len(x) > 2 else None))
+            all_accs = [x[0] for x in lst]
+            all_rstds = [x[1] for x in lst if x[1] is not None]
+            all_costs = [x[2] for x in lst if len(x) > 2 and x[2] is not None]
+            mean_acc = float(np.mean(all_accs))
+            mean_rstd = float(np.mean(all_rstds)) if all_rstds else None
+            mean_cost = float(np.mean(all_costs)) if all_costs else None
+            # run 간 std: subject마다 run들 std 구한 뒤 그 평균
+            run_std_acc_list = [np.std([r[0] for r in runs]) for runs in by_subj.values() if len(runs) > 1]
+            run_std_rstd_list = []
+            run_std_cost_list = []
+            for runs in by_subj.values():
+                if len(runs) <= 1:
+                    continue
+                rvals = [r[1] for r in runs if r[1] is not None]
+                cvals = [r[2] for r in runs if len(r) > 2 and r[2] is not None]
+                if len(rvals) > 1:
+                    run_std_rstd_list.append(np.std(rvals))
+                if len(cvals) > 1:
+                    run_std_cost_list.append(np.std(cvals))
+            std_acc = float(np.mean(run_std_acc_list)) if run_std_acc_list else (float(np.std(all_accs)) if len(all_accs) > 1 else None)
+            std_rstd = float(np.mean(run_std_rstd_list)) if run_std_rstd_list else (float(np.std(all_rstds)) if len(all_rstds) > 1 else None)
+            std_cost = float(np.mean(run_std_cost_list)) if run_std_cost_list else (float(np.std(all_costs)) if len(all_costs) > 1 else None)
+            result[p] = (mean_acc, std_acc, mean_rstd, std_rstd, mean_cost, std_cost)
         return result
 
     # 항상 Cyclic, PriDe, Ours 세 섹션 포함 (데이터 없으면 빈 dict)
