@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Cyclic, PriDe, Ours (Online Sqrt All) 3개 방법에 대해
-subject별 curve/pride_curve JSONL에서 100% 지점을 읽어
+subject별 curve/pride_curve JSONL에서 구간별 acc/recall_std를 읽어
 N개 subject 평균(mean만, run std 없음)으로 리포트 출력.
+Cyclic: 10~100%, PriDe/Ours: 2,5,10,...,100%. Ours는 alpha=2 고정.
 
 Usage:
   python report_three_methods.py --results_dir results_mmlu/0s_Model/mmlu_full_id-ABCD
@@ -62,32 +63,24 @@ def _read_jsonl(path: str) -> List[dict]:
     return out
 
 
-def _get_cyclic_100(lines: List[dict]) -> Tuple[Optional[float], Optional[float]]:
-    key = "cyclic_random_100"
-    rkey = "cyclic_random_100_recall_std"
-    accs, rstds = [], []
-    for obj in lines:
-        if key in obj and isinstance(obj[key], dict):
-            acc_list = obj[key].get("accuracies") or obj[key].get("acc")
-            if isinstance(acc_list, list) and acc_list:
-                accs.append(float(acc_list[0]))
-            elif isinstance(acc_list, (int, float)):
-                accs.append(float(acc_list))
-        if rkey in obj and isinstance(obj[rkey], (int, float)):
-            rstds.append(float(obj[rkey]))
-    if not accs:
-        return None, None
-    acc_mean = float(np.mean(accs))
-    rstd_mean = float(np.mean(rstds)) if rstds else None
-    return acc_mean, rstd_mean
+# Cyclic: 10~100%
+CYCLIC_FRACS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+# PriDe & Ours: 2, 5, 10, ..., 100%
+PRIDE_OURS_FRACS = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+OURS_ALPHA = 2  # Ours (Online Sqrt)는 alpha=2 고정
 
 
-def _get_pride_cyclic_100(lines: List[dict]) -> Tuple[Optional[float], Optional[float]]:
-    """PriDe (Default+PRIDE) at 100%: line that has cyclic_random_100 (alpha=100)."""
-    key = "cyclic_random_100"
-    rkey = "cyclic_random_100_recall_std"
+def _get_cyclic_at_fracs(lines: List[dict], fracs: List[int]) -> Dict[int, Tuple[float, Optional[float]]]:
+    """Baseline curve: any line has cyclic_random_{p}; take first line and extract all p in fracs."""
+    out = {}
     for obj in lines:
-        if key in obj and isinstance(obj[key], dict):
+        for p in fracs:
+            if p in out:
+                continue
+            key = f"cyclic_random_{p}"
+            rkey = f"cyclic_random_{p}_recall_std"
+            if key not in obj or not isinstance(obj[key], dict):
+                continue
             acc_list = obj[key].get("accuracies") or obj[key].get("acc")
             if isinstance(acc_list, list) and acc_list:
                 acc = float(acc_list[0])
@@ -96,31 +89,70 @@ def _get_pride_cyclic_100(lines: List[dict]) -> Tuple[Optional[float], Optional[
             else:
                 continue
             rstd = float(obj[rkey]) if rkey in obj and isinstance(obj[rkey], (int, float)) else None
-            return acc, rstd
-    return None, None
+            out[p] = (acc, rstd)
+        if len(out) == len(fracs):
+            break
+    return out
 
 
-def _get_ours_online_sqrt_100(lines: List[dict]) -> Tuple[Optional[float], Optional[float]]:
-    """Ours (Online Sqrt All) at th1_p=100 from heuristic_points (use first line that has it, e.g. alpha=2)."""
+def _get_pride_at_fracs(lines: List[dict], fracs: List[float]) -> Dict[float, Tuple[float, Optional[float]]]:
+    """Pride curve: each line has one cyclic_random_{alpha}; collect (p, acc, rstd) for p in fracs."""
+    out = {}
     for obj in lines:
-        for h in obj.get("heuristic_points") or []:
-            if not isinstance(h, dict):
+        for p in fracs:
+            if p in out:
                 continue
-            if str(h.get("label")) != "online_sqrt_all":
-                continue
-            if h.get("th1_p") != 100 and h.get("th1_p") != 100.0:
-                continue
-            acc = h.get("acc")
-            rstd = h.get("recall_std")
-            if acc is not None:
-                return float(acc), float(rstd) if rstd is not None else None
-    return None, None
+            keys_try = list({f"cyclic_random_{p}", f"cyclic_random_{p:g}", f"cyclic_random_{int(p)}"})
+            for key in keys_try:
+                if key not in obj or not isinstance(obj[key], dict):
+                    continue
+                acc_list = obj[key].get("accuracies") or obj[key].get("acc")
+                if isinstance(acc_list, list) and acc_list:
+                    acc = float(acc_list[0])
+                elif isinstance(acc_list, (int, float)):
+                    acc = float(acc_list)
+                else:
+                    continue
+                rkey = f"{key}_recall_std"
+                rstd = float(obj.get(rkey)) if isinstance(obj.get(rkey), (int, float)) else None
+                out[p] = (acc, rstd)
+                break
+    return out
+
+
+def _get_ours_online_sqrt_at_fracs(lines: List[dict], fracs: List[float], alpha: float = 2.0) -> Dict[float, Tuple[float, Optional[float]]]:
+    """Ours (Online Sqrt): use line that corresponds to alpha=2 (line with cyclic_random_2)."""
+    alpha_line = None
+    for obj in lines:
+        key2 = "cyclic_random_2" in obj or "cyclic_random_2.0" in obj
+        if key2:
+            alpha_line = obj
+            break
+    if not alpha_line:
+        return {}
+    out = {}
+    for h in alpha_line.get("heuristic_points") or []:
+        if not isinstance(h, dict) or str(h.get("label")) != "online_sqrt_all":
+            continue
+        th1_p = h.get("th1_p")
+        if th1_p is None:
+            continue
+        p = float(th1_p) if th1_p != int(th1_p) else int(th1_p)
+        if p not in fracs:
+            continue
+        acc = h.get("acc")
+        if acc is None:
+            continue
+        rstd = h.get("recall_std")
+        out[p] = (float(acc), float(rstd) if rstd is not None else None)
+    return out
 
 
 def run(
     results_dir: str,
     max_subjects: Optional[int] = None,
-) -> Tuple[Dict[str, Tuple[Optional[float], Optional[float]]], int]:
+) -> Tuple[Dict[str, Dict], int]:
+    """Returns ({"Cyclic": {p: (acc_mean, rstd_mean), ...}, "PriDe": {...}, "Ours (Online Sqrt, α=2)": {...}}, n_subjects)."""
     base_files, pride_files = _discover_curve_files(results_dir)
     if not base_files:
         return {}, 0
@@ -132,9 +164,10 @@ def run(
     base_by_subj = {_subject_from_path(p, "_curve.jsonl"): p for p in base_files}
     pride_by_subj = {_subject_from_path(p, "_pride_curve.jsonl"): p for p in pride_files}
 
-    cyc_accs, cyc_rstds = [], []
-    pride_accs, pride_rstds = [], []
-    ours_accs, ours_rstds = [], []
+    # per-subject per-frac lists: { p: [(acc, rstd), ...] }
+    cyc_by_p: Dict[int, List[Tuple[float, Optional[float]]]] = {p: [] for p in CYCLIC_FRACS}
+    pride_by_p: Dict[float, List[Tuple[float, Optional[float]]]] = {p: [] for p in PRIDE_OURS_FRACS}
+    ours_by_p: Dict[float, List[Tuple[float, Optional[float]]]] = {p: [] for p in PRIDE_OURS_FRACS}
 
     for subj in subjects:
         base_path = base_by_subj.get(subj)
@@ -144,33 +177,43 @@ def run(
         base_lines = _read_jsonl(base_path)
         if not base_lines:
             continue
-        acc_c, rstd_c = _get_cyclic_100(base_lines)
-        if acc_c is not None:
-            cyc_accs.append(acc_c)
-            if rstd_c is not None:
-                cyc_rstds.append(rstd_c)
+        cyc_vals = _get_cyclic_at_fracs(base_lines, CYCLIC_FRACS)
+        for p, (acc, rstd) in cyc_vals.items():
+            cyc_by_p[p].append((acc, rstd))
 
         if pride_path:
             pride_lines = _read_jsonl(pride_path)
-            acc_p, rstd_p = _get_pride_cyclic_100(pride_lines)
-            if acc_p is not None:
-                pride_accs.append(acc_p)
-                if rstd_p is not None:
-                    pride_rstds.append(rstd_p)
-            acc_o, rstd_o = _get_ours_online_sqrt_100(pride_lines)
-            if acc_o is not None:
-                ours_accs.append(acc_o)
-                if rstd_o is not None:
-                    ours_rstds.append(rstd_o)
+            pride_vals = _get_pride_at_fracs(pride_lines, PRIDE_OURS_FRACS)
+            for p, (acc, rstd) in pride_vals.items():
+                p_key = int(p) if p == int(p) else p
+                if p_key in pride_by_p:
+                    pride_by_p[p_key].append((acc, rstd))
+            ours_vals = _get_ours_online_sqrt_at_fracs(pride_lines, PRIDE_OURS_FRACS, alpha=float(OURS_ALPHA))
+            for p, (acc, rstd) in ours_vals.items():
+                p_key = int(p) if p == int(p) else p
+                if p_key in ours_by_p:
+                    ours_by_p[p_key].append((acc, rstd))
 
-    n_used = len(cyc_accs)
+    n_used = max(len(cyc_by_p.get(p, [])) for p in CYCLIC_FRACS) if CYCLIC_FRACS else 0
     out = {}
-    if cyc_accs:
-        out["Cyclic (100%)"] = (float(np.mean(cyc_accs)), float(np.mean(cyc_rstds)) if cyc_rstds else None)
-    if pride_accs:
-        out["PriDe (100%)"] = (float(np.mean(pride_accs)), float(np.mean(pride_rstds)) if pride_rstds else None)
-    if ours_accs:
-        out["Ours (Online Sqrt 100%)"] = (float(np.mean(ours_accs)), float(np.mean(ours_rstds)) if ours_rstds else None)
+
+    def _mean_over_subjects(by_p: Dict) -> Dict:
+        result = {}
+        for p, lst in by_p.items():
+            if not lst:
+                continue
+            accs = [x[0] for x in lst]
+            rstds = [x[1] for x in lst if x[1] is not None]
+            result[p] = (float(np.mean(accs)), float(np.mean(rstds)) if rstds else None)
+        return result
+
+    if any(cyc_by_p[p] for p in CYCLIC_FRACS):
+        out["Cyclic"] = _mean_over_subjects(cyc_by_p)
+    if any(pride_by_p[p] for p in PRIDE_OURS_FRACS):
+        out["PriDe"] = _mean_over_subjects(pride_by_p)
+    if any(ours_by_p[p] for p in PRIDE_OURS_FRACS):
+        out["Ours (Online Sqrt, α=2)"] = _mean_over_subjects(ours_by_p)
+
     return out, n_used
 
 
@@ -201,10 +244,13 @@ def main():
 
     print("==== THREE-METHOD REPORT (mean over {} subjects, no run std) ====".format(n_subj))
     print("results_dir:", results_dir)
-    for name, (acc, rstd) in report.items():
-        rstr = f", recall_std={rstd:.4f}" if rstd is not None else ""
-        print("{} : acc={:.4f}{}".format(name, acc, rstr))
-    print("======================================================")
+    for method_name, by_p in report.items():
+        print("\n--- {} ---".format(method_name))
+        for p in sorted(by_p.keys(), key=lambda x: (float(x), x)):
+            acc, rstd = by_p[p]
+            rstr = f", recall_std={rstd:.4f}" if rstd is not None else ""
+            print("  {}% : acc={:.4f}{}".format(p, acc, rstr))
+    print("\n======================================================")
 
 
 if __name__ == "__main__":
