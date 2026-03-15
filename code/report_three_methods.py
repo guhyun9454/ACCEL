@@ -29,7 +29,7 @@ def _compute_results_dir(code_dir: str, eval_name: str, model_path: str, option_
     # 저장 폴더 컨벤션:
     # - 0-shot: 0_shot_<model>
     # - 그 외: 기존 컨벤션 유지 (예: 5s_<model>)
-    few_dir = f"{num_few}_s_{model_name}" if int(num_few) == 0 else f"{num_few}s_{model_name}"
+    few_dir = f"{num_few}s_{model_name}" if int(num_few) == 0 else f"{num_few}s_{model_name}"
     path = f"results_{task}/{few_dir}/{task}"
     if setting:
         path += f"_{setting}"
