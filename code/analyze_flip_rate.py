@@ -429,10 +429,12 @@ def main():
     args, unknown = ap.parse_known_args()
 
     reports = {}
+    save_base_dir: Optional[str] = None  # where to save --out (plot) when path is relative
 
     # 1. 모델과 여러 eval_names가 주어졌을 때 각각 분석
     if args.models and args.eval_names:
         results_root = str(args.results_root).strip() or os.path.dirname(os.path.abspath(__file__))
+        save_base_dir = results_root
         model_list = [str(m).strip() for m in args.models if str(m).strip()]
         
         print(f"[info] Running multi-dataset analysis for: {args.eval_names}")
@@ -476,11 +478,14 @@ def main():
     # 2. 기존 방식 (results_dir 단일 디렉토리나 jsonl_paths 지정 시)
     else:
         results_dir = str(args.results_dir).strip()
+        if results_dir:
+            save_base_dir = results_dir
         files = []
         if args.jsonl_paths:
             files = [os.path.abspath(p) for p in args.jsonl_paths]
             if not results_dir and files:
                 results_dir = os.path.dirname(os.path.abspath(files[0]))
+                save_base_dir = results_dir
         elif results_dir:
             files = _discover_jsonl_files(results_dir, jsonl_glob=str(args.jsonl_glob), run_idx=args.run_idx)
         
@@ -507,6 +512,8 @@ def main():
     out_plot = None
     if bool(args.save_plot):
         out_path = str(args.out)
+        if save_base_dir and not os.path.isabs(out_path):
+            out_path = os.path.join(save_base_dir, out_path)
         title = str(args.title) if args.title else "Flip rate vs confidence deciles (cyclic rotations)"
         out_plot = _save_plot(reports, out_path, title)
         if out_plot:
