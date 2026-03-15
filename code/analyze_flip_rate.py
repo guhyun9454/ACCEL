@@ -369,23 +369,17 @@ def _save_plot(reports_dict: Dict[str, dict], out_path: str, title: str):
         color = colors[idx % len(colors)]
         xs = np.asarray([b["pct_hi"] for b in bins], dtype=np.float64)
         y_flip = np.asarray([b["flip_mean"] for b in bins], dtype=np.float64)
-        y_flip_std = np.asarray([b["flip_std"] for b in bins], dtype=np.float64)
 
         # Flip Rate 그리기
         label_name = f"Flip rate ({name})" if len(reports_dict) > 1 else "Flip rate"
         ax.plot(xs, y_flip, marker="o", linewidth=2.0, color=color, label=label_name)
-        ax.fill_between(xs, y_flip - y_flip_std, y_flip + y_flip_std, color=color, alpha=0.18, linewidth=0)
 
         # 데이터셋이 1개일 때만 T->F / F->T 추가
         if plot_tf_ft and rep.get("has_tf_ft", False):
             y_t2f = np.asarray([b["t_to_f_mean"] for b in bins], dtype=np.float64)
-            y_t2f_std = np.asarray([b["t_to_f_std"] for b in bins], dtype=np.float64)
             y_f2t = np.asarray([b["f_to_t_mean"] for b in bins], dtype=np.float64)
-            y_f2t_std = np.asarray([b["f_to_t_std"] for b in bins], dtype=np.float64)
             ax.plot(xs, y_t2f, marker="s", linewidth=1.8, color="#8E44AD", label="T→F (correct→wrong)")
-            ax.fill_between(xs, y_t2f - y_t2f_std, y_t2f + y_t2f_std, color="#8E44AD", alpha=0.18, linewidth=0)
             ax.plot(xs, y_f2t, marker="^", linewidth=1.8, color="#27AE60", label="F→T (wrong→correct)")
-            ax.fill_between(xs, y_f2t - y_f2t_std, y_f2t + y_f2t_std, color="#27AE60", alpha=0.18, linewidth=0)
 
     ax.set_xlabel("Confidence percentile bin (top1-top2 probability gap)")
     ax.set_ylabel("Rate")
@@ -514,7 +508,7 @@ def main():
         out_path = str(args.out)
         if save_base_dir and not os.path.isabs(out_path):
             out_path = os.path.join(save_base_dir, out_path)
-        title = str(args.title) if args.title else "Flip rate vs confidence deciles (cyclic rotations)"
+        title = str(args.title) if args.title else "Flip rate vs confidence (Cyclic Permutation)"
         out_plot = _save_plot(reports, out_path, title)
         if out_plot:
             print(f"\nSaved plot: {out_plot}")
