@@ -370,8 +370,12 @@ def _save_plot(reports_dict: Dict[str, dict], out_path: str, title: str):
         xs = np.asarray([b["pct_hi"] for b in bins], dtype=np.float64)
         y_flip = np.asarray([b["flip_mean"] for b in bins], dtype=np.float64)
 
-        # Flip Rate 그리기
-        label_name = f"Flip rate ({name})" if len(reports_dict) > 1 else "Flip rate"
+        # Flip Rate 그리기 (레전드: csqa,0,full -> CSQA / mmlu,0,full -> MMLU / arc,0,full -> ARC)
+        if len(reports_dict) > 1:
+            task = str(name).split(",")[0].strip().upper()
+            label_name = task
+        else:
+            label_name = "Flip rate"
         ax.plot(xs, y_flip, marker="o", linewidth=2.0, color=color, label=label_name)
 
         # 데이터셋이 1개일 때만 T->F / F->T 추가
