@@ -3500,7 +3500,7 @@ def main():
     toker = AutoTokenizer.from_pretrained(
         args.pretrained_model_path,
         use_fast=False,
-        add_bos_token=Fals,
+        add_bos_token=False,
         add_eos_token=False,
         cache_dir=getattr(args, "cache_dir", None),
     )
