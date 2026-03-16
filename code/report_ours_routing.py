@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Ours (th1/2) 정책만 대상: 구간별(2,5,10,20,...,100%) routing 비율과 T→F, F→T, F→F, T→T 비율 리포트.
-*_curve.jsonl (baseline)에서 heuristic_points(label=th1/2)와 transition을 읽어 subject 평균으로 출력.
-run0만 사용: *_run0_curve.jsonl이 있으면 run0만 읽고, 없으면 run 접미사 없는 *_curve.jsonl 사용.
+Ours (Online Sqrt, α=2) 정책 대상: 구간별(2,5,10,...,100%) routing 비율과 T→F, F→T, F→F, T→T 비율 리포트.
+*_pride_curve.jsonl에서 percentile=2(α=2)인 줄의 heuristic_points(label=online_sqrt_all)에서 (n_base, n_probe2, n_cyclic) 읽음.
+run0만 사용: *_run0_pride_curve.jsonl 우선, 없으면 *_pride_curve.jsonl.
 
 Usage:
   python report_ours_routing.py --results_dir results_mmlu/0s_Model/mmlu_full_id-ABCD
@@ -46,20 +46,22 @@ def _get_mmlu_subject_set() -> Optional[set]:
         return None
 
 
-def _discover_curve_files(results_dir: str, run0_only: bool = True) -> List[str]:
-    """run0_only=True면 *_run0_curve.jsonl만 사용. 없으면 *_curve.jsonl 중 run 접미사 없는 것만."""
-    run0_pattern = os.path.join(results_dir, "*_run0_curve.jsonl")
+OURS_ALPHA = 2  # α=2 고정 (online_sqrt from pride)
+
+
+def _discover_pride_curve_files(results_dir: str, run0_only: bool = True) -> List[str]:
+    """online_sqrt는 pride curve에 있음. *_run0_pride_curve.jsonl 우선, 없으면 *_pride_curve.jsonl."""
+    run0_pattern = os.path.join(results_dir, "*_run0_pride_curve.jsonl")
     run0_files = sorted(glob.glob(run0_pattern))
     if run0_files:
         return run0_files
-    all_base = sorted(glob.glob(os.path.join(results_dir, "*_curve.jsonl")))
-    all_base = [p for p in all_base if not p.endswith("_pride_curve.jsonl")]
+    all_pride = sorted(glob.glob(os.path.join(results_dir, "*_pride_curve.jsonl")))
     if run0_only:
-        all_base = [p for p in all_base if "_run" not in os.path.basename(p) or p.endswith("_run0_curve.jsonl")]
-    return all_base
+        all_pride = [p for p in all_pride if "_run" not in os.path.basename(p) or p.endswith("_run0_pride_curve.jsonl")]
+    return all_pride
 
 
-def _subject_from_path(path: str, suffix: str = "_curve.jsonl") -> str:
+def _subject_from_path(path: str, suffix: str = "_pride_curve.jsonl") -> str:
     basename = os.path.basename(path)
     if basename.endswith(suffix):
         return basename[: -len(suffix)]
@@ -85,10 +87,23 @@ def _read_jsonl(path: str) -> List[dict]:
     return out
 
 
-def _get_ours_th12_per_line(obj: dict) -> Optional[Tuple[float, int, int, int, Optional[dict]]]:
-    """한 줄(curve obj)에서 label=th1/2인 heuristic_point와 transition 추출. (p, n_base, n_probe2, n_cyclic, transition)."""
+def _get_online_sqrt_from_pride_line(obj: dict, alpha: float = 2.0) -> Optional[Dict[float, Tuple[int, int, int, Optional[dict]]]]:
+    """
+    Pride curve 한 줄에서 percentile==alpha인 경우만, label=online_sqrt_all인 점들을 모두 추출.
+    반환: { p: (n_base, n_probe2, n_cyclic, transition) } (transition은 해당 obj에 있으면 사용, 없으면 None)
+    """
+    perc = obj.get("percentile")
+    if perc is None:
+        try:
+            perc = float(obj.get("perc_value", 0))
+        except Exception:
+            perc = None
+    if perc is not None and float(perc) != float(alpha):
+        return None
+    out = {}
+    trans = obj.get("transition") if isinstance(obj.get("transition"), dict) else None
     for h in obj.get("heuristic_points") or []:
-        if not isinstance(h, dict) or str(h.get("label")) != "th1/2":
+        if not isinstance(h, dict) or str(h.get("label")) != "online_sqrt_all":
             continue
         th1_p = h.get("th1_p")
         if th1_p is None:
@@ -97,9 +112,8 @@ def _get_ours_th12_per_line(obj: dict) -> Optional[Tuple[float, int, int, int, O
         n_base = int(h.get("n_base", 0))
         n_probe2 = int(h.get("n_probe2", 0))
         n_cyclic = int(h.get("n_cyclic", 0))
-        trans = obj.get("transition") if isinstance(obj.get("transition"), dict) else None
-        return (p, n_base, n_probe2, n_cyclic, trans)
-    return None
+        out[p] = (n_base, n_probe2, n_cyclic, trans)
+    return out if out else None
 
 
 def run(
@@ -113,16 +127,16 @@ def run(
       "transition": {"t_to_t_ratio": float, "t_to_f_ratio": float, "f_to_t_ratio": float, "f_to_f_ratio": float} or None
     }
     """
-    base_files = _discover_curve_files(results_dir)
-    if not base_files:
+    pride_files = _discover_pride_curve_files(results_dir)
+    if not pride_files:
         return {}, 0
 
-    # canonical subject로 묶기: MMLU는 {subject}_run0, _run1 → subject 하나로
+    # canonical subject로 묶기: MMLU는 {subject}_run0 → subject 하나로
     canon_to_paths: Dict[str, List[str]] = {}
-    for p in base_files:
-        stem = _subject_from_path(p, "_curve.jsonl")
+    for path in pride_files:
+        stem = _subject_from_path(path, "_pride_curve.jsonl")
         canon = _canonical_subject(stem)
-        canon_to_paths.setdefault(canon, []).append(p)
+        canon_to_paths.setdefault(canon, []).append(path)
 
     subjects = sorted(canon_to_paths.keys())
     if "mmlu" in results_dir:
@@ -145,21 +159,21 @@ def run(
         for path in paths:
             lines = _read_jsonl(path)
             for obj in lines:
-                row = _get_ours_th12_per_line(obj)
-                if row is None:
+                data = _get_online_sqrt_from_pride_line(obj, OURS_ALPHA)
+                if data is None:
                     continue
-                p, n_base, n_probe2, n_cyclic, trans = row
-                if p not in per_p_counts:
-                    continue
-                N = n_base + n_probe2 + n_cyclic
-                if N > 0:
-                    per_p_counts[p].append((n_base, n_probe2, n_cyclic))
-                if trans is not None:
-                    bt = int(trans.get("base_t_count", 0))
-                    bf = int(trans.get("base_f_count", 0))
-                    t_to_f = int(trans.get("t_to_f_count", 0))
-                    f_to_t = int(trans.get("f_to_t_count", 0))
-                    per_p_trans[p].append((bt - t_to_f, t_to_f, f_to_t, bf - f_to_t))
+                for p, (n_base, n_probe2, n_cyclic, trans) in data.items():
+                    if p not in per_p_counts:
+                        continue
+                    N = n_base + n_probe2 + n_cyclic
+                    if N > 0:
+                        per_p_counts[p].append((n_base, n_probe2, n_cyclic))
+                    if trans is not None:
+                        bt = int(trans.get("base_t_count", 0))
+                        bf = int(trans.get("base_f_count", 0))
+                        t_to_f = int(trans.get("t_to_f_count", 0))
+                        f_to_t = int(trans.get("f_to_t_count", 0))
+                        per_p_trans[p].append((bt - t_to_f, t_to_f, f_to_t, bf - f_to_t))
         for p in OURS_PERCENTS:
             if per_p_counts[p]:
                 # subject당 run이 여러 개면 평균한 하나의 (nb, np2, nc)로 취급
@@ -219,7 +233,7 @@ def run(
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Ours (th1/2) routing & T→F/F→T/F→F/T→T report from baseline curve JSONL.")
+    ap = argparse.ArgumentParser(description="Ours (Online Sqrt, α=2) routing & T→F/F→T/F→F/T→T report from pride curve JSONL.")
     ap.add_argument("--results_dir", type=str, default="", help="Directory containing *_curve.jsonl")
     ap.add_argument("--results_root", type=str, default="", help="Root for results_* (used with --models)")
     ap.add_argument("--models", type=str, nargs="+", default=None, help="Model names")
@@ -266,7 +280,7 @@ def main():
     # 단일 디렉터리면 그대로 출력; 여러 모델이면 모델별 평균으로 한 번만 출력
     if n_models == 1:
         by_p, n_subj, label = results_per_model[0]
-        print("==== OURS (th1/2) ROUTING & TRANSITION REPORT: {} (mean over {} subjects) ====".format(label, n_subj))
+        print("==== OURS (Online Sqrt, α=2) ROUTING & TRANSITION REPORT: {} (mean over {} subjects) ====".format(label, n_subj))
         print("results_dir:", dirs_to_run[0][0])
     else:
         # 모델별 평균
@@ -294,7 +308,7 @@ def main():
             if t2t_r:
                 transition = {"t_to_t_ratio": float(np.mean(t2t_r)), "t_to_f_ratio": float(np.mean(t2f_r)), "f_to_t_ratio": float(np.mean(f2t_r)), "f_to_f_ratio": float(np.mean(f2f_r))}
             by_p[p] = {"routing": routing, "transition": transition}
-        print("==== OURS (th1/2) ROUTING & TRANSITION REPORT: mean over {} models (avg {} subjects per model) ====".format(n_models, n_subj_avg))
+        print("==== OURS (Online Sqrt, α=2) ROUTING & TRANSITION REPORT: mean over {} models (avg {} subjects per model) ====".format(n_models, n_subj_avg))
         print("results_root:", str(args.results_root).strip() or os.path.dirname(os.path.abspath(__file__)))
         print("eval_name:", args.eval_name, "| option_id_set:", args.option_id_set)
         print("models (n={}):".format(n_models), ", ".join(x[2] for x in results_per_model[:5]) + (" ..." if n_models > 5 else ""))
