@@ -316,14 +316,20 @@ def _filter_series_by_max_pct(
     series: Dict[float, Dict[str, float]],
     max_pct: Optional[float],
     curve_key: str,
+    min_pct: Optional[float] = None,
 ) -> Dict[float, Dict[str, float]]:
-    """퍼센타일 상한(max_pct)까지만 잘라냄. curve_key별로 따로 적용"""
+    """Filter points to [min_pct, max_pct] range. Applied per curve_key."""
+    result = dict(series or {})
+    if min_pct is not None:
+        min_limit = float(min_pct)
+        if min_limit > 0:
+            result = {k: v for k, v in result.items() if k >= min_limit}
     if max_pct is None:
-        return series
+        return result
     pct_limit = float(max_pct)
     if pct_limit >= 100:
-        return series
-    return {k: v for k, v in (series or {}).items() if k <= pct_limit}
+        return result
+    return {k: v for k, v in result.items() if k <= pct_limit}
 
 
 def _plot_groups(
@@ -341,11 +347,13 @@ def _plot_groups(
     show_overall_band: bool = False,
     ours_pride_alphas: Optional[List[float]] = None,
     ours_pride_base_label: str = "Ours+PRIDE",
+    min_pct_by_curve: Optional[Dict[str, float]] = None,
 ):
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=160)
 
     # plot per-model lines (each selected run is a "group" with a single payload)
     max_by = max_pct_by_curve or {}
+    min_by = min_pct_by_curve or {}
 
     _pride_keys = ("ours_pride_th1_2", "ours_pride_online_sqrt")
     _show_pride_suffix = ("ours_pride_th1_2" in curve_keys and "ours_pride_online_sqrt" in curve_keys)
@@ -360,7 +368,8 @@ def _plot_groups(
                     for i, alpha in enumerate(alphas):
                         series_list = [_curve_series_from_payload(p, ck, y_key, ours_pride_alpha=alpha) for p in payloads]
                         m = max_by.get(ck)
-                        series_list = [_filter_series_by_max_pct(s, m, ck) for s in series_list if s]
+                        mn = min_by.get(ck)
+                        series_list = [_filter_series_by_max_pct(s, m, ck, min_pct=mn) for s in series_list if s]
                         series_list = [s for s in series_list if s]
                         if not series_list:
                             continue
@@ -387,7 +396,8 @@ def _plot_groups(
                 else:
                     series_list = [_curve_series_from_payload(p, ck, y_key) for p in payloads]
                     m = max_by.get(ck)
-                    series_list = [_filter_series_by_max_pct(s, m, ck) for s in series_list if s]
+                    mn = min_by.get(ck)
+                    series_list = [_filter_series_by_max_pct(s, m, ck, min_pct=mn) for s in series_list if s]
                     series_list = [s for s in series_list if s]
                     if not series_list:
                         continue
@@ -417,7 +427,8 @@ def _plot_groups(
                         for p in payloads:
                             s = _curve_series_from_payload(p, ck, y_key, ours_pride_alpha=alpha)
                             m = max_by.get(ck)
-                            s = _filter_series_by_max_pct(s, m, ck) if s else {}
+                            mn = min_by.get(ck)
+                            s = _filter_series_by_max_pct(s, m, ck, min_pct=mn) if s else {}
                             if s:
                                 all_series.append(s)
                     agg_all = _aggregate_series(all_series) if all_series else {}
@@ -446,7 +457,8 @@ def _plot_groups(
                     for p in payloads:
                         s = _curve_series_from_payload(p, ck, y_key)
                         m = max_by.get(ck)
-                        s = _filter_series_by_max_pct(s, m, ck) if s else {}
+                        mn = min_by.get(ck)
+                        s = _filter_series_by_max_pct(s, m, ck, min_pct=mn) if s else {}
                         if s:
                             all_series.append(s)
                 agg_all = _aggregate_series(all_series) if all_series else {}
@@ -598,10 +610,10 @@ curve_keys = st.multiselect(
     help="Ours+PRIDE th1/2 vs Online Sqrt 중 하나만, 또는 둘 다 선택 가능.",
 )
 
-st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
 cyclic_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-# "상한" 옵션은 2%부터 시작 (0.5/1.0은 alpha에서만 선택)
 pride_ours_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+
+st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
 col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
 with col_p1:
     max_pct_cyclic = st.selectbox(
@@ -644,6 +656,49 @@ with col_p5:
         key="max_ours_pride_sqrt",
     )
 
+st.caption("곡선별 퍼센타일 하한 (선택한 % 이상만 표시)")
+col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+with col_m1:
+    min_pct_cyclic = st.selectbox(
+        "Cyclic 하한",
+        options=cyclic_options,
+        index=0,
+        format_func=lambda x: f"{x}%" if x > 0 else "0% (전체)",
+        key="min_cyclic",
+    )
+with col_m2:
+    min_pct_pride = st.selectbox(
+        "PriDe 하한",
+        options=pride_ours_options,
+        index=0,
+        format_func=lambda x: f"{x}%",
+        key="min_pride",
+    )
+with col_m3:
+    min_pct_ours = st.selectbox(
+        "Ours 하한",
+        options=pride_ours_options,
+        index=0,
+        format_func=lambda x: f"{x}%",
+        key="min_ours",
+    )
+with col_m4:
+    min_pct_ours_pride_th1_2 = st.selectbox(
+        "Ours+PRIDE th1/2 하한",
+        options=pride_ours_options,
+        index=0,
+        format_func=lambda x: f"{x}%",
+        key="min_ours_pride_th12",
+    )
+with col_m5:
+    min_pct_ours_pride_online_sqrt = st.selectbox(
+        "Ours+PRIDE Online Sqrt 하한",
+        options=pride_ours_options,
+        index=0,
+        format_func=lambda x: f"{x}%",
+        key="min_ours_pride_sqrt",
+    )
+
 pride_alpha_options = [0.5, 1.0, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 ours_pride_alphas = st.multiselect(
     "Ours+PRIDE PriDe α (prefix)",
@@ -660,6 +715,13 @@ max_pct_by_curve = {
     "ours": float(max_pct_ours),
     "ours_pride_th1_2": float(max_pct_ours_pride_th1_2),
     "ours_pride_online_sqrt": float(max_pct_ours_pride_online_sqrt),
+}
+min_pct_by_curve = {
+    "cyclic": float(min_pct_cyclic),
+    "default_pride": float(min_pct_pride),
+    "ours": float(min_pct_ours),
+    "ours_pride_th1_2": float(min_pct_ours_pride_th1_2),
+    "ours_pride_online_sqrt": float(min_pct_ours_pride_online_sqrt),
 }
 
 overall_mode = st.radio(
@@ -731,6 +793,7 @@ if plot_clicked:
             show_overall_band=show_overall_band,
             ours_pride_alphas=ours_pride_alphas or [2],
             ours_pride_base_label=str(lab_ours_pride or "Ours+PRIDE"),
+            min_pct_by_curve=min_pct_by_curve,
         )
         st.pyplot(fig_acc, use_container_width=True)
     with c_right:
@@ -749,5 +812,6 @@ if plot_clicked:
             show_overall_band=show_overall_band,
             ours_pride_alphas=ours_pride_alphas or [2],
             ours_pride_base_label=str(lab_ours_pride or "Ours+PRIDE"),
+            min_pct_by_curve=min_pct_by_curve,
         )
         st.pyplot(fig_rstd, use_container_width=True)
