@@ -3497,9 +3497,11 @@ def main():
         return
 
     # -------- Tokenizer / Model --------
+    # 일부 LLaMA/Mistral 계열은 slow(SentencePiece) tokenizer 파일이 없어서
+    # use_fast=False 로 강제하면 \"TypeError: not a string\" 가 발생한다.
+    # 따라서 기본값(use_fast=True)에 맡기고 BOS/EOS 토큰만 제어한다.
     toker = AutoTokenizer.from_pretrained(
         args.pretrained_model_path,
-        use_fast=False,
         add_bos_token=False,
         add_eos_token=False,
         cache_dir=getattr(args, "cache_dir", None),
