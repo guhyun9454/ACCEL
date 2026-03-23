@@ -11,6 +11,8 @@ from utils import _purple
 
 logger = logging.getLogger(__name__)
 
+PRIMARY_OURS_LABEL = "th1/sqrt2"
+
 
 def _plot_three_curves_acc_recall_std(
     derived_records_by_p: Dict[float, List[dict]],
@@ -25,7 +27,7 @@ def _plot_three_curves_acc_recall_std(
     wandb_run: Any = None,
 ):
     """
-    Three curves: (1) Cyclic (no PRIDE), (2) Default+PRIDE, (3) OURS (th1/2, no PRIDE).
+    Three curves: (1) Cyclic (no PRIDE), (2) Default+PRIDE, (3) OURS (th1/sqrt2, no PRIDE).
     X=Cost, Y=Accuracy or Recall_std. Fractions configurable via args.
     """
     if not derived_records_by_p:
@@ -133,14 +135,14 @@ def _plot_three_curves_acc_recall_std(
     else:
         cost_pride, acc_pride, rstd_pride, acc_std_pride, rstd_std_pride = _agg_pride_default(derived_records_pride_by_p, pride_ours_fractions) if derived_records_pride_by_p else _def5
 
-    cost_ours, acc_ours, rstd_ours, acc_std_ours, rstd_std_ours = _agg_heur(derived_records_by_p, "th1/2", pride_ours_fractions)
+    cost_ours, acc_ours, rstd_ours, acc_std_ours, rstd_std_ours = _agg_heur(derived_records_by_p, PRIMARY_OURS_LABEL, pride_ours_fractions)
 
     if derived_records_pride_by_alpha:
         alpha_ours = pride_prefix_list[0] if pride_prefix_list else 10
         cobjs_op = derived_records_pride_by_alpha.get(alpha_ours, [])
-        cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, "online_sqrt_all") if cobjs_op else _def5
+        cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, PRIMARY_OURS_LABEL) if cobjs_op else _def5
     else:
-        cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur(derived_records_pride_by_p, "th1/2", pride_ours_fractions) if derived_records_pride_by_p else _def5
+        cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur(derived_records_pride_by_p, PRIMARY_OURS_LABEL, pride_ours_fractions) if derived_records_pride_by_p else _def5
 
     default_acc = float(acc_cyc[0]) if acc_cyc and np.isfinite(acc_cyc[0]) else float("nan")
     default_recall_std = float(rstd_cyc[0]) if rstd_cyc and np.isfinite(rstd_cyc[0]) else float("nan")
@@ -261,7 +263,7 @@ def _plot_three_curves_acc_recall_std(
                 if not cobjs:
                     continue
                 entry = {}
-                for variant in ("th1/2", "online_sqrt_all"):
+                for variant in ("th1/2", PRIMARY_OURS_LABEL, "online_sqrt_all"):
                     co, ac, rs, asd, rsd = agg_fn(cobjs, th1_fracs, variant)
                     entry[variant] = {
                         "p": [float(x) for x in th1_fracs],
@@ -324,6 +326,7 @@ def _plot_three_curves_acc_recall_std(
                     "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_pride],
                 },
                 "ours": {
+                    "label": PRIMARY_OURS_LABEL,
                     "p": [float(x) for x in pride_ours_fractions],
                     "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours],
                     "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours],

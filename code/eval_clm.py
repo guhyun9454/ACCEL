@@ -77,6 +77,17 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+PRIMARY_OURS_LABEL = "th1/sqrt2"
+LEGACY_OURS_LABEL = "th1/2"
+
+
+def _rule_th1_half(th1_val: float) -> float:
+    return float(th1_val) / 2.0
+
+
+def _rule_th1_sqrt2(th1_val: float) -> float:
+    return float(th1_val) / math.sqrt(2.0)
+
 def _pride_correct_row(row: np.ndarray, prior: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """PriDe correction: divide by prior then renormalize."""
     r = np.asarray(row, dtype=np.float64)
@@ -1804,13 +1815,21 @@ def main():
 
                     cobj = dict(cobj_base)
                     cobj["heuristic_points"] = [{
-                        "label": "th1/2",
+                        "label": LEGACY_OURS_LABEL,
                         "cost": float(ours_cost),
                         "acc": float(ours_acc),
                         "recall_std": float(ours_rstd),
                         "n_base": int(800 + rng.integers(0, 50)),
                         "n_probe2": int(150 + rng.integers(0, 50)),
                         "n_cyclic": int(50 + rng.integers(0, 50)),
+                    }, {
+                        "label": PRIMARY_OURS_LABEL,
+                        "cost": float(ours_cost + 0.05),
+                        "acc": float(np.clip(ours_acc + 0.01, 0.0, 1.0)),
+                        "recall_std": float(np.clip(ours_rstd - 0.01, 0.0, 1.0)),
+                        "n_base": int(780 + rng.integers(0, 50)),
+                        "n_probe2": int(170 + rng.integers(0, 50)),
+                        "n_cyclic": int(70 + rng.integers(0, 50)),
                     }]
                     derived_records_by_p[float(p)] = [cobj]  # 1 "subject"
 
@@ -1830,9 +1849,14 @@ def main():
                         cobj_pr[key] = {"costs": [float(pride_cost)], "accuracies": [float(pride_acc)]}
                         cobj_pr[f"{key}_recall_std"] = float(pride_rstd)
                         cobj_pr.setdefault("heuristic_points", []).append({
-                            "label": "th1/2", "th1_p": p, "cost": float(pride_cost),
+                            "label": LEGACY_OURS_LABEL, "th1_p": p, "cost": float(pride_cost),
                             "acc": float(pride_acc), "recall_std": float(pride_rstd),
                             "n_base": 800, "n_probe2": 150, "n_cyclic": 50,
+                        })
+                        cobj_pr["heuristic_points"].append({
+                            "label": PRIMARY_OURS_LABEL, "th1_p": p, "cost": float(pride_cost + 0.05),
+                            "acc": float(np.clip(pride_acc + 0.01, 0.0, 1.0)), "recall_std": float(np.clip(pride_rstd - 0.01, 0.0, 1.0)),
+                            "n_base": 780, "n_probe2": 170, "n_cyclic": 70,
                         })
                         sqrt_cost = 1.0 + frac * 1.9 + float(rng.normal(0.0, 0.02))
                         sqrt_acc = 0.53 + 0.19 * frac + float(rng.normal(0.0, 0.01))
@@ -2318,11 +2342,11 @@ def main():
 
                                 if cobj:
                                     by_perc_baseline[perc].append(cobj)
-                                    def _get_static_pt(th1_p, rule_func):
+                                    def _get_static_pt(th1_p, rule_func, label_key, marker_key):
                                         c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
                                             default_conf, mean_conf, base_correct_list, cyclic_correct_list,
                                             arr_probe2_correct, k, th1_p, rule_func, None)
-                                        out = {'cost': c, 'acc': a, 'label': 'th1/2', 'marker': '*', 'color': 'gray'}
+                                        out = {'cost': c, 'acc': a, 'label': label_key, 'marker': marker_key, 'color': 'gray'}
                                         try:
                                             _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
                                                 default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
@@ -2333,13 +2357,16 @@ def main():
                                             pass
                                         return out
                                     if "heuristic_points" not in cobj:
-                                        cobj["heuristic_points"] = [_get_static_pt(perc, lambda x: x / 2.0)]
+                                        cobj["heuristic_points"] = [
+                                            _get_static_pt(perc, _rule_th1_half, LEGACY_OURS_LABEL, "*"),
+                                            _get_static_pt(perc, _rule_th1_sqrt2, PRIMARY_OURS_LABEL, "v"),
+                                        ]
 
                                     # Ours (baseline) transition 기록
                                     try:
                                         _, _, _, preds_ours = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
                                             default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list,
-                                            probe2_pred_idx_list, labels_idx_for_curves, k, perc, lambda x: x / 2.0, None)
+                                            probe2_pred_idx_list, labels_idx_for_curves, k, perc, _rule_th1_sqrt2, None)
                                         rec = _make_transition_record_from_preds(
                                             base_correct_list, preds_ours, labels_idx_for_curves, default_conf, subject)
                                         transition_records_ours_by_p.setdefault(perc, []).append(rec)
@@ -2453,11 +2480,11 @@ def main():
                                     # alpha>=100: cost/acc/recall_std 모두 Cyclic과 동일하게 원본 사용
                                     bc_use, cc_use = (base_for_dp, cyclic_for_dp) if pride_alpha >= 100 else (base_correct_list_pr, cyclic_correct_list_pr)
                                     bp_use, cp_use = (base_pred_dp, cyclic_pred_dp) if pride_alpha >= 100 else (base_pred_idx_list_pr, cyclic_pred_idx_list_pr)
-                                    def _get_static_pt_pride(th1_p, rule_func, label_key):
+                                    def _get_static_pt_pride(th1_p, rule_func, label_key, marker_key):
                                         c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
                                             default_conf_pr, mean_conf_pr, bc_use, cc_use,
                                             arr_probe2_correct_pr, k, th1_p, rule_func, prefix_ids_set)
-                                        out = {'cost': c, 'acc': a, 'label': label_key, 'th1_p': th1_p, 'marker': '*', 'color': 'gray'}
+                                        out = {'cost': c, 'acc': a, 'label': label_key, 'th1_p': th1_p, 'marker': marker_key, 'color': 'gray'}
                                         try:
                                             _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
                                                 default_conf_pr, mean_conf_pr, bp_use, cp_use,
@@ -2481,9 +2508,10 @@ def main():
                                         except Exception:
                                             pass
                                         return out
-                                    pts_th12 = [_get_static_pt_pride(float(th1), lambda x: x / 2.0, "th1/2") for th1 in ours_th1_list]
+                                    pts_th12 = [_get_static_pt_pride(float(th1), _rule_th1_half, LEGACY_OURS_LABEL, "*") for th1 in ours_th1_list]
+                                    pts_var = [_get_static_pt_pride(float(th1), _rule_th1_sqrt2, PRIMARY_OURS_LABEL, "v") for th1 in ours_th1_list]
                                     pts_sqrt = [_get_static_pt_online_sqrt(float(th1)) for th1 in ours_th1_list]
-                                    cobj_pr["heuristic_points"] = pts_th12 + pts_sqrt
+                                    cobj_pr["heuristic_points"] = pts_th12 + pts_var + pts_sqrt
                                     by_pride_alpha[pride_alpha].append(cobj_pr)
 
                                 for ours_th1 in ours_th1_list:
@@ -2502,7 +2530,7 @@ def main():
                                     try:
                                         _, _, _, preds_op = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
                                             default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
-                                            probe2_pred_idx_list_pr, labels_idx_for_curves, k, ours_th1, lambda x: x / 2.0, prefix_ids_set)
+                                            probe2_pred_idx_list_pr, labels_idx_for_curves, k, ours_th1, _rule_th1_sqrt2, prefix_ids_set)
                                         rec_op = _make_transition_record_from_preds(
                                             base_correct_list_pr, preds_op, labels_idx_for_curves, default_conf_pr, subject)
                                         if float(pride_alpha) == 2.0:
@@ -2655,7 +2683,7 @@ def main():
         if transition_records_ours_by_p:
             _print_transition_analysis_by_perc(transition_records_ours_by_p, "Ours")
 
-        # Three-curves: Cost vs Acc, Cost vs Recall_std (Cyclic / Default+PRIDE / OURS th1/2)
+        # Three-curves: Cost vs Acc, Cost vs Recall_std (Cyclic / Default+PRIDE / OURS th1/sqrt2)
         if len(derived_records_by_p) > 0:
             try:
                 out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
@@ -2730,7 +2758,7 @@ def main():
                 mean_r, std_r = _macro_mean_std_over_runs(rstds, n_subjects, n_runs)
                 return mean_c, mean_a, mean_r, std_c, std_a, std_r
 
-            def get_heur_stats(cobjs, label="th1/2"):
+            def get_heur_stats(cobjs, label=PRIMARY_OURS_LABEL):
                 costs, accs, rstds, nb, np2, nc = [], [], [], [], [], []
                 for c in cobjs:
                     hps = {str(h.get("label")): h for h in (c.get("heuristic_points") or []) if isinstance(h, dict)}
@@ -2803,15 +2831,23 @@ def main():
                 a_str = f"{float(alpha):g}"
                 logger.info(f"default_pride_α{a_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
 
-            # 2. ours + pride (per alpha): th1/2 and Online Sqrt
-            logger.info("---- ours + pride (th1/2) ----")
+            # 2. ours + pride (per alpha): legacy th1/2, primary variance sqrt2, and online sqrt
+            logger.info("---- ours + pride (th1/2 legacy) ----")
             for alpha in pride_alphas:
                 cobjs = derived_records_pride_by_alpha[alpha]
                 for p in pride_fracs:
-                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, "th1/2")
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, LEGACY_OURS_LABEL)
                     a_str = f"{float(alpha):g}"
                     p_str = f"{float(p):g}"
                     logger.info(f"ours_pride_th12_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+            logger.info(f"---- ours + pride ({PRIMARY_OURS_LABEL}) ----")
+            for alpha in pride_alphas:
+                cobjs = derived_records_pride_by_alpha[alpha]
+                for p in pride_fracs:
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, PRIMARY_OURS_LABEL)
+                    a_str = f"{float(alpha):g}"
+                    p_str = f"{float(p):g}"
+                    logger.info(f"ours_pride_var_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
             logger.info("---- ours + pride (Online Sqrt) ----")
             for alpha in pride_alphas:
                 cobjs = derived_records_pride_by_alpha[alpha]
@@ -2825,7 +2861,7 @@ def main():
             logger.info("---- ours ----")
             for p in pride_fracs:
                 if float(p) in derived_records_by_p:
-                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], "th1/2")
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], PRIMARY_OURS_LABEL)
                     p_str = f"{float(p):g}"
                     logger.info(f"ours_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
