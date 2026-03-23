@@ -88,6 +88,85 @@ def _rule_th1_half(th1_val: float) -> float:
 def _rule_th1_sqrt2(th1_val: float) -> float:
     return float(th1_val) / math.sqrt(2.0)
 
+
+def _gap_of_distribution(probs: np.ndarray) -> float:
+    vals = np.sort(np.asarray(probs, dtype=np.float64))[::-1]
+    if vals.size <= 1:
+        return 0.0
+    return float(vals[0] - vals[1])
+
+
+def _safe_corr(x: np.ndarray, y: np.ndarray) -> float:
+    xa = np.asarray(x, dtype=np.float64).ravel()
+    ya = np.asarray(y, dtype=np.float64).ravel()
+    m = np.isfinite(xa) & np.isfinite(ya)
+    if np.sum(m) < 2:
+        return float("nan")
+    xa = xa[m]
+    ya = ya[m]
+    if float(np.std(xa)) <= 1e-12 or float(np.std(ya)) <= 1e-12:
+        return float("nan")
+    return float(np.corrcoef(xa, ya)[0, 1])
+
+
+def _build_sigma_analysis_record(
+    subject: str,
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    cyclic_gap_mean: np.ndarray,
+    cyclic_gap_std: np.ndarray,
+    flip_mask: np.ndarray,
+) -> Dict[str, float]:
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+    mu = np.asarray(cyclic_gap_mean, dtype=np.float64)
+    sg = np.asarray(cyclic_gap_std, dtype=np.float64)
+    flip = np.asarray(flip_mask, dtype=bool)
+
+    resid_single = dc - mu
+    resid_two_view = mc - mu
+    sigma_single = float(np.std(resid_single)) if resid_single.size > 0 else float("nan")
+    sigma_two_view = float(np.std(resid_two_view)) if resid_two_view.size > 0 else float("nan")
+    sigma_ratio = float(sigma_two_view / sigma_single) if np.isfinite(sigma_single) and sigma_single > 1e-12 else float("nan")
+
+    q_low = float(np.quantile(dc, 0.30)) if dc.size > 0 else 0.0
+    q_high = float(np.quantile(dc, 0.70)) if dc.size > 0 else 0.0
+    low_conf_mask = dc <= q_low
+    high_conf_mask = dc >= q_high
+
+    q_sigma_low = float(np.quantile(sg, 0.30)) if sg.size > 0 else 0.0
+    q_sigma_high = float(np.quantile(sg, 0.70)) if sg.size > 0 else 0.0
+    low_sigma_mask = sg <= q_sigma_low
+    high_sigma_mask = sg >= q_sigma_high
+
+    def _mean_or_nan(arr: np.ndarray, mask: np.ndarray) -> float:
+        if arr.size == 0 or np.sum(mask) == 0:
+            return float("nan")
+        return float(np.mean(arr[mask]))
+
+    flip_float = flip.astype(np.float64)
+    return {
+        "subject": str(subject),
+        "n": int(dc.size),
+        "default_gap_mean": float(np.mean(dc)) if dc.size > 0 else float("nan"),
+        "two_view_gap_mean": float(np.mean(mc)) if mc.size > 0 else float("nan"),
+        "cyclic_gap_mean": float(np.mean(mu)) if mu.size > 0 else float("nan"),
+        "sigma_mean": float(np.mean(sg)) if sg.size > 0 else float("nan"),
+        "sigma_std": float(np.std(sg)) if sg.size > 0 else float("nan"),
+        "sigma_single": sigma_single,
+        "sigma_two_view": sigma_two_view,
+        "sigma_ratio": sigma_ratio,
+        "sigma_ratio_target": float(1.0 / math.sqrt(2.0)),
+        "corr_default_gap_sigma": _safe_corr(dc, sg),
+        "corr_flip_sigma": _safe_corr(flip_float, sg),
+        "sigma_low_conf_mean": _mean_or_nan(sg, low_conf_mask),
+        "sigma_high_conf_mean": _mean_or_nan(sg, high_conf_mask),
+        "flip_low_conf": _mean_or_nan(flip_float, low_conf_mask),
+        "flip_high_conf": _mean_or_nan(flip_float, high_conf_mask),
+        "flip_low_sigma": _mean_or_nan(flip_float, low_sigma_mask),
+        "flip_high_sigma": _mean_or_nan(flip_float, high_sigma_mask),
+    }
+
 def _pride_correct_row(row: np.ndarray, prior: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """PriDe correction: divide by prior then renormalize."""
     r = np.asarray(row, dtype=np.float64)
@@ -1953,6 +2032,8 @@ def main():
         transition_records_default_pride_by_p: Dict[float, List[dict]] = {}
         transition_records_ours_pride_by_p: Dict[float, List[dict]] = {}
         transition_records_ours_by_p: Dict[float, List[dict]] = {}
+        sigma_analysis_baseline_records: List[dict] = []
+        sigma_analysis_pride_by_alpha: Dict[float, List[dict]] = {}
 
         def _make_transition_record_from_preds(base_correct, pred_idx, labels_idx, conf_arr, subject):
             """base_correct: List[bool], pred_idx: List[int], labels_idx: List[int], conf_arr: np.ndarray"""
@@ -2229,6 +2310,8 @@ def main():
                         mean_gap_list = []         # gap(mean(base,probe)) (content-space)
                         flip_trigger_mask = []     # pred_base != pred_probe (content-space)
                         probe2_correct_list = []   # correctness of argmax(mean_probs)
+                        cyclic_gap_mean_list = []  # per-sample mean gap over cyclic rotations
+                        cyclic_gap_std_list = []   # per-sample sigma over cyclic rotations
 
                         for i, bp in enumerate(base_probs_list):
                             bp = np.asarray(bp, dtype=np.float64)
@@ -2242,6 +2325,18 @@ def main():
 
                             probs_base_raw = per_sample_probs[i][identity_idx]
                             agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [tuple(range(k))], k)
+
+                            cyc_gaps_i = []
+                            for cyc_local_idx, perm_idx in enumerate(cyclic_indices):
+                                agg_cyc_single = _aggregate_probs_over_permutations(
+                                    [per_sample_probs[i][perm_idx].tolist()],
+                                    [cyc_perms[cyc_local_idx]],
+                                    k,
+                                )
+                                cyc_gaps_i.append(_gap_of_distribution(np.asarray(agg_cyc_single, dtype=np.float64)))
+                            cyc_gaps_arr = np.asarray(cyc_gaps_i, dtype=np.float64)
+                            cyclic_gap_mean_list.append(float(np.mean(cyc_gaps_arr)) if cyc_gaps_arr.size > 0 else 0.0)
+                            cyclic_gap_std_list.append(float(np.std(cyc_gaps_arr)) if cyc_gaps_arr.size > 0 else 0.0)
 
                             probs_probe_raw = per_sample_probs[i][probe_perm_idx]
                             agg_probe = _aggregate_probs_over_permutations([probs_probe_raw.tolist()], [cyc_perms[shift]], k)
@@ -2263,6 +2358,18 @@ def main():
                         mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
                         arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
                         arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
+                        cyclic_gap_mean = np.asarray(cyclic_gap_mean_list, dtype=np.float64)
+                        cyclic_gap_std = np.asarray(cyclic_gap_std_list, dtype=np.float64)
+                        sigma_analysis_baseline_records.append(
+                            _build_sigma_analysis_record(
+                                subject=subject,
+                                default_conf=default_conf,
+                                mean_conf=mean_conf,
+                                cyclic_gap_mean=cyclic_gap_mean,
+                                cyclic_gap_std=cyclic_gap_std,
+                                flip_mask=arr_flip_trigger,
+                            )
+                        )
 
                         # Base T/F 그룹별 Gap 및 트랜지션 카운트 수집 (Cyclic & Full)
                         base_t_gaps_cyc, base_f_gaps_cyc = [], []
@@ -2404,6 +2511,8 @@ def main():
                                 base_pred_idx_list_pr = []
                                 cyclic_pred_idx_list_pr = []
                                 probe2_pred_idx_list_pr = []
+                                cyclic_gap_mean_list_pr = []
+                                cyclic_gap_std_list_pr = []
 
                                 for i in range(len(per_sample_probs)):
                                     ps = np.asarray(per_sample_probs[i], dtype=np.float64)
@@ -2436,6 +2545,19 @@ def main():
                                     shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_row_corr, k)
                                     probe_perm_idx = cyclic_indices[shift]
                                     agg_base = _aggregate_probs_over_permutations([base_row_corr.tolist()], [tuple(range(k))], k)
+
+                                    cyc_gaps_i_pr = []
+                                    for cyc_local_idx, perm_idx in enumerate(cyclic_indices):
+                                        agg_cyc_single_pr = _aggregate_probs_over_permutations(
+                                            [ps_corr[perm_idx].tolist()],
+                                            [cyc_perms[cyc_local_idx]],
+                                            k,
+                                        )
+                                        cyc_gaps_i_pr.append(_gap_of_distribution(np.asarray(agg_cyc_single_pr, dtype=np.float64)))
+                                    cyc_gaps_arr_pr = np.asarray(cyc_gaps_i_pr, dtype=np.float64)
+                                    cyclic_gap_mean_list_pr.append(float(np.mean(cyc_gaps_arr_pr)) if cyc_gaps_arr_pr.size > 0 else 0.0)
+                                    cyclic_gap_std_list_pr.append(float(np.std(cyc_gaps_arr_pr)) if cyc_gaps_arr_pr.size > 0 else 0.0)
+
                                     probe_row_corr = np.asarray(ps_corr[probe_perm_idx], dtype=np.float64)
                                     agg_probe = _aggregate_probs_over_permutations([probe_row_corr.tolist()], [cyc_perms[shift]], k)
 
@@ -2455,6 +2577,18 @@ def main():
                                 mean_conf_pr = np.asarray(mean_gap_list_pr, dtype=np.float64)
                                 arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
                                 arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
+                                cyclic_gap_mean_pr = np.asarray(cyclic_gap_mean_list_pr, dtype=np.float64)
+                                cyclic_gap_std_pr = np.asarray(cyclic_gap_std_list_pr, dtype=np.float64)
+                                sigma_analysis_pride_by_alpha.setdefault(float(pride_alpha), []).append(
+                                    _build_sigma_analysis_record(
+                                        subject=subject,
+                                        default_conf=default_conf_pr,
+                                        mean_conf=mean_conf_pr,
+                                        cyclic_gap_mean=cyclic_gap_mean_pr,
+                                        cyclic_gap_std=cyclic_gap_std_pr,
+                                        flip_mask=arr_flip_trigger_pr,
+                                    )
+                                )
 
                                 # alpha>=100: prefix=전체 → 보정 불가. Cyclic permutation과 동일 (원본 사용)
                                 base_for_dp = base_correct_list if pride_alpha >= 100 else base_correct_list_pr
@@ -2682,6 +2816,52 @@ def main():
             _print_transition_analysis_by_perc(transition_records_ours_pride_by_p, "Ours+PRIDE")
         if transition_records_ours_by_p:
             _print_transition_analysis_by_perc(transition_records_ours_by_p, "Ours")
+
+        def _print_sigma_analysis(records: List[dict], name: str):
+            if not records:
+                return
+            keys = [
+                "sigma_mean",
+                "sigma_std",
+                "sigma_single",
+                "sigma_two_view",
+                "sigma_ratio",
+                "corr_default_gap_sigma",
+                "corr_flip_sigma",
+                "sigma_low_conf_mean",
+                "sigma_high_conf_mean",
+                "flip_low_conf",
+                "flip_high_conf",
+                "flip_low_sigma",
+                "flip_high_sigma",
+            ]
+            agg = {}
+            for key in keys:
+                vals = [float(r.get(key, float("nan"))) for r in records if np.isfinite(float(r.get(key, float("nan"))))]
+                agg[key] = float(np.mean(vals)) if vals else float("nan")
+            logger.info(_purple(f"\n==== SIGMA ANALYSIS: {name} ===="))
+            logger.info(
+                f"records={len(records)} | "
+                f"sigma(mean)={agg['sigma_mean']:.4f}, sigma(std)={agg['sigma_std']:.4f}, "
+                f"single_resid_sigma={agg['sigma_single']:.4f}, two_view_resid_sigma={agg['sigma_two_view']:.4f}, "
+                f"ratio={agg['sigma_ratio']:.4f} (target={1.0 / math.sqrt(2.0):.4f})"
+            )
+            logger.info(
+                f"corr(default_gap,sigma)={agg['corr_default_gap_sigma']:.4f}, "
+                f"corr(flip,sigma)={agg['corr_flip_sigma']:.4f}"
+            )
+            logger.info(
+                f"low_conf_sigma={agg['sigma_low_conf_mean']:.4f}, high_conf_sigma={agg['sigma_high_conf_mean']:.4f}, "
+                f"flip_low_conf={agg['flip_low_conf']:.4f}, flip_high_conf={agg['flip_high_conf']:.4f}"
+            )
+            logger.info(
+                f"flip_low_sigma={agg['flip_low_sigma']:.4f}, flip_high_sigma={agg['flip_high_sigma']:.4f}"
+            )
+            logger.info("========================================\n")
+
+        _print_sigma_analysis(sigma_analysis_baseline_records, "Baseline")
+        for alpha in sorted(sigma_analysis_pride_by_alpha.keys()):
+            _print_sigma_analysis(sigma_analysis_pride_by_alpha[alpha], f"PriDe(alpha={float(alpha):g}%)")
 
         # Three-curves: Cost vs Acc, Cost vs Recall_std (Cyclic / Default+PRIDE / OURS th1/sqrt2)
         if len(derived_records_by_p) > 0:
