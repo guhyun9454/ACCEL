@@ -2817,9 +2817,22 @@ def main():
         if transition_records_ours_by_p:
             _print_transition_analysis_by_perc(transition_records_ours_by_p, "Ours")
 
+        def _sigma_summary_slug(name: str) -> str:
+            s = str(name).strip().lower()
+            out = []
+            for ch in s:
+                if ch.isalnum():
+                    out.append(ch)
+                else:
+                    out.append("_")
+            slug = "".join(out)
+            while "__" in slug:
+                slug = slug.replace("__", "_")
+            return slug.strip("_") or "sigma"
+
         def _print_sigma_analysis(records: List[dict], name: str):
             if not records:
-                return
+                return None
             keys = [
                 "sigma_mean",
                 "sigma_std",
@@ -2858,10 +2871,30 @@ def main():
                 f"flip_low_sigma={agg['flip_low_sigma']:.4f}, flip_high_sigma={agg['flip_high_sigma']:.4f}"
             )
             logger.info("========================================\n")
+            agg["records"] = int(len(records))
+            agg["sigma_ratio_target"] = float(1.0 / math.sqrt(2.0))
+            return agg
 
-        _print_sigma_analysis(sigma_analysis_baseline_records, "Baseline")
+        sigma_summary_payload = {}
+        baseline_sigma_summary = _print_sigma_analysis(sigma_analysis_baseline_records, "Baseline")
+        if baseline_sigma_summary is not None:
+            sigma_summary_payload[_sigma_summary_slug("Baseline")] = baseline_sigma_summary
         for alpha in sorted(sigma_analysis_pride_by_alpha.keys()):
-            _print_sigma_analysis(sigma_analysis_pride_by_alpha[alpha], f"PriDe(alpha={float(alpha):g}%)")
+            name = f"PriDe(alpha={float(alpha):g}%)"
+            pride_sigma_summary = _print_sigma_analysis(sigma_analysis_pride_by_alpha[alpha], name)
+            if pride_sigma_summary is not None:
+                sigma_summary_payload[_sigma_summary_slug(name)] = pride_sigma_summary
+        if wandb_ok and wandb_run is not None and sigma_summary_payload:
+            try:
+                existing_sigma = wandb_run.summary.get("sigma_analysis_v1", {})
+                if not isinstance(existing_sigma, dict):
+                    existing_sigma = {}
+                existing_sigma = dict(existing_sigma)
+                task_key = f"{str(args.task)}_{int(args.num_few_shot)}shot"
+                existing_sigma[task_key] = sigma_summary_payload
+                wandb_run.summary["sigma_analysis_v1"] = existing_sigma
+            except Exception as e:
+                logger.warning(f"W&B sigma summary update failed: {e}")
 
         # Three-curves: Cost vs Acc, Cost vs Recall_std (Cyclic / Default+PRIDE / OURS th1/sqrt2)
         if len(derived_records_by_p) > 0:
