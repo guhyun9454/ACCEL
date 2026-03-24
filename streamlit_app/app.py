@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass
 import json
 import tempfile
+import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -109,7 +110,7 @@ def _safe_dict(x) -> dict:
 
 
 @st.cache_data(show_spinner=False, ttl=60)
-def _fetch_run_record(run_path: str) -> Tuple[Optional[RunRecord], Optional[str]]:
+def _fetch_run_record(run_path: str, refresh_token: int = 0) -> Tuple[Optional[RunRecord], Optional[str]]:
     try:
         api = wandb.Api()
         run = api.run(run_path)
@@ -713,6 +714,7 @@ with st.sidebar:
         height=140,
         help='예: `capde/LLM-MCQ-Bias-code/udzbyjxz` (entity/project/run_id)',
     )
+    ignore_cache = st.checkbox("W&B 캐시 무시하고 새로고침", value=False, help="방금 끝난 run의 summary가 아직 반영되지 않았을 때 사용하세요.")
     run_paths = _parse_run_paths(run_text)
 
     load_clicked = st.button("불러오기", use_container_width=True, disabled=(len(run_paths) == 0))
@@ -723,8 +725,9 @@ if "run_records" not in st.session_state:
 load_errors = []
 if load_clicked:
     st.session_state.run_records = {}
+    refresh_token = int(time.time_ns()) if ignore_cache else 0
     for rp in run_paths:
-        rec, err = _fetch_run_record(rp)
+        rec, err = _fetch_run_record(rp, refresh_token=refresh_token)
         if rec is not None:
             st.session_state.run_records[rp] = rec
         if err:
