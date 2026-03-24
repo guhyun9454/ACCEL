@@ -72,6 +72,7 @@ class RunRecord:
     pretrained_model_path: Optional[str]
     tasks: List[str]
     points_by_task: Dict[str, dict]  # task -> payload
+    sigma_by_task: Dict[str, dict]   # task -> sigma summary payload
 
 
 def _parse_run_paths(text: str) -> List[str]:
@@ -110,6 +111,16 @@ def _fetch_run_record(run_path: str) -> Tuple[Optional[RunRecord], Optional[str]
         points_by_task = summary.get("three_curves_points_v1", {}) or {}
         if not isinstance(points_by_task, dict):
             points_by_task = {}
+        sigma_by_task_raw = summary.get("sigma_analysis_v1", {}) or {}
+        if not isinstance(sigma_by_task_raw, dict):
+            sigma_by_task_raw = {}
+        sigma_by_task: Dict[str, dict] = {}
+        for task_key, payload in sigma_by_task_raw.items():
+            if not isinstance(payload, dict):
+                continue
+            task_name = str(task_key).split("_")[0].strip()
+            if task_name and task_name not in sigma_by_task:
+                sigma_by_task[task_name] = payload
 
         # Fallback: if summary is missing, try to recover from logged artifacts (newer eval_clm.py logs them)
         if len(points_by_task) == 0:
@@ -157,6 +168,7 @@ def _fetch_run_record(run_path: str) -> Tuple[Optional[RunRecord], Optional[str]
             pretrained_model_path=config.get("pretrained_model_path"),
             tasks=tasks,
             points_by_task=points_by_task,
+            sigma_by_task=sigma_by_task,
         )
         if len(tasks) == 0:
             return rec, "W&B summary에 `three_curves_points_v1`가 없어요. (이 기능을 넣은 이후의 run이어야 평균을 낼 수 있어요.)"
@@ -489,6 +501,173 @@ def _plot_groups(
     return fig
 
 
+SIGMA_METRIC_LABELS = {
+    "sigma_mean": "Sigma mean",
+    "sigma_std": "Sigma std",
+    "sigma_single": "Single-view residual sigma",
+    "sigma_two_view": "Two-view residual sigma",
+    "sigma_ratio": "Two-view / single-view",
+    "sigma_ratio_target": "Target ratio",
+    "corr_default_gap_sigma": "Corr(default gap, sigma)",
+    "corr_flip_sigma": "Corr(flip, sigma)",
+    "sigma_low_conf_mean": "Low-conf sigma",
+    "sigma_high_conf_mean": "High-conf sigma",
+    "flip_low_conf": "Flip rate (low-conf)",
+    "flip_high_conf": "Flip rate (high-conf)",
+    "flip_low_sigma": "Flip rate (low-sigma)",
+    "flip_high_sigma": "Flip rate (high-sigma)",
+    "records": "Samples",
+}
+
+
+def _sigma_variant_label(key: str) -> str:
+    if key == "baseline":
+        return "Baseline"
+    if key.startswith("pride_alpha_"):
+        alpha = key.replace("pride_alpha_", "")
+        return f"PriDe (alpha={alpha}%)"
+    return key
+
+
+def _sigma_summary_rows(selected_run_paths: List[str], records: Dict[str, RunRecord], task: str) -> pd.DataFrame:
+    grouped: Dict[str, List[dict]] = {}
+    for rp in selected_run_paths:
+        rec = records.get(rp)
+        if rec is None:
+            continue
+        payload = rec.sigma_by_task.get(str(task))
+        if not isinstance(payload, dict):
+            continue
+        for variant_key, summary in payload.items():
+            if not isinstance(summary, dict):
+                continue
+            grouped.setdefault(str(variant_key), []).append(summary)
+
+    rows: List[dict] = []
+    for variant_key, summaries in grouped.items():
+        row = {
+            "variant_key": variant_key,
+            "variant": _sigma_variant_label(variant_key),
+            "n_runs": len(summaries),
+        }
+        metric_keys = sorted({k for s in summaries for k in s.keys()})
+        for metric in metric_keys:
+            vals: List[float] = []
+            for s in summaries:
+                try:
+                    v = float(s.get(metric, float("nan")))
+                except Exception:
+                    v = float("nan")
+                if np.isfinite(v):
+                    vals.append(v)
+            if not vals:
+                row[f"{metric}_mean"] = float("nan")
+                row[f"{metric}_std"] = float("nan")
+            else:
+                arr = np.asarray(vals, dtype=np.float64)
+                row[f"{metric}_mean"] = float(np.nanmean(arr))
+                row[f"{metric}_std"] = float(np.nanstd(arr))
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    order = ["baseline"] + sorted([vk for vk in df["variant_key"].tolist() if vk != "baseline"])
+    df["variant_key"] = pd.Categorical(df["variant_key"], categories=order, ordered=True)
+    df = df.sort_values("variant_key").reset_index(drop=True)
+    return df
+
+
+def _format_sigma_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    metric_order = [
+        "sigma_mean",
+        "sigma_std",
+        "sigma_single",
+        "sigma_two_view",
+        "sigma_ratio",
+        "sigma_ratio_target",
+        "corr_default_gap_sigma",
+        "corr_flip_sigma",
+        "sigma_low_conf_mean",
+        "sigma_high_conf_mean",
+        "flip_low_conf",
+        "flip_high_conf",
+        "flip_low_sigma",
+        "flip_high_sigma",
+        "records",
+    ]
+    cols = ["variant", "n_runs"]
+    renamed = {"variant": "Variant", "n_runs": "Runs"}
+    for metric in metric_order:
+        mean_col = f"{metric}_mean"
+        std_col = f"{metric}_std"
+        if mean_col in df.columns:
+            cols.append(mean_col)
+            renamed[mean_col] = f"{SIGMA_METRIC_LABELS.get(metric, metric)} mean"
+        if std_col in df.columns:
+            cols.append(std_col)
+            renamed[std_col] = f"{SIGMA_METRIC_LABELS.get(metric, metric)} std"
+    return df[cols].rename(columns=renamed)
+
+
+def _plot_sigma_ratio(df: pd.DataFrame):
+    if df.empty or "sigma_ratio_mean" not in df.columns:
+        return None
+    plot_df = df[["variant", "sigma_ratio_mean", "sigma_ratio_std"]].copy()
+    plot_df = plot_df[np.isfinite(plot_df["sigma_ratio_mean"])].reset_index(drop=True)
+    if plot_df.empty:
+        return None
+
+    x = np.arange(len(plot_df))
+    y = plot_df["sigma_ratio_mean"].to_numpy(dtype=np.float64)
+    yerr = plot_df["sigma_ratio_std"].fillna(0.0).to_numpy(dtype=np.float64)
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=160)
+    ax.bar(x, y, yerr=yerr, capsize=5, color="#5DADE2", alpha=0.9)
+    ax.axhline(1 / np.sqrt(2), color="#E74C3C", linestyle="--", linewidth=2, label="Ideal 1/sqrt(2)")
+    ax.axhline(1.0, color="gray", linestyle=":", linewidth=1.5, label="No reduction")
+    ax.set_xticks(x)
+    ax.set_xticklabels(plot_df["variant"].tolist(), rotation=20, ha="right")
+    ax.set_ylabel("Sigma ratio")
+    ax.set_title("Two-view Sigma Reduction")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    ax.legend(loc="upper right", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_sigma_confidence(df: pd.DataFrame):
+    required = {"sigma_low_conf_mean_mean", "sigma_high_conf_mean_mean"}
+    if df.empty or not required.issubset(set(df.columns)):
+        return None
+    plot_df = df[["variant", "sigma_low_conf_mean_mean", "sigma_high_conf_mean_mean"]].copy()
+    plot_df = plot_df[
+        np.isfinite(plot_df["sigma_low_conf_mean_mean"]) | np.isfinite(plot_df["sigma_high_conf_mean_mean"])
+    ].reset_index(drop=True)
+    if plot_df.empty:
+        return None
+
+    x = np.arange(len(plot_df))
+    width = 0.36
+    low_vals = plot_df["sigma_low_conf_mean_mean"].fillna(0.0).to_numpy(dtype=np.float64)
+    high_vals = plot_df["sigma_high_conf_mean_mean"].fillna(0.0).to_numpy(dtype=np.float64)
+
+    fig, ax = plt.subplots(figsize=(7.6, 4.8), dpi=160)
+    ax.bar(x - width / 2, low_vals, width=width, color="#E67E22", alpha=0.9, label="Low confidence")
+    ax.bar(x + width / 2, high_vals, width=width, color="#27AE60", alpha=0.9, label="High confidence")
+    ax.set_xticks(x)
+    ax.set_xticklabels(plot_df["variant"].tolist(), rotation=20, ha="right")
+    ax.set_ylabel("Mean sigma")
+    ax.set_title("Sigma by Confidence Bucket")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    ax.legend(loc="upper right", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
 st.title("LLM-MCQ-Bias • W&B run 평균 그래프")
 st.caption("여러 W&B run의 `three_curves_points_v1`(수치 곡선)을 불러와서, 모델(=그룹)별 평균(예: 5-run 평균)과 여러 모델 평균을 그립니다.")
 
@@ -815,3 +994,33 @@ if plot_clicked:
             min_pct_by_curve=min_pct_by_curve,
         )
         st.pyplot(fig_rstd, use_container_width=True)
+
+    sigma_df = _sigma_summary_rows(selected_runs, records, str(task))
+    st.subheader("Sigma 분석")
+    if sigma_df.empty:
+        st.info("선택한 run들에는 이 task에 대한 `sigma_analysis_v1` 요약이 없어서 sigma 분석을 그릴 수 없어요.")
+    else:
+        st.markdown(
+            "\n".join(
+                [
+                    "- 가설상 이상적인 패턴은 `sigma_ratio`가 `1/sqrt(2) ≈ 0.707`에 가깝고, `corr(default gap, sigma)`는 음수, `corr(flip, sigma)`는 양수인 경우입니다.",
+                    "- 또 `sigma_low_conf_mean > sigma_high_conf_mean`, `flip_high_sigma > flip_low_sigma`가 보여야 low-confidence/unstable 샘플에서 variance가 더 크다는 서사와 맞습니다.",
+                    "- 아래 표는 선택한 run들 사이 평균과 표준편차를 합친 값이라, run 하나의 우연한 흔들림보다 전체 경향을 보기에 좋습니다.",
+                ]
+            )
+        )
+        st.dataframe(_format_sigma_table(sigma_df), use_container_width=True, hide_index=True)
+
+        s_left, s_right = st.columns(2)
+        with s_left:
+            fig_sigma_ratio = _plot_sigma_ratio(sigma_df)
+            if fig_sigma_ratio is not None:
+                st.pyplot(fig_sigma_ratio, use_container_width=True)
+            else:
+                st.caption("`sigma_ratio` 값이 없어 ratio plot은 생략했습니다.")
+        with s_right:
+            fig_sigma_conf = _plot_sigma_confidence(sigma_df)
+            if fig_sigma_conf is not None:
+                st.pyplot(fig_sigma_conf, use_container_width=True)
+            else:
+                st.caption("confidence bucket sigma 값이 없어 confidence plot은 생략했습니다.")
