@@ -32,21 +32,28 @@ CURVE_DEFS = {
     },
     "ours": {
         "x_key": "p",
-        "label": "Ours (without PriDe)",
+        "label": "Ours (th1/sqrt2, no PriDe)",
         "color": "#5DADE2",
         "linestyle": "-.",
         "marker": "^",
     },
+    "ours_pride_primary": {
+        "x_key": "p",
+        "label": "Ours+PriDe (th1/sqrt2)",
+        "color": "#1ABC9C",
+        "linestyle": "-",
+        "marker": "D",
+    },
     "ours_pride_th1_2": {
         "x_key": "p",
-        "label": "Ours (th1/2)",
+        "label": "Ours+PriDe (th1/2 legacy)",
         "color": "#27AE60",
         "linestyle": "--",
         "marker": "*",
     },
     "ours_pride_online_sqrt": {
         "x_key": "p",
-        "label": "Ours (Online Sqrt)",
+        "label": "Ours+PriDe (Online Sqrt)",
         "color": "#2ECC71",
         "linestyle": "-.",
         "marker": "D",
@@ -205,13 +212,13 @@ def _curve_series_from_payload(
     Returns: x(p or fraction) -> {'cost': float, 'y': float}
     y_key: 'acc'|'recall_std'|'delta_acc'|'delta_recall_std'
     ours_pride_alpha: for ours_pride*, which PriDe α (10,20,...,100). None = 첫 번째.
-    ours_pride_variant: 'th1/2'|'online_sqrt_all' for ours_pride_th1_2, ours_pride_online_sqrt.
+    ours_pride_variant: 'th1/2'|'th1/sqrt2'|'online_sqrt_all' for ours_pride_* curves.
     """
     if not isinstance(payload, dict):
         return {}
     curves = payload.get("curves", {}) or {}
     curve = curves.get(curve_key, {}) or {}
-    if curve_key in ("ours_pride_th1_2", "ours_pride_online_sqrt"):
+    if curve_key in ("ours_pride_primary", "ours_pride_th1_2", "ours_pride_online_sqrt"):
         ours_pride_data = curves.get("ours_pride", {}) or {}
         by_alpha = ours_pride_data.get("by_alpha") or {}
         if by_alpha:
@@ -219,11 +226,23 @@ def _curve_series_from_payload(
             if alpha_key and alpha_key in by_alpha:
                 alpha_curves = by_alpha[alpha_key]
                 if isinstance(alpha_curves, dict):
-                    variant = ours_pride_variant or ("online_sqrt_all" if curve_key == "ours_pride_online_sqrt" else "th1/2")
+                    if ours_pride_variant is not None:
+                        variant = ours_pride_variant
+                    elif curve_key == "ours_pride_online_sqrt":
+                        variant = "online_sqrt_all"
+                    elif curve_key == "ours_pride_primary":
+                        variant = "th1/sqrt2"
+                    else:
+                        variant = "th1/2"
                     if variant in alpha_curves:
                         curve = alpha_curves[variant]
                     else:
-                        curve = alpha_curves.get("online_sqrt_all") or alpha_curves.get("th1/2") or alpha_curves
+                        curve = (
+                            alpha_curves.get("th1/sqrt2")
+                            or alpha_curves.get("online_sqrt_all")
+                            or alpha_curves.get("th1/2")
+                            or alpha_curves
+                        )
                 else:
                     curve = alpha_curves
     x_key = CURVE_DEFS.get(curve_key, {}).get("x_key") or "p"
@@ -367,8 +386,7 @@ def _plot_groups(
     max_by = max_pct_by_curve or {}
     min_by = min_pct_by_curve or {}
 
-    _pride_keys = ("ours_pride_th1_2", "ours_pride_online_sqrt")
-    _show_pride_suffix = ("ours_pride_th1_2" in curve_keys and "ours_pride_online_sqrt" in curve_keys)
+    _pride_keys = ("ours_pride_primary", "ours_pride_th1_2", "ours_pride_online_sqrt")
     if plot_individual:
         for gname, payloads in group_payloads.items():
             if not payloads:
@@ -390,11 +408,17 @@ def _plot_groups(
                         if x.size == 0:
                             continue
                         cd = CURVE_DEFS[ck]
-                        color_idx = (0 if ck == "ours_pride_th1_2" else len(alphas)) + i
-                        line_color = ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
+                        base_offset = {"ours_pride_primary": 0, "ours_pride_th1_2": len(alphas), "ours_pride_online_sqrt": 2 * len(alphas)}
+                        color_idx = base_offset.get(ck, 0) + i
+                        line_color = cd["color"] if len(alphas) == 1 else ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
                         base_lab = str(ours_pride_base_label or "Ours").strip()
-                        if _show_pride_suffix:
-                            suffix = "th1/2" if ck == "ours_pride_th1_2" else "Online Sqrt"
+                        suffix_map = {
+                            "ours_pride_primary": "th1/sqrt2",
+                            "ours_pride_th1_2": "th1/2",
+                            "ours_pride_online_sqrt": "Online Sqrt",
+                        }
+                        suffix = suffix_map.get(ck)
+                        if suffix:
                             base_lab = f"{base_lab} {suffix}"
                         if _show_alpha:
                             base_lab = f"{base_lab} (α={alpha})"
@@ -448,11 +472,17 @@ def _plot_groups(
                     if x.size == 0:
                         continue
                     cd = CURVE_DEFS[ck]
-                    color_idx = (0 if ck == "ours_pride_th1_2" else len(alphas)) + i
-                    line_color = ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
+                    base_offset = {"ours_pride_primary": 0, "ours_pride_th1_2": len(alphas), "ours_pride_online_sqrt": 2 * len(alphas)}
+                    color_idx = base_offset.get(ck, 0) + i
+                    line_color = cd["color"] if len(alphas) == 1 else ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
                     base_lab = str(ours_pride_base_label or "Ours").strip()
-                    if _show_pride_suffix:
-                        suffix = "th1/2" if ck == "ours_pride_th1_2" else "Online Sqrt"
+                    suffix_map = {
+                        "ours_pride_primary": "th1/sqrt2",
+                        "ours_pride_th1_2": "th1/2",
+                        "ours_pride_online_sqrt": "Online Sqrt",
+                    }
+                    suffix = suffix_map.get(ck)
+                    if suffix:
                         base_lab = f"{base_lab} {suffix}"
                     if _show_alpha:
                         base_lab = f"{base_lab} (α={alpha})"
@@ -721,6 +751,7 @@ for rp, rec in records.items():
             "model_name": rec.model_name,
             "pretrained_model_path": rec.pretrained_model_path,
             "tasks": ", ".join(rec.tasks),
+            "sigma_tasks": ", ".join(sorted(rec.sigma_by_task.keys())),
         }
     )
 df = pd.DataFrame(rows)
@@ -780,20 +811,20 @@ for rp in selected_runs:
     group_payloads[str(prefix)] = [payload]
 
 st.subheader("그래프 옵션")
-st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 여러 run 선택 시 '각각 + 평균' 또는 '평균만'으로 delta 값들이 합쳐져 평균 곡선이 그려집니다.")
+st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 현재 primary는 `ours`와 `ours_pride_primary`의 `th1/sqrt2`입니다.")
 
 curve_keys = st.multiselect(
     "그릴 곡선",
     options=list(CURVE_DEFS.keys()),
-    default=["cyclic", "default_pride", "ours", "ours_pride_th1_2", "ours_pride_online_sqrt"],
-    help="Ours+PRIDE th1/2 vs Online Sqrt 중 하나만, 또는 둘 다 선택 가능.",
+    default=["cyclic", "default_pride", "ours", "ours_pride_primary"],
+    help="주로 `ours`와 `ours_pride_primary`를 보면 됩니다. `th1/2`는 legacy 비교용, `Online Sqrt`는 별도 adaptive heuristic입니다.",
 )
 
 cyclic_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 pride_ours_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
 st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
-col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
+col_p1, col_p2, col_p3, col_p4, col_p5, col_p6 = st.columns(6)
 with col_p1:
     max_pct_cyclic = st.selectbox(
         "Cyclic 상한",
@@ -819,6 +850,14 @@ with col_p3:
         key="max_ours",
     )
 with col_p4:
+    max_pct_ours_pride_primary = st.selectbox(
+        "Ours+PRIDE sqrt2 상한",
+        options=pride_ours_options,
+        index=len(pride_ours_options) - 1,
+        format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
+        key="max_ours_pride_primary",
+    )
+with col_p5:
     max_pct_ours_pride_th1_2 = st.selectbox(
         "Ours+PRIDE th1/2 상한",
         options=pride_ours_options,
@@ -826,7 +865,7 @@ with col_p4:
         format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
         key="max_ours_pride_th12",
     )
-with col_p5:
+with col_p6:
     max_pct_ours_pride_online_sqrt = st.selectbox(
         "Ours+PRIDE Online Sqrt 상한",
         options=pride_ours_options,
@@ -836,7 +875,7 @@ with col_p5:
     )
 
 st.caption("곡선별 퍼센타일 하한 (선택한 % 이상만 표시)")
-col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
 with col_m1:
     min_pct_cyclic = st.selectbox(
         "Cyclic 하한",
@@ -862,6 +901,14 @@ with col_m3:
         key="min_ours",
     )
 with col_m4:
+    min_pct_ours_pride_primary = st.selectbox(
+        "Ours+PRIDE sqrt2 하한",
+        options=pride_ours_options,
+        index=0,
+        format_func=lambda x: f"{x}%",
+        key="min_ours_pride_primary",
+    )
+with col_m5:
     min_pct_ours_pride_th1_2 = st.selectbox(
         "Ours+PRIDE th1/2 하한",
         options=pride_ours_options,
@@ -869,7 +916,7 @@ with col_m4:
         format_func=lambda x: f"{x}%",
         key="min_ours_pride_th12",
     )
-with col_m5:
+with col_m6:
     min_pct_ours_pride_online_sqrt = st.selectbox(
         "Ours+PRIDE Online Sqrt 하한",
         options=pride_ours_options,
@@ -892,6 +939,7 @@ max_pct_by_curve = {
     "cyclic": float(max_pct_cyclic),
     "default_pride": float(max_pct_pride),
     "ours": float(max_pct_ours),
+    "ours_pride_primary": float(max_pct_ours_pride_primary),
     "ours_pride_th1_2": float(max_pct_ours_pride_th1_2),
     "ours_pride_online_sqrt": float(max_pct_ours_pride_online_sqrt),
 }
@@ -899,6 +947,7 @@ min_pct_by_curve = {
     "cyclic": float(min_pct_cyclic),
     "default_pride": float(min_pct_pride),
     "ours": float(min_pct_ours),
+    "ours_pride_primary": float(min_pct_ours_pride_primary),
     "ours_pride_th1_2": float(min_pct_ours_pride_th1_2),
     "ours_pride_online_sqrt": float(min_pct_ours_pride_online_sqrt),
 }
@@ -934,6 +983,7 @@ curve_label_overrides = {
     "cyclic": lab_cyclic,
     "default_pride": lab_pride,
     "ours": lab_ours,
+    "ours_pride_primary": lab_ours_pride,
     "ours_pride_th1_2": lab_ours_pride,
     "ours_pride_online_sqrt": lab_ours_pride,
 }
@@ -998,7 +1048,15 @@ if plot_clicked:
     sigma_df = _sigma_summary_rows(selected_runs, records, str(task))
     st.subheader("Sigma 분석")
     if sigma_df.empty:
+        missing_sigma_runs = []
+        for rp in selected_runs:
+            rec = records.get(rp)
+            if rec is None or str(task) not in rec.sigma_by_task:
+                missing_sigma_runs.append(run_option_labels.get(rp, rp))
         st.info("선택한 run들에는 이 task에 대한 `sigma_analysis_v1` 요약이 없어서 sigma 분석을 그릴 수 없어요.")
+        if missing_sigma_runs:
+            st.caption("다음 run들에는 이 task의 sigma summary가 없습니다: " + ", ".join(missing_sigma_runs))
+        st.caption("보통 sigma 로깅을 넣기 전 run이거나, 해당 run이 아직 새 `eval_clm.py`로 다시 실행되지 않은 경우입니다.")
     else:
         st.markdown(
             "\n".join(
