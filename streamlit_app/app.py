@@ -15,47 +15,59 @@ import wandb
 
 st.set_page_config(page_title="LLM-MCQ-Bias • W&B Curve Averager", layout="wide")
 
+# Color palette: Okabe-Ito (colorblind-friendly)
+_PAL = {
+    "orange": "#E69F00",
+    "sky": "#56B4E9",
+    "bluish_green": "#009E73",
+    "yellow": "#F0E442",
+    "blue": "#0072B2",
+    "vermillion": "#D55E00",
+    "reddish_purple": "#CC79A7",
+    "gray": "#6B7280",
+}
+
 
 CURVE_DEFS = {
     "cyclic": {
         "x_key": "fraction",
         "label": "Cyclic",
-        "color": "#F39C12",
+        "color": _PAL["orange"],
         "linestyle": "-",
         "marker": "o",
     },
     "default_pride": {
         "x_key": "p",
         "label": "PriDe",
-        "color": "#27AE60",
+        "color": _PAL["bluish_green"],
         "linestyle": "--",
         "marker": "s",
     },
     "ours": {
         "x_key": "p",
         "label": "Ours (th1/sqrt2, no PriDe)",
-        "color": "#5DADE2",
+        "color": _PAL["blue"],
         "linestyle": "-.",
         "marker": "^",
     },
     "ours_pride_primary": {
         "x_key": "p",
         "label": "Ours+PriDe (th1/sqrt2)",
-        "color": "#1ABC9C",
+        "color": _PAL["reddish_purple"],
         "linestyle": "-",
         "marker": "D",
     },
     "ours_pride_th1_2": {
         "x_key": "p",
         "label": "Ours+PriDe (th1/2 legacy)",
-        "color": "#27AE60",
+        "color": _PAL["vermillion"],
         "linestyle": "--",
         "marker": "*",
     },
     "ours_pride_online_sqrt": {
         "x_key": "p",
         "label": "Ours+PriDe (Online Sqrt)",
-        "color": "#2ECC71",
+        "color": _PAL["sky"],
         "linestyle": "-.",
         "marker": "D",
     },
@@ -63,9 +75,10 @@ CURVE_DEFS = {
 
 # Ours+PRIDE 다중 α 곡선용 색상 팔레트 (α·variant별 구분)
 ALPHA_COLOR_PALETTE = [
-    "#E41A1C", "#377EB8", "#4DAF4A", "#984EA3", "#FF7F00",
-    "#FFFF33", "#A65628", "#F781BF", "#66C2A5", "#FC8D62",
-    "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F",
+    "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
+    "#8C564B", "#E377C2", "#7F7F7F", "#BCBD22", "#17BECF",
+    "#AEC7E8", "#FFBB78", "#98DF8A", "#FF9896", "#C5B0D5",
+    "#C49C94", "#F7B6D2", "#C7C7C7", "#DBDB8D", "#9EDAE5",
 ]
 
 
@@ -657,9 +670,9 @@ def _plot_sigma_ratio(df: pd.DataFrame):
     yerr = plot_df["sigma_ratio_std"].fillna(0.0).to_numpy(dtype=np.float64)
 
     fig, ax = plt.subplots(figsize=(7.2, 4.8), dpi=160)
-    ax.bar(x, y, yerr=yerr, capsize=5, color="#5DADE2", alpha=0.9)
-    ax.axhline(1 / np.sqrt(2), color="#E74C3C", linestyle="--", linewidth=2, label="Ideal 1/sqrt(2)")
-    ax.axhline(1.0, color="gray", linestyle=":", linewidth=1.5, label="No reduction")
+    ax.bar(x, y, yerr=yerr, capsize=5, color=_PAL["blue"], alpha=0.9)
+    ax.axhline(1 / np.sqrt(2), color=_PAL["vermillion"], linestyle="--", linewidth=2, label="Ideal 1/sqrt(2)")
+    ax.axhline(1.0, color=_PAL["gray"], linestyle=":", linewidth=1.5, label="No reduction")
     ax.set_xticks(x)
     ax.set_xticklabels(plot_df["variant"].tolist(), rotation=20, ha="right")
     ax.set_ylabel("Sigma ratio")
@@ -687,8 +700,8 @@ def _plot_sigma_confidence(df: pd.DataFrame):
     high_vals = plot_df["sigma_high_conf_mean_mean"].fillna(0.0).to_numpy(dtype=np.float64)
 
     fig, ax = plt.subplots(figsize=(7.6, 4.8), dpi=160)
-    ax.bar(x - width / 2, low_vals, width=width, color="#E67E22", alpha=0.9, label="Low confidence")
-    ax.bar(x + width / 2, high_vals, width=width, color="#27AE60", alpha=0.9, label="High confidence")
+    ax.bar(x - width / 2, low_vals, width=width, color=_PAL["vermillion"], alpha=0.9, label="Low confidence")
+    ax.bar(x + width / 2, high_vals, width=width, color=_PAL["bluish_green"], alpha=0.9, label="High confidence")
     ax.set_xticks(x)
     ax.set_xticklabels(plot_df["variant"].tolist(), rotation=20, ha="right")
     ax.set_ylabel("Mean sigma")
