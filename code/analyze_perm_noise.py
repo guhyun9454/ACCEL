@@ -26,7 +26,8 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from itertools import permutations
+from itertools import combinations, permutations
+from statistics import NormalDist
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -73,6 +74,271 @@ def _aggregate_probs_over_permutations(
     if len(permuted_indices) > 0:
         agg /= float(len(permuted_indices))
     return agg
+
+
+def _gap_of_distribution(probs: Sequence[float]) -> float:
+    vals = np.sort(np.asarray(probs, dtype=np.float64))[::-1]
+    if vals.size <= 1:
+        return 0.0
+    return float(vals[0] - vals[1])
+
+
+def _top2_indices(probs: Sequence[float]) -> Tuple[int, int]:
+    vals = np.argsort(np.asarray(probs, dtype=np.float64))[::-1]
+    if vals.size == 0:
+        return 0, 0
+    if vals.size == 1:
+        return int(vals[0]), int(vals[0])
+    return int(vals[0]), int(vals[1])
+
+
+def _safe_corr(x: Sequence[float], y: Sequence[float]) -> float:
+    xa = np.asarray(x, dtype=np.float64).ravel()
+    ya = np.asarray(y, dtype=np.float64).ravel()
+    m = np.isfinite(xa) & np.isfinite(ya)
+    if np.sum(m) < 2:
+        return float("nan")
+    xa = xa[m]
+    ya = ya[m]
+    if float(np.std(xa)) <= 1e-12 or float(np.std(ya)) <= 1e-12:
+        return float("nan")
+    return float(np.corrcoef(xa, ya)[0, 1])
+
+
+def _gaussian_fit_report(values: Sequence[float], bins: int = 60) -> Dict[str, float]:
+    arr = np.asarray(values, dtype=np.float64).ravel()
+    arr = arr[np.isfinite(arr)]
+    out: Dict[str, float] = {
+        "n": int(arr.size),
+        "mean": float("nan"),
+        "std": float("nan"),
+        "skew": float("nan"),
+        "excess_kurtosis": float("nan"),
+        "ks_to_fit": float("nan"),
+        "kl_hist_to_fit": float("nan"),
+    }
+    if arr.size == 0:
+        return out
+
+    mu = float(np.mean(arr))
+    sigma = float(np.std(arr))
+    out["mean"] = mu
+    out["std"] = sigma
+
+    if not np.isfinite(sigma) or sigma <= 1e-12 or arr.size < 2:
+        return out
+
+    z = (arr - mu) / sigma
+    out["skew"] = float(np.mean(z ** 3))
+    out["excess_kurtosis"] = float(np.mean(z ** 4) - 3.0)
+
+    xs = np.sort(arr)
+    nd = NormalDist(mu=mu, sigma=sigma)
+    fit_cdf = np.asarray([nd.cdf(float(v)) for v in xs], dtype=np.float64)
+    n = xs.size
+    ecdf_hi = np.arange(1, n + 1, dtype=np.float64) / float(n)
+    ecdf_lo = np.arange(0, n, dtype=np.float64) / float(n)
+    ks = max(float(np.max(np.abs(ecdf_hi - fit_cdf))), float(np.max(np.abs(fit_cdf - ecdf_lo))))
+    out["ks_to_fit"] = ks
+
+    hist_counts, edges = np.histogram(arr, bins=max(10, int(bins)))
+    total = int(np.sum(hist_counts))
+    if total > 0:
+        p = hist_counts.astype(np.float64) / float(total)
+        q = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            q.append(max(1e-12, float(nd.cdf(float(hi)) - nd.cdf(float(lo)))))
+        q = np.asarray(q, dtype=np.float64)
+        q = q / float(np.sum(q))
+        mask = p > 0.0
+        out["kl_hist_to_fit"] = float(np.sum(p[mask] * np.log(p[mask] / q[mask])))
+    return out
+
+
+def _analyze_cyclic_margin_noise(
+    results: List[dict],
+    perm_list: List[Tuple[int, ...]],
+    option_ids: List[str],
+    subject: str,
+    run_idx: int,
+) -> Tuple[Dict[str, object], List[dict], Dict[str, object]]:
+    """
+    Treat the cyclic-ensemble content-space top1/top2 margin as a per-sample reference M_ref.
+    For each cyclic single view, compute a signed margin on the same reference pair:
+        M^(pi) = p_pi(top1_ref) - p_pi(top2_ref)
+    and define nuisance residual xi^(pi) = M^(pi) - M_ref.
+    """
+    k = len(option_ids)
+    identity_perm = tuple(range(k))
+    identity_idx = perm_list.index(identity_perm) if identity_perm in perm_list else 0
+    cyc_perms = _rotations(k)
+    cyc_idxs = [perm_list.index(p) for p in cyc_perms if p in perm_list]
+    n_views = len(cyc_idxs)
+
+    if n_views <= 0:
+        return (
+            {
+                "reference_mode": "cyclic",
+                "n_samples": 0,
+                "n_views": 0,
+            },
+            [],
+            {
+                "residuals": [],
+                "z_scores": [],
+                "sample_ref_margins": [],
+                "sample_sigmas": [],
+                "sample_base_gaps": [],
+                "t_residuals": {},
+                "t_z_scores": {},
+            },
+        )
+
+    combo_cache = {t: list(combinations(range(n_views), t)) for t in range(1, n_views + 1)}
+    sample_records: List[dict] = []
+    pooled_residuals: List[float] = []
+    pooled_z_scores: List[float] = []
+    sample_ref_margins: List[float] = []
+    sample_sigmas: List[float] = []
+    sample_base_gaps: List[float] = []
+    t_residuals: Dict[int, List[float]] = {t: [] for t in range(1, n_views + 1)}
+    t_z_scores: Dict[int, List[float]] = {t: [] for t in range(1, n_views + 1)}
+
+    eps = 1e-12
+
+    def _finite_view_scale(t: int) -> float:
+        if n_views <= 1:
+            return float("nan")
+        t = int(t)
+        numer = float(max(0, n_views - t))
+        denom = float(max(1, t) * max(1, n_views - 1))
+        return math.sqrt(numer / denom)
+
+    for r in results:
+        d = r.get("data", {}) or {}
+        probs_seq = d.get("probs", None)
+        if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
+            continue
+
+        cyc_dists = []
+        for perm_idx in cyc_idxs:
+            dist = _aggregate_probs_over_permutations([probs_seq[perm_idx]], [perm_list[perm_idx]], k)
+            cyc_dists.append(np.asarray(dist, dtype=np.float64))
+        if not cyc_dists:
+            continue
+        cyc_dists_arr = np.asarray(cyc_dists, dtype=np.float64)
+        ref_dist = np.mean(cyc_dists_arr, axis=0)
+        ref_top1, ref_top2 = _top2_indices(ref_dist)
+        ref_margin = float(ref_dist[ref_top1] - ref_dist[ref_top2])
+
+        single_margins = cyc_dists_arr[:, ref_top1] - cyc_dists_arr[:, ref_top2]
+        residuals = single_margins - ref_margin
+        sigma_i = float(np.std(residuals))
+
+        identity_dist = _aggregate_probs_over_permutations([probs_seq[identity_idx]], [perm_list[identity_idx]], k)
+        base_gap = _gap_of_distribution(identity_dist)
+        base_margin_on_ref_pair = float(identity_dist[ref_top1] - identity_dist[ref_top2])
+
+        pooled_residuals.extend([float(x) for x in residuals.tolist()])
+        sample_ref_margins.append(ref_margin)
+        sample_sigmas.append(sigma_i)
+        sample_base_gaps.append(base_gap)
+
+        if sigma_i > eps:
+            pooled_z_scores.extend([float(x / sigma_i) for x in residuals.tolist()])
+
+        t_summary: List[dict] = []
+        for t, combos in combo_cache.items():
+            avg_margins = np.asarray(
+                [float(np.mean(single_margins[list(combo)])) for combo in combos],
+                dtype=np.float64,
+            )
+            resid_t = avg_margins - ref_margin
+            t_residuals[t].extend([float(x) for x in resid_t.tolist()])
+            if sigma_i > eps:
+                denom = sigma_i / math.sqrt(float(t))
+                if denom > eps:
+                    t_z_scores[t].extend([float(x / denom) for x in resid_t.tolist()])
+            t_summary.append({
+                "t": int(t),
+                "n_combinations": int(len(combos)),
+                "resid_std": float(np.std(resid_t)) if resid_t.size > 0 else float("nan"),
+                "resid_abs_mean": float(np.mean(np.abs(resid_t))) if resid_t.size > 0 else float("nan"),
+            })
+
+        sample_records.append({
+            "subject": str(subject),
+            "run": int(run_idx),
+            "idx": int(d.get("idx", -1)),
+            "ideal": str(d.get("ideal")),
+            "reference_mode": "cyclic",
+            "n_views": int(n_views),
+            "ref_top1": int(ref_top1),
+            "ref_top2": int(ref_top2),
+            "ref_margin": ref_margin,
+            "base_gap": float(base_gap),
+            "base_margin_on_ref_pair": base_margin_on_ref_pair,
+            "sigma_i": sigma_i,
+            "cyclic_single_margins": [float(x) for x in single_margins.tolist()],
+            "cyclic_single_residuals": [float(x) for x in residuals.tolist()],
+            "t_summary": t_summary,
+        })
+
+    pooled_resid_arr = np.asarray(pooled_residuals, dtype=np.float64)
+    pooled_z_arr = np.asarray(pooled_z_scores, dtype=np.float64)
+    sample_ref_arr = np.asarray(sample_ref_margins, dtype=np.float64)
+    sample_sigma_arr = np.asarray(sample_sigmas, dtype=np.float64)
+    sample_base_gap_arr = np.asarray(sample_base_gaps, dtype=np.float64)
+
+    t_view_summary = []
+    t1_std = float(np.std(np.asarray(t_residuals[1], dtype=np.float64))) if 1 in t_residuals and t_residuals[1] else float("nan")
+    for t in sorted(t_residuals.keys()):
+        resid_arr = np.asarray(t_residuals[t], dtype=np.float64)
+        z_arr = np.asarray(t_z_scores[t], dtype=np.float64)
+        resid_std = float(np.std(resid_arr)) if resid_arr.size > 0 else float("nan")
+        sqrt_target = float(t1_std / math.sqrt(float(t))) if np.isfinite(t1_std) else float("nan")
+        t_view_summary.append({
+            "t": int(t),
+            "n_residuals": int(resid_arr.size),
+            "resid_std": resid_std,
+            "resid_abs_mean": float(np.mean(np.abs(resid_arr))) if resid_arr.size > 0 else float("nan"),
+            "sqrt_target_from_t1": sqrt_target,
+            "finite_view_target_from_t1": float(t1_std * _finite_view_scale(int(t))) if np.isfinite(t1_std) else float("nan"),
+            "ratio_to_t1_sqrt": float(resid_std / sqrt_target) if np.isfinite(resid_std) and np.isfinite(sqrt_target) and sqrt_target > eps else float("nan"),
+            "ratio_to_finite_view_target": (
+                float(resid_std / (t1_std * _finite_view_scale(int(t))))
+                if np.isfinite(resid_std) and np.isfinite(t1_std) and np.isfinite(_finite_view_scale(int(t))) and (t1_std * _finite_view_scale(int(t))) > eps
+                else float("nan")
+            ),
+            "standardized_residual_fit": _gaussian_fit_report(z_arr),
+        })
+
+    summary: Dict[str, object] = {
+        "reference_mode": "cyclic",
+        "n_samples": int(len(sample_records)),
+        "n_views": int(n_views),
+        "mean_ref_margin": float(np.mean(sample_ref_arr)) if sample_ref_arr.size > 0 else float("nan"),
+        "std_ref_margin": float(np.std(sample_ref_arr)) if sample_ref_arr.size > 0 else float("nan"),
+        "mean_sigma_i": float(np.mean(sample_sigma_arr)) if sample_sigma_arr.size > 0 else float("nan"),
+        "std_sigma_i": float(np.std(sample_sigma_arr)) if sample_sigma_arr.size > 0 else float("nan"),
+        "mean_base_gap": float(np.mean(sample_base_gap_arr)) if sample_base_gap_arr.size > 0 else float("nan"),
+        "corr_ref_margin_sigma": _safe_corr(sample_ref_arr, sample_sigma_arr),
+        "corr_base_gap_sigma": _safe_corr(sample_base_gap_arr, sample_sigma_arr),
+        "pooled_residual_fit": _gaussian_fit_report(pooled_resid_arr),
+        "standardized_residual_fit": _gaussian_fit_report(pooled_z_arr),
+        "t_view_summary": t_view_summary,
+    }
+
+    pooled_payload = {
+        "residuals": [float(x) for x in pooled_residuals],
+        "z_scores": [float(x) for x in pooled_z_scores],
+        "sample_ref_margins": [float(x) for x in sample_ref_margins],
+        "sample_sigmas": [float(x) for x in sample_sigmas],
+        "sample_base_gaps": [float(x) for x in sample_base_gaps],
+        "t_residuals": {int(t): [float(x) for x in vals] for t, vals in t_residuals.items()},
+        "t_z_scores": {int(t): [float(x) for x in vals] for t, vals in t_z_scores.items()},
+    }
+    return summary, sample_records, pooled_payload
 
 
 def _read_results_file(file_path: str) -> List[dict]:
@@ -186,6 +452,7 @@ def _run_analysis(
     wandb_group: Optional[str],
     wandb_job_type: str,
     task_name: Optional[str],
+    save_margin_samples: bool,
 ) -> None:
     subjects_list = [s.strip() for s in str(subjects or []) if str(s).strip()] if subjects else None
     cache_files = _discover_cache_files(str(cache_dir), subjects_list, int(n_runs))
@@ -197,6 +464,9 @@ def _run_analysis(
     corr_by_k: Dict[int, Dict[str, object]] = {}
     # For recall-by-option bar plot across all subjects: accumulate y_true/preds per k
     recall_by_k: Dict[int, Dict[str, List[str]]] = {}
+    # For margin-noise / Gaussianity analysis
+    margin_noise_by_k: Dict[int, Dict[str, object]] = {}
+    margin_noise_sample_records: List[dict] = []
 
     for ci in cache_files:
         results = _read_results_file(ci.path)
@@ -281,6 +551,13 @@ def _run_analysis(
                 corrects_cyc += 1 if pred_c == ideal else 0
         ens_full_acc = corrects_full / float(len(results)) if results else float("nan")
         ens_cyc_acc = corrects_cyc / float(len(results)) if results else float("nan")
+        margin_noise_summary, sample_noise_records, pooled_noise_payload = _analyze_cyclic_margin_noise(
+            results=results,
+            perm_list=perm_list,
+            option_ids=option_ids,
+            subject=ci.subject,
+            run_idx=int(ci.run_idx),
+        )
 
         per_record_reports.append({
             "subject": ci.subject,
@@ -298,7 +575,36 @@ def _run_analysis(
             "ens_acc_all_perms": float(ens_full_acc),
             "ens_acc_cyclic_perms": float(ens_cyc_acc),
             "subset_curve": subset_curve,
+            "cyclic_margin_noise": margin_noise_summary,
         })
+
+        bucket = margin_noise_by_k.setdefault(
+            int(k),
+            {
+                "residuals": [],
+                "z_scores": [],
+                "sample_ref_margins": [],
+                "sample_sigmas": [],
+                "sample_base_gaps": [],
+                "t_residuals": {},
+                "t_z_scores": {},
+            },
+        )
+        bucket["residuals"].extend(pooled_noise_payload.get("residuals", []))
+        bucket["z_scores"].extend(pooled_noise_payload.get("z_scores", []))
+        bucket["sample_ref_margins"].extend(pooled_noise_payload.get("sample_ref_margins", []))
+        bucket["sample_sigmas"].extend(pooled_noise_payload.get("sample_sigmas", []))
+        bucket["sample_base_gaps"].extend(pooled_noise_payload.get("sample_base_gaps", []))
+        for t, vals in (pooled_noise_payload.get("t_residuals", {}) or {}).items():
+            t_int = int(t)
+            bucket["t_residuals"].setdefault(t_int, [])
+            bucket["t_residuals"][t_int].extend(vals)
+        for t, vals in (pooled_noise_payload.get("t_z_scores", {}) or {}).items():
+            t_int = int(t)
+            bucket["t_z_scores"].setdefault(t_int, [])
+            bucket["t_z_scores"][t_int].extend(vals)
+        if save_margin_samples and sample_noise_records:
+            margin_noise_sample_records.extend(sample_noise_records)
 
         # Accumulate per-sample predictions for recall-by-option plot (all subjects combined)
         try:
@@ -395,10 +701,138 @@ def _run_analysis(
             print(f"{name}: {m:.4f} ± {s:.4f}")
         print("")
 
+    print("==== Cyclic Margin Noise Analysis ====")
+    for k in sorted(set(int(r["k"]) for r in per_record_reports)):
+        rs = [r for r in per_record_reports if int(r["k"]) == k]
+        margin_summaries = [r.get("cyclic_margin_noise", {}) for r in rs if isinstance(r.get("cyclic_margin_noise"), dict)]
+        if not margin_summaries:
+            continue
+        print(f"--- k={k} (records={len(margin_summaries)}) ---")
+
+        def _mean_nested(path: Sequence[str]) -> float:
+            vals = []
+            for rec in margin_summaries:
+                cur = rec
+                ok = True
+                for key in path:
+                    if not isinstance(cur, dict) or key not in cur:
+                        ok = False
+                        break
+                    cur = cur[key]
+                if ok and isinstance(cur, (int, float)) and np.isfinite(float(cur)):
+                    vals.append(float(cur))
+            return float(np.mean(vals)) if vals else float("nan")
+
+        print(
+            "ref_margin(mean)={:.4f}, sigma_i(mean)={:.4f}, corr(ref_margin,sigma_i)={:.4f}, corr(base_gap,sigma_i)={:.4f}".format(
+                _mean_nested(["mean_ref_margin"]),
+                _mean_nested(["mean_sigma_i"]),
+                _mean_nested(["corr_ref_margin_sigma"]),
+                _mean_nested(["corr_base_gap_sigma"]),
+            )
+        )
+        print(
+            "residual fit: std={:.4f}, ks={:.4f}, kl={:.4f}".format(
+                _mean_nested(["pooled_residual_fit", "std"]),
+                _mean_nested(["pooled_residual_fit", "ks_to_fit"]),
+                _mean_nested(["pooled_residual_fit", "kl_hist_to_fit"]),
+            )
+        )
+        print(
+            "standardized fit: mean={:.4f}, std={:.4f}, ks={:.4f}, kl={:.4f}".format(
+                _mean_nested(["standardized_residual_fit", "mean"]),
+                _mean_nested(["standardized_residual_fit", "std"]),
+                _mean_nested(["standardized_residual_fit", "ks_to_fit"]),
+                _mean_nested(["standardized_residual_fit", "kl_hist_to_fit"]),
+            )
+        )
+        first_t_summary = next((rec.get("t_view_summary", []) for rec in margin_summaries if rec.get("t_view_summary")), [])
+        if first_t_summary:
+            ts = sorted({int(x.get("t")) for x in first_t_summary if isinstance(x, dict) and "t" in x})
+            for t in ts:
+                vals_std = []
+                vals_ratio = []
+                vals_ratio_finite = []
+                for rec in margin_summaries:
+                    for item in rec.get("t_view_summary", []) or []:
+                        if int(item.get("t", -1)) != int(t):
+                            continue
+                        if isinstance(item.get("resid_std"), (int, float)) and np.isfinite(float(item["resid_std"])):
+                            vals_std.append(float(item["resid_std"]))
+                        if isinstance(item.get("ratio_to_t1_sqrt"), (int, float)) and np.isfinite(float(item["ratio_to_t1_sqrt"])):
+                            vals_ratio.append(float(item["ratio_to_t1_sqrt"]))
+                        if isinstance(item.get("ratio_to_finite_view_target"), (int, float)) and np.isfinite(float(item["ratio_to_finite_view_target"])):
+                            vals_ratio_finite.append(float(item["ratio_to_finite_view_target"]))
+                if vals_std:
+                    ratio_str = f", ratio_to_1/sqrt(T)={float(np.mean(vals_ratio)):.4f}" if vals_ratio else ""
+                    finite_str = f", ratio_to_finite-view={float(np.mean(vals_ratio_finite)):.4f}" if vals_ratio_finite else ""
+                    print(f"T={int(t)}: resid_std={float(np.mean(vals_std)):.4f}{ratio_str}{finite_str}")
+        print("")
+
     out_path = os.path.join(str(cache_dir), "perm_noise_report.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(per_record_reports, f, ensure_ascii=False, indent=2)
     print(f"Saved: {out_path}")
+
+    margin_noise_summary_by_k: Dict[str, object] = {}
+    for k in sorted(margin_noise_by_k.keys()):
+        bucket = margin_noise_by_k[int(k)]
+        residuals = np.asarray(bucket.get("residuals", []), dtype=np.float64)
+        z_scores = np.asarray(bucket.get("z_scores", []), dtype=np.float64)
+        sample_ref = np.asarray(bucket.get("sample_ref_margins", []), dtype=np.float64)
+        sample_sigma = np.asarray(bucket.get("sample_sigmas", []), dtype=np.float64)
+        sample_base_gap = np.asarray(bucket.get("sample_base_gaps", []), dtype=np.float64)
+        t_residuals = bucket.get("t_residuals", {}) or {}
+        t_z_scores = bucket.get("t_z_scores", {}) or {}
+        t1_resid = np.asarray(t_residuals.get(1, []), dtype=np.float64)
+        t1_std = float(np.std(t1_resid)) if t1_resid.size > 0 else float("nan")
+        t_view_summary = []
+        for t in sorted(int(x) for x in t_residuals.keys()):
+            resid_arr = np.asarray(t_residuals.get(t, []), dtype=np.float64)
+            z_arr = np.asarray(t_z_scores.get(t, []), dtype=np.float64)
+            resid_std = float(np.std(resid_arr)) if resid_arr.size > 0 else float("nan")
+            sqrt_target = float(t1_std / math.sqrt(float(t))) if np.isfinite(t1_std) else float("nan")
+            finite_target = (
+                float(t1_std * math.sqrt(float(max(0, int(k) - int(t))) / float(max(1, int(t)) * max(1, int(k) - 1))))
+                if np.isfinite(t1_std) and int(k) > 1
+                else float("nan")
+            )
+            t_view_summary.append({
+                "t": int(t),
+                "n_residuals": int(resid_arr.size),
+                "resid_std": resid_std,
+                "resid_abs_mean": float(np.mean(np.abs(resid_arr))) if resid_arr.size > 0 else float("nan"),
+                "sqrt_target_from_t1": sqrt_target,
+                "finite_view_target_from_t1": finite_target,
+                "ratio_to_t1_sqrt": float(resid_std / sqrt_target) if np.isfinite(resid_std) and np.isfinite(sqrt_target) and sqrt_target > 1e-12 else float("nan"),
+                "ratio_to_finite_view_target": float(resid_std / finite_target) if np.isfinite(resid_std) and np.isfinite(finite_target) and finite_target > 1e-12 else float("nan"),
+                "standardized_residual_fit": _gaussian_fit_report(z_arr),
+            })
+        margin_noise_summary_by_k[str(int(k))] = {
+            "reference_mode": "cyclic",
+            "n_residuals": int(residuals.size),
+            "n_standardized_residuals": int(z_scores.size),
+            "n_samples": int(sample_sigma.size),
+            "pooled_residual_fit": _gaussian_fit_report(residuals),
+            "standardized_residual_fit": _gaussian_fit_report(z_scores),
+            "mean_sample_ref_margin": float(np.mean(sample_ref)) if sample_ref.size > 0 else float("nan"),
+            "mean_sample_sigma_i": float(np.mean(sample_sigma)) if sample_sigma.size > 0 else float("nan"),
+            "corr_ref_margin_sigma": _safe_corr(sample_ref, sample_sigma),
+            "corr_base_gap_sigma": _safe_corr(sample_base_gap, sample_sigma),
+            "t_view_summary": t_view_summary,
+        }
+
+    margin_noise_summary_path = os.path.join(str(cache_dir), "perm_margin_noise_summary.json")
+    with open(margin_noise_summary_path, "w", encoding="utf-8") as f:
+        json.dump(margin_noise_summary_by_k, f, ensure_ascii=False, indent=2)
+    print(f"Saved: {margin_noise_summary_path}")
+
+    if save_margin_samples and margin_noise_sample_records:
+        samples_path = os.path.join(str(cache_dir), "perm_margin_noise_samples.jsonl")
+        with open(samples_path, "w", encoding="utf-8") as f:
+            for rec in margin_noise_sample_records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        print(f"Saved: {samples_path}")
 
     saved_plot_paths: List[str] = []
     if save_plots or wandb_enabled:
@@ -408,6 +842,7 @@ def _run_analysis(
             corr_by_k=corr_by_k,
             recall_by_k=recall_by_k,
             task_name=task_name,
+            margin_noise_by_k=margin_noise_by_k,
         )
 
     if wandb_enabled:
@@ -431,6 +866,7 @@ def _save_noise_plots(
     corr_by_k: Optional[Dict[int, Dict[str, object]]] = None,
     recall_by_k: Optional[Dict[int, Dict[str, List[str]]]] = None,
     task_name: Optional[str] = None,
+    margin_noise_by_k: Optional[Dict[int, Dict[str, object]]] = None,
 ) -> List[str]:
     """
     Save a small set of PNG plots into out_dir.
@@ -698,7 +1134,7 @@ def _save_noise_plots(
                             ax = fig.add_subplot(1, 1, 1)
                             bp = ax.boxplot(
                                 [cyc_pairs, non_pairs],
-                                labels=["Cyclic pairs (C vs C)", "Non-cyclic pairs (N vs N)"],
+                                tick_labels=["Cyclic pairs (C vs C)", "Non-cyclic pairs (N vs N)"],
                                 patch_artist=True,
                                 widths=0.55,
                                 showfliers=False,
@@ -758,6 +1194,112 @@ def _save_noise_plots(
             fig.savefig(p)
             plt.close(fig)
             saved.append(p)
+
+        if margin_noise_by_k and int(k) in margin_noise_by_k:
+            try:
+                margin_bucket = margin_noise_by_k[int(k)]
+                z_scores = np.asarray(margin_bucket.get("z_scores", []), dtype=np.float64)
+                sample_ref = np.asarray(margin_bucket.get("sample_ref_margins", []), dtype=np.float64)
+                sample_sigma = np.asarray(margin_bucket.get("sample_sigmas", []), dtype=np.float64)
+                t_residuals = margin_bucket.get("t_residuals", {}) or {}
+
+                if z_scores.size > 0:
+                    fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
+                    ax = fig.add_subplot(1, 1, 1)
+                    ax.hist(z_scores, bins=50, density=True, alpha=0.68, color="#1f77b4", label="Standardized residuals")
+                    x_min = float(np.min(z_scores))
+                    x_max = float(np.max(z_scores))
+                    if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+                        xs = np.linspace(max(-4.0, x_min), min(4.0, x_max), 300)
+                        normal_pdf = np.exp(-0.5 * xs * xs) / math.sqrt(2.0 * math.pi)
+                        ax.plot(xs, normal_pdf, color="#d62728", lw=2.0, label="N(0,1)")
+                    fit = _gaussian_fit_report(z_scores)
+                    ax.set_title(
+                        f"Cyclic margin residuals (standardized) (k={k})\n"
+                        f"mean={fit['mean']:.3f}, std={fit['std']:.3f}, KS={fit['ks_to_fit']:.3f}, KL={fit['kl_hist_to_fit']:.3f}"
+                    )
+                    ax.set_xlabel("z = residual / sigma_i")
+                    ax.set_ylabel("Density")
+                    ax.grid(True, alpha=0.25)
+                    ax.legend(fontsize=8)
+                    fig.tight_layout()
+                    p = os.path.join(out_dir, f"perm_margin_noise_hist_k{k}.png")
+                    fig.savefig(p)
+                    plt.close(fig)
+                    saved.append(p)
+
+                    fig = plt.figure(figsize=(5.6, 5.6), dpi=180)
+                    ax = fig.add_subplot(1, 1, 1)
+                    zs = np.sort(z_scores)
+                    if zs.size > 4000:
+                        idx = np.linspace(0, zs.size - 1, 4000).astype(np.int64)
+                        zs = zs[idx]
+                    probs = (np.arange(1, zs.size + 1, dtype=np.float64) - 0.5) / float(zs.size)
+                    nd0 = NormalDist()
+                    q_theory = np.asarray([nd0.inv_cdf(float(pv)) for pv in probs], dtype=np.float64)
+                    ax.scatter(q_theory, zs, s=8, alpha=0.30, color="#1f77b4")
+                    lo = float(min(np.min(q_theory), np.min(zs)))
+                    hi = float(max(np.max(q_theory), np.max(zs)))
+                    ax.plot([lo, hi], [lo, hi], color="#d62728", lw=1.8, ls="--")
+                    ax.set_title(f"QQ plot vs N(0,1) (k={k})")
+                    ax.set_xlabel("Theoretical quantiles")
+                    ax.set_ylabel("Empirical quantiles")
+                    ax.grid(True, alpha=0.25)
+                    fig.tight_layout()
+                    p = os.path.join(out_dir, f"perm_margin_noise_qq_k{k}.png")
+                    fig.savefig(p)
+                    plt.close(fig)
+                    saved.append(p)
+
+                if sample_ref.size > 0 and sample_sigma.size > 0 and sample_ref.size == sample_sigma.size:
+                    fig = plt.figure(figsize=(6.8, 5.2), dpi=180)
+                    ax = fig.add_subplot(1, 1, 1)
+                    ax.scatter(sample_ref, sample_sigma, s=12, alpha=0.22, color="#2ca02c")
+                    corr = _safe_corr(sample_ref, sample_sigma)
+                    ax.set_title(f"Sample sigma vs cyclic reference margin (k={k})\nCorr={corr:.3f}")
+                    ax.set_xlabel("Cyclic reference margin")
+                    ax.set_ylabel("sigma_i")
+                    ax.grid(True, alpha=0.25)
+                    fig.tight_layout()
+                    p = os.path.join(out_dir, f"perm_margin_sigma_vs_margin_k{k}.png")
+                    fig.savefig(p)
+                    plt.close(fig)
+                    saved.append(p)
+
+                if t_residuals:
+                    ts = sorted(int(t) for t in t_residuals.keys())
+                    emp_std = []
+                    for t in ts:
+                        arr = np.asarray(t_residuals.get(t, []), dtype=np.float64)
+                        emp_std.append(float(np.std(arr)) if arr.size > 0 else float("nan"))
+                    if emp_std:
+                        base_std = emp_std[0] if np.isfinite(emp_std[0]) else float("nan")
+                        target = [float(base_std / math.sqrt(float(t))) if np.isfinite(base_std) else float("nan") for t in ts]
+                        n_views = max(ts) if ts else 0
+                        finite_target = [
+                            float(base_std * math.sqrt(float(max(0, n_views - int(t))) / float(max(1, int(t)) * max(1, n_views - 1))))
+                            if np.isfinite(base_std) and n_views > 1
+                            else float("nan")
+                            for t in ts
+                        ]
+                        fig = plt.figure(figsize=(6.8, 4.8), dpi=180)
+                        ax = fig.add_subplot(1, 1, 1)
+                        ax.plot(ts, emp_std, "-o", color="#1f77b4", lw=2.0, ms=5, label="Empirical residual std")
+                        ax.plot(ts, target, "--s", color="#d62728", lw=1.6, ms=4, label="std(T=1) / sqrt(T)")
+                        if n_views > 1:
+                            ax.plot(ts, finite_target, ":^", color="#2ca02c", lw=1.6, ms=4, label="Finite-view target")
+                        ax.set_title(f"View-count scaling of cyclic residual std (k={k})")
+                        ax.set_xlabel("T = #views averaged")
+                        ax.set_ylabel("Residual std")
+                        ax.grid(True, alpha=0.25)
+                        ax.legend(fontsize=8)
+                        fig.tight_layout()
+                        p = os.path.join(out_dir, f"perm_margin_t_scaling_k{k}.png")
+                        fig.savefig(p)
+                        plt.close(fig)
+                        saved.append(p)
+            except Exception:
+                pass
 
     return saved
 
@@ -992,6 +1534,8 @@ def main() -> None:
                     help="Comma-separated subset sizes m (number of perms to mix). Sizes > P are ignored.")
     ap.add_argument("--max_perms_corr", type=int, default=24, help="Max permutations for correlation calc (subsample if larger).")
     ap.add_argument("--save_plots", action="store_true", help="Save PNG plots into results_dir (default: off).")
+    ap.add_argument("--save_margin_samples", action="store_true",
+                    help="Save sample-level cyclic margin residuals/sigma_i jsonl into results_dir.")
 
     # W&B logging for analysis (separate run)
     ap.add_argument("--wandb", action="store_true", help="Log analysis results (metrics/images) to Weights & Biases.")
@@ -1030,6 +1574,7 @@ def main() -> None:
             wandb_group=args.wandb_group,
             wandb_job_type=str(args.wandb_job_type),
             task_name=task_name,
+            save_margin_samples=bool(args.save_margin_samples),
         )
         return
 
@@ -1103,9 +1648,9 @@ def main() -> None:
             wandb_group=args.wandb_group,
             wandb_job_type=str(args.wandb_job_type),
             task_name=task_name,
+            save_margin_samples=bool(args.save_margin_samples),
         )
 
 
 if __name__ == "__main__":
     main()
-
