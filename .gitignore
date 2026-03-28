@@ -2,3 +2,6 @@
 /wandb
 /results_arc
 /tmp_perm_noise_test
+/tmp_perm_noise_agg
+/tmp_perm_noise_model1
+/tmp_perm_noise_model2

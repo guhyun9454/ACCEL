@@ -341,6 +341,352 @@ def _analyze_cyclic_margin_noise(
     return summary, sample_records, pooled_payload
 
 
+def _infer_task_name_from_path(path: str) -> Optional[str]:
+    s = str(path).lower()
+    if "results_arc" in s or "/arc" in s:
+        return "arc"
+    if "results_mmlu" in s or "/mmlu" in s:
+        return "mmlu"
+    if "results_csqa" in s or "/csqa" in s:
+        return "csqa"
+    return None
+
+
+def _guess_model_tag_from_results_dir(path: str) -> str:
+    norm = os.path.normpath(str(path))
+    parts = [p for p in norm.split(os.sep) if p]
+    for part in reversed(parts):
+        if "shot" in part or "results_" in part or part in {"arc", "mmlu", "csqa"}:
+            continue
+        if "s_" in part:
+            return part.split("s_", 1)[-1] or part
+    if len(parts) >= 2:
+        return parts[-2]
+    return parts[-1] if parts else "model"
+
+
+def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: Dict[str, object]) -> None:
+    bucket.setdefault("residuals", [])
+    bucket.setdefault("z_scores", [])
+    bucket.setdefault("sample_ref_margins", [])
+    bucket.setdefault("sample_sigmas", [])
+    bucket.setdefault("sample_base_gaps", [])
+    bucket.setdefault("t_residuals", {})
+    bucket.setdefault("t_z_scores", {})
+
+    bucket["residuals"].extend(payload.get("residuals", []))
+    bucket["z_scores"].extend(payload.get("z_scores", []))
+    bucket["sample_ref_margins"].extend(payload.get("sample_ref_margins", []))
+    bucket["sample_sigmas"].extend(payload.get("sample_sigmas", []))
+    bucket["sample_base_gaps"].extend(payload.get("sample_base_gaps", []))
+
+    for t, vals in (payload.get("t_residuals", {}) or {}).items():
+        t_int = int(t)
+        bucket["t_residuals"].setdefault(t_int, [])
+        bucket["t_residuals"][t_int].extend(vals)
+    for t, vals in (payload.get("t_z_scores", {}) or {}).items():
+        t_int = int(t)
+        bucket["t_z_scores"].setdefault(t_int, [])
+        bucket["t_z_scores"][t_int].extend(vals)
+
+
+def _summarize_margin_noise_bucket(bucket: Dict[str, object], n_views: int) -> Dict[str, object]:
+    residuals = np.asarray(bucket.get("residuals", []), dtype=np.float64)
+    z_scores = np.asarray(bucket.get("z_scores", []), dtype=np.float64)
+    sample_ref = np.asarray(bucket.get("sample_ref_margins", []), dtype=np.float64)
+    sample_sigma = np.asarray(bucket.get("sample_sigmas", []), dtype=np.float64)
+    sample_base_gap = np.asarray(bucket.get("sample_base_gaps", []), dtype=np.float64)
+    t_residuals = bucket.get("t_residuals", {}) or {}
+    t_z_scores = bucket.get("t_z_scores", {}) or {}
+    t1_resid = np.asarray(t_residuals.get(1, []), dtype=np.float64)
+    t1_std = float(np.std(t1_resid)) if t1_resid.size > 0 else float("nan")
+
+    t_view_summary = []
+    for t in sorted(int(x) for x in t_residuals.keys()):
+        resid_arr = np.asarray(t_residuals.get(t, []), dtype=np.float64)
+        z_arr = np.asarray(t_z_scores.get(t, []), dtype=np.float64)
+        resid_std = float(np.std(resid_arr)) if resid_arr.size > 0 else float("nan")
+        sqrt_target = float(t1_std / math.sqrt(float(t))) if np.isfinite(t1_std) else float("nan")
+        finite_target = (
+            float(t1_std * math.sqrt(float(max(0, int(n_views) - int(t))) / float(max(1, int(t)) * max(1, int(n_views) - 1))))
+            if np.isfinite(t1_std) and int(n_views) > 1
+            else float("nan")
+        )
+        t_view_summary.append({
+            "t": int(t),
+            "n_residuals": int(resid_arr.size),
+            "resid_std": resid_std,
+            "resid_abs_mean": float(np.mean(np.abs(resid_arr))) if resid_arr.size > 0 else float("nan"),
+            "sqrt_target_from_t1": sqrt_target,
+            "finite_view_target_from_t1": finite_target,
+            "ratio_to_t1_sqrt": float(resid_std / sqrt_target) if np.isfinite(resid_std) and np.isfinite(sqrt_target) and sqrt_target > 1e-12 else float("nan"),
+            "ratio_to_finite_view_target": float(resid_std / finite_target) if np.isfinite(resid_std) and np.isfinite(finite_target) and finite_target > 1e-12 else float("nan"),
+            "standardized_residual_fit": _gaussian_fit_report(z_arr),
+        })
+
+    return {
+        "reference_mode": "cyclic",
+        "n_views": int(n_views),
+        "n_residuals": int(residuals.size),
+        "n_standardized_residuals": int(z_scores.size),
+        "n_samples": int(sample_sigma.size),
+        "pooled_residual_fit": _gaussian_fit_report(residuals),
+        "standardized_residual_fit": _gaussian_fit_report(z_scores),
+        "mean_sample_ref_margin": float(np.mean(sample_ref)) if sample_ref.size > 0 else float("nan"),
+        "mean_sample_sigma_i": float(np.mean(sample_sigma)) if sample_sigma.size > 0 else float("nan"),
+        "corr_ref_margin_sigma": _safe_corr(sample_ref, sample_sigma),
+        "corr_base_gap_sigma": _safe_corr(sample_base_gap, sample_sigma),
+        "t_view_summary": t_view_summary,
+    }
+
+
+def _save_multi_model_margin_plots(
+    *,
+    combined_by_k: Dict[int, Dict[str, object]],
+    out_dir: str,
+) -> List[str]:
+    plt = _try_import_matplotlib()
+    if plt is None:
+        print("[warn] matplotlib not available; skipping multi-model plot saving.")
+        return []
+    os.makedirs(out_dir, exist_ok=True)
+    saved: List[str] = []
+
+    for k in sorted(combined_by_k.keys()):
+        rec = combined_by_k[int(k)]
+        pooled = rec.get("pooled_summary", {}) or {}
+        per_model = rec.get("per_model", []) or []
+        z_scores = np.asarray(rec.get("pooled_bucket", {}).get("z_scores", []), dtype=np.float64)
+        t_residuals = rec.get("pooled_bucket", {}).get("t_residuals", {}) or {}
+
+        if z_scores.size > 0:
+            fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
+            ax = fig.add_subplot(1, 1, 1)
+            ax.hist(z_scores, bins=60, density=True, alpha=0.68, color="#1f77b4", label="All models pooled z")
+            x_min = float(np.min(z_scores))
+            x_max = float(np.max(z_scores))
+            if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+                xs = np.linspace(max(-4.0, x_min), min(4.0, x_max), 300)
+                normal_pdf = np.exp(-0.5 * xs * xs) / math.sqrt(2.0 * math.pi)
+                ax.plot(xs, normal_pdf, color="#d62728", lw=2.0, label="N(0,1)")
+            fit = pooled.get("standardized_residual_fit", {}) or {}
+            ax.set_title(
+                f"Multi-model pooled cyclic residuals (standardized) (k={k})\n"
+                f"models={len(per_model)}, KS={float(fit.get('ks_to_fit', float('nan'))):.3f}, "
+                f"KL={float(fit.get('kl_hist_to_fit', float('nan'))):.3f}"
+            )
+            ax.set_xlabel("z = residual / sigma_i")
+            ax.set_ylabel("Density")
+            ax.grid(True, alpha=0.25)
+            ax.legend(fontsize=8)
+            fig.tight_layout()
+            p = os.path.join(out_dir, f"multi_model_margin_noise_hist_k{k}.png")
+            fig.savefig(p)
+            plt.close(fig)
+            saved.append(p)
+
+        if per_model:
+            labels = [str(x.get("model_tag", "model")) for x in per_model]
+            ks_vals = [float(((x.get("summary", {}) or {}).get("standardized_residual_fit", {}) or {}).get("ks_to_fit", float("nan"))) for x in per_model]
+            kl_vals = [float(((x.get("summary", {}) or {}).get("standardized_residual_fit", {}) or {}).get("kl_hist_to_fit", float("nan"))) for x in per_model]
+            if labels:
+                fig = plt.figure(figsize=(max(8.0, 0.6 * len(labels)), 5.0), dpi=180)
+                ax = fig.add_subplot(1, 1, 1)
+                x = np.arange(len(labels))
+                width = 0.38
+                ax.bar(x - width / 2, ks_vals, width=width, color="#1f77b4", alpha=0.85, label="KS")
+                ax.bar(x + width / 2, kl_vals, width=width, color="#ff7f0e", alpha=0.85, label="Hist KL")
+                ax.set_title(f"Per-model Gaussian fit metrics (k={k})")
+                ax.set_xticks(x)
+                ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+                ax.grid(True, axis="y", alpha=0.25)
+                ax.legend(fontsize=8)
+                fig.tight_layout()
+                p = os.path.join(out_dir, f"multi_model_fit_metrics_k{k}.png")
+                fig.savefig(p)
+                plt.close(fig)
+                saved.append(p)
+
+        if t_residuals:
+            ts = sorted(int(t) for t in t_residuals.keys())
+            emp_std = []
+            for t in ts:
+                arr = np.asarray(t_residuals.get(t, []), dtype=np.float64)
+                emp_std.append(float(np.std(arr)) if arr.size > 0 else float("nan"))
+            if emp_std:
+                base_std = emp_std[0] if np.isfinite(emp_std[0]) else float("nan")
+                sqrt_target = [float(base_std / math.sqrt(float(t))) if np.isfinite(base_std) else float("nan") for t in ts]
+                n_views = int(rec.get("n_views", max(ts) if ts else 0))
+                finite_target = [
+                    float(base_std * math.sqrt(float(max(0, n_views - int(t))) / float(max(1, int(t)) * max(1, n_views - 1))))
+                    if np.isfinite(base_std) and n_views > 1
+                    else float("nan")
+                    for t in ts
+                ]
+                fig = plt.figure(figsize=(6.8, 4.8), dpi=180)
+                ax = fig.add_subplot(1, 1, 1)
+                ax.plot(ts, emp_std, "-o", color="#1f77b4", lw=2.0, ms=5, label="Pooled empirical std")
+                ax.plot(ts, sqrt_target, "--s", color="#d62728", lw=1.6, ms=4, label="1/sqrt(T)")
+                if n_views > 1:
+                    ax.plot(ts, finite_target, ":^", color="#2ca02c", lw=1.6, ms=4, label="Finite-view target")
+                ax.set_title(f"Multi-model pooled T-scaling (k={k})")
+                ax.set_xlabel("T = #views averaged")
+                ax.set_ylabel("Residual std")
+                ax.grid(True, alpha=0.25)
+                ax.legend(fontsize=8)
+                fig.tight_layout()
+                p = os.path.join(out_dir, f"multi_model_t_scaling_k{k}.png")
+                fig.savefig(p)
+                plt.close(fig)
+                saved.append(p)
+
+    return saved
+
+
+def _run_multi_results_analysis(
+    *,
+    results_dirs: List[str],
+    subjects: Optional[List[str]],
+    n_runs: int,
+    max_samples: int,
+    aggregate_out_dir: str,
+    save_plots: bool,
+) -> None:
+    valid_dirs = [str(x) for x in results_dirs if str(x).strip()]
+    if not valid_dirs:
+        raise SystemExit("No valid results_dirs were provided.")
+
+    combined_by_k: Dict[int, Dict[str, object]] = {}
+    for results_dir in valid_dirs:
+        cache_files = _discover_cache_files(results_dir, subjects, int(n_runs))
+        if not cache_files:
+            print(f"[warn] no cache files found under: {results_dir}")
+            continue
+        model_tag = _guess_model_tag_from_results_dir(results_dir)
+        model_buckets: Dict[int, Dict[str, object]] = {}
+        model_n_views: Dict[int, int] = {}
+
+        for ci in cache_files:
+            results = _read_results_file(ci.path)
+            if int(max_samples) > 0:
+                results = results[: int(max_samples)]
+            if not results:
+                continue
+
+            data0 = results[0].get("data", {}) or {}
+            options = data0.get("options", None)
+            if not isinstance(options, list) or len(options) == 0:
+                continue
+            k = len(options)
+            probs0 = data0.get("probs", None)
+            if not isinstance(probs0, list):
+                continue
+            perm_count = len(probs0)
+            perm_list, _ = _infer_perm_list(k, perm_count)
+            option_ids = list("ABCDE" if k == 5 else "ABCD") if k in (4, 5) else [str(i) for i in range(k)]
+            summary, _, payload = _analyze_cyclic_margin_noise(
+                results=results,
+                perm_list=perm_list,
+                option_ids=option_ids,
+                subject=ci.subject,
+                run_idx=int(ci.run_idx),
+            )
+            bucket = model_buckets.setdefault(
+                int(k),
+                {"residuals": [], "z_scores": [], "sample_ref_margins": [], "sample_sigmas": [], "sample_base_gaps": [], "t_residuals": {}, "t_z_scores": {}},
+            )
+            _merge_margin_noise_payload_into_bucket(bucket, payload)
+            model_n_views[int(k)] = int(summary.get("n_views", k))
+
+        for k, bucket in model_buckets.items():
+            n_views = int(model_n_views.get(int(k), int(k)))
+            model_summary = _summarize_margin_noise_bucket(bucket, n_views=n_views)
+            combined = combined_by_k.setdefault(
+                int(k),
+                {"per_model": [], "pooled_bucket": {"residuals": [], "z_scores": [], "sample_ref_margins": [], "sample_sigmas": [], "sample_base_gaps": [], "t_residuals": {}, "t_z_scores": {}}, "n_views": n_views},
+            )
+            combined["per_model"].append({
+                "model_tag": str(model_tag),
+                "results_dir": str(results_dir),
+                "summary": model_summary,
+            })
+            _merge_margin_noise_payload_into_bucket(combined["pooled_bucket"], bucket)
+
+    if not combined_by_k:
+        raise SystemExit("No valid multi-model records found.")
+
+    output: Dict[str, object] = {"results_dirs": valid_dirs, "by_k": {}}
+    print("==== Multi-Model Cyclic Margin Noise Analysis ====")
+    for k in sorted(combined_by_k.keys()):
+        rec = combined_by_k[int(k)]
+        pooled_summary = _summarize_margin_noise_bucket(rec["pooled_bucket"], n_views=int(rec.get("n_views", int(k))))
+        rec["pooled_summary"] = pooled_summary
+        per_model = rec.get("per_model", []) or []
+
+        def _macro_metric(path: Sequence[str]) -> float:
+            vals = []
+            for item in per_model:
+                cur = item.get("summary", {}) or {}
+                ok = True
+                for key in path:
+                    if not isinstance(cur, dict) or key not in cur:
+                        ok = False
+                        break
+                    cur = cur[key]
+                if ok and isinstance(cur, (int, float)) and np.isfinite(float(cur)):
+                    vals.append(float(cur))
+            return float(np.mean(vals)) if vals else float("nan")
+
+        macro_average = {
+            "ks_to_fit": _macro_metric(["standardized_residual_fit", "ks_to_fit"]),
+            "kl_hist_to_fit": _macro_metric(["standardized_residual_fit", "kl_hist_to_fit"]),
+            "skew": _macro_metric(["standardized_residual_fit", "skew"]),
+            "excess_kurtosis": _macro_metric(["standardized_residual_fit", "excess_kurtosis"]),
+            "mean_sigma_i": _macro_metric(["mean_sample_sigma_i"]),
+        }
+        output["by_k"][str(int(k))] = {
+            "n_models": int(len(per_model)),
+            "n_views": int(rec.get("n_views", int(k))),
+            "macro_average": macro_average,
+            "pooled_summary": pooled_summary,
+            "per_model": per_model,
+        }
+
+        pooled_fit = pooled_summary.get("standardized_residual_fit", {}) or {}
+        print(f"--- k={int(k)} ---")
+        print(
+            "models={}, pooled KS={:.4f}, pooled KL={:.4f}, pooled skew={:.4f}, pooled kurtosis={:.4f}".format(
+                len(per_model),
+                float(pooled_fit.get("ks_to_fit", float("nan"))),
+                float(pooled_fit.get("kl_hist_to_fit", float("nan"))),
+                float(pooled_fit.get("skew", float("nan"))),
+                float(pooled_fit.get("excess_kurtosis", float("nan"))),
+            )
+        )
+        print(
+            "macro-average KS={:.4f}, KL={:.4f}, skew={:.4f}, kurtosis={:.4f}, mean_sigma_i={:.4f}".format(
+                float(macro_average.get("ks_to_fit", float("nan"))),
+                float(macro_average.get("kl_hist_to_fit", float("nan"))),
+                float(macro_average.get("skew", float("nan"))),
+                float(macro_average.get("excess_kurtosis", float("nan"))),
+                float(macro_average.get("mean_sigma_i", float("nan"))),
+            )
+        )
+        print("")
+
+    out_dir = str(aggregate_out_dir).strip() or str(valid_dirs[0])
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "multi_model_perm_margin_noise_summary.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+    print(f"Saved: {out_path}")
+
+    if save_plots:
+        saved = _save_multi_model_margin_plots(combined_by_k=combined_by_k, out_dir=out_dir)
+        for p in saved:
+            print(f"Saved: {p}")
+
+
 def _read_results_file(file_path: str) -> List[dict]:
     with open(file_path, "r", encoding="utf-8") as f:
         lines = [json.loads(line) for line in f]
@@ -1513,7 +1859,11 @@ def main() -> None:
 
     # ===== Mode A: analysis-only (point to existing cached results) =====
     ap.add_argument("--results_dir", type=str, default="", help="Directory with eval_clm cached subject jsonl files.")
+    ap.add_argument("--results_dirs", type=str, nargs="+", default=None,
+                    help="Multiple cached result directories for multi-model aggregation.")
     ap.add_argument("--subjects", type=str, default="", help="Comma-separated subject list. If empty, infer from results_dir.")
+    ap.add_argument("--aggregate_out_dir", type=str, default="",
+                    help="Output directory for multi-model aggregation files. Defaults to the first results_dir.")
 
     # ===== Mode B: eval+analyze (run eval_clm.py first) =====
     ap.add_argument("--eval_clm_path", type=str, default="", help="Path to eval_clm.py. Default: sibling eval_clm.py.")
@@ -1550,11 +1900,24 @@ def main() -> None:
     # Parse known args and forward the rest to eval_clm.py
     args, unknown = ap.parse_known_args()
 
+    # If results_dirs is explicitly given, do multi-model aggregation.
+    if args.results_dirs:
+        subjects = [s.strip() for s in str(args.subjects).split(",") if s.strip()] if args.subjects else None
+        _run_multi_results_analysis(
+            results_dirs=[str(x) for x in args.results_dirs],
+            subjects=subjects,
+            n_runs=int(args.n_runs),
+            max_samples=int(args.max_samples),
+            aggregate_out_dir=str(args.aggregate_out_dir),
+            save_plots=bool(args.save_plots),
+        )
+        return
+
     # If results_dir is explicitly given, do analysis-only.
     if str(args.results_dir).strip():
         # Infer task name from results_dir like "results_arc/..." when possible
         _td = str(args.results_dir)
-        task_name = "arc" if "results_arc" in _td else ("mmlu" if "results_mmlu" in _td else ("csqa" if "results_csqa" in _td else None))
+        task_name = _infer_task_name_from_path(_td)
         subjects = [s.strip() for s in str(args.subjects).split(",") if s.strip()] if args.subjects else None
         _run_analysis(
             cache_dir=str(args.results_dir),
@@ -1581,7 +1944,7 @@ def main() -> None:
     # Otherwise, wrapper mode: run eval_clm then analyze inferred results_dir(s).
     if not str(args.pretrained_model_path).strip() or not args.eval_names:
         raise SystemExit(
-            "Provide either --results_dir (analysis-only) OR provide --pretrained_model_path and --eval_names (eval+analyze)."
+            "Provide either --results_dirs (multi-model), --results_dir (analysis-only), OR provide --pretrained_model_path and --eval_names (eval+analyze)."
         )
 
     eval_clm_path = str(args.eval_clm_path).strip()
