@@ -62,7 +62,12 @@ def _safe_makedirs_for_prefix(out_prefix: str) -> None:
         os.makedirs(d, exist_ok=True)
 
 
-def _eval_save_path(code_dir: str, eval_name: str, pretrained_model_path: str) -> tuple[str, str, int, str | None]:
+def _eval_save_path(
+    code_dir: str,
+    eval_name: str,
+    pretrained_model_path: str,
+    option_id_set: str | None = None,
+) -> tuple[str, str, int, str | None]:
     parts = [p.strip() for p in str(eval_name).split(",")]
     if len(parts) < 2:
         raise ValueError(f"Invalid eval_name='{eval_name}'. Expected 'task,num_few_shot,setting(optional)'.")
@@ -74,6 +79,8 @@ def _eval_save_path(code_dir: str, eval_name: str, pretrained_model_path: str) -
     save_path = os.path.join(code_dir, f"results_{task}", f"{num_few_shot}s_{model_name}", f"{task}")
     if setting is not None:
         save_path += f"_{setting}"
+    if option_id_set:
+        save_path += f"_id-{option_id_set}"
     return save_path, task, num_few_shot, setting
 
 
@@ -120,14 +127,21 @@ def _validate_option_id_set(eval_names: list[str], extra_args: list[str]) -> Non
         )
 
 
-def _collect_eval_outputs(code_dir: str, eval_names: list[str], pretrained_model_path: str) -> dict[str, list[str]]:
+def _collect_eval_outputs(
+    code_dir: str,
+    eval_names: list[str],
+    pretrained_model_path: str,
+    option_id_set: str | None = None,
+) -> dict[str, list[str]]:
     """
     Returns mapping: label -> list of jsonl file paths
     label examples: 'mmlu,0,full'
     """
     out: dict[str, list[str]] = {}
     for ev in eval_names:
-        save_path, task, num_few_shot, setting = _eval_save_path(code_dir, ev, pretrained_model_path)
+        save_path, task, num_few_shot, setting = _eval_save_path(
+            code_dir, ev, pretrained_model_path, option_id_set=option_id_set
+        )
         files = _expand_inputs(save_path)
         out[str(ev)] = files
     return out
@@ -310,6 +324,7 @@ def main():
 
         extra = list(args.eval_clm_args or [])
         _validate_option_id_set(list(args.eval_names), extra)
+        opt_id = _extract_flag_value(extra, "--option_id_set")
 
         cmd = [
             sys.executable,
@@ -324,7 +339,7 @@ def main():
         print(" ".join([str(x) for x in cmd]))
         subprocess.run(cmd, cwd=code_dir, check=True)
 
-        collected = _collect_eval_outputs(code_dir, list(args.eval_names), str(args.pretrained_model_path))
+        collected = _collect_eval_outputs(code_dir, list(args.eval_names), str(args.pretrained_model_path), option_id_set=opt_id)
         if len(collected) == 0:
             raise SystemExit("No eval_names provided or no outputs collected.")
 
@@ -335,7 +350,7 @@ def main():
                 print(f"[WARN] No JSONL files found for eval_name='{ev}' in expected save_path.")
                 continue
 
-            save_path, task, num_few_shot, setting = _eval_save_path(code_dir, ev, str(args.pretrained_model_path))
+            save_path, task, num_few_shot, setting = _eval_save_path(code_dir, ev, str(args.pretrained_model_path), option_id_set=opt_id)
             label = f"{task},{num_few_shot},{setting or 'base'}"
             is_mmlu = (str(task).lower() == "mmlu")
             group_tag = f"{task}_allsubjects" if is_mmlu else f"{task}"
