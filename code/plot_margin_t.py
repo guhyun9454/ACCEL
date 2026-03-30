@@ -77,6 +77,49 @@ def _eval_save_path(code_dir: str, eval_name: str, pretrained_model_path: str) -
     return save_path, task, num_few_shot, setting
 
 
+def _extract_flag_value(argv: list[str], flag: str) -> str | None:
+    """Return the next token after `flag` if present (no '=' support)."""
+    try:
+        i = argv.index(flag)
+    except ValueError:
+        return None
+    if i + 1 >= len(argv):
+        return None
+    v = argv[i + 1]
+    if isinstance(v, str) and v.startswith("--"):
+        return None
+    return str(v)
+
+
+def _validate_option_id_set(eval_names: list[str], extra_args: list[str]) -> None:
+    """
+    eval_clm_utils.py enforces option_id_set length matches #options:
+      - mmlu, arc -> 4 (ABCD)
+      - csqa -> 5 (ABCDE)
+    If user passes a single global --option_id_set, prevent obvious mismatch early.
+    """
+    opt = _extract_flag_value(extra_args, "--option_id_set")
+    if not opt:
+        return
+
+    tasks = []
+    for ev in eval_names:
+        parts = [p.strip() for p in str(ev).split(",")]
+        if len(parts) >= 1 and parts[0]:
+            tasks.append(parts[0].lower())
+
+    if "csqa" in tasks and len(opt) != 5:
+        raise SystemExit(
+            f"--option_id_set '{opt}' has length {len(opt)} but csqa requires 5. "
+            f"Use '--option_id_set ABCDE' for csqa, or run csqa separately without a global option_id_set."
+        )
+    if any(t in ("mmlu", "arc") for t in tasks) and len(opt) != 4 and ("csqa" not in tasks):
+        raise SystemExit(
+            f"--option_id_set '{opt}' has length {len(opt)} but mmlu/arc require 4. "
+            f"Use '--option_id_set ABCD' or omit it."
+        )
+
+
 def _collect_eval_outputs(code_dir: str, eval_names: list[str], pretrained_model_path: str) -> dict[str, list[str]]:
     """
     Returns mapping: label -> list of jsonl file paths
@@ -252,6 +295,9 @@ def main():
     parser.add_argument("--pretrained_model_path", type=str, default=None, help="Passed to eval_clm.py when --auto_eval is used.")
     parser.add_argument("--eval_names", type=str, nargs="+", default=["mmlu,0,full", "arc,0,full", "csqa,0,full"],
                         help="Passed to eval_clm.py. Example: mmlu,0,full arc,0,full csqa,0,full")
+    parser.add_argument("--eval_clm_args", nargs=argparse.REMAINDER, default=[],
+                        help="Extra args to pass through to eval_clm.py. "
+                             "Example: --eval_clm_args --option_id_set ABCD --force --wandb")
     args = parser.parse_args()
 
     _safe_makedirs_for_prefix(args.out_prefix)
@@ -262,6 +308,9 @@ def main():
         if not args.pretrained_model_path:
             raise SystemExit("--auto_eval requires --pretrained_model_path")
 
+        extra = list(args.eval_clm_args or [])
+        _validate_option_id_set(list(args.eval_names), extra)
+
         cmd = [
             sys.executable,
             os.path.join(code_dir, "eval_clm.py"),
@@ -269,6 +318,7 @@ def main():
             str(args.pretrained_model_path),
             "--eval_names",
             *list(args.eval_names),
+            *extra,
         ]
         print("Running eval_clm.py to generate JSONLs...")
         print(" ".join([str(x) for x in cmd]))
