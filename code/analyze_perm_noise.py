@@ -721,7 +721,8 @@ def _discover_cache_files(cache_dir: str, subjects: Optional[List[str]], n_runs:
             if fn.endswith("_curve.jsonl") or fn.endswith("_pride_curve.jsonl"):
                 continue
             path = os.path.join(cache_dir, fn)
-            base = fn[:-5]
+            # Use splitext so names like `csqa_run0.jsonl` become `csqa_run0`, not `csqa_run0.`
+            base = os.path.splitext(fn)[0]
             if base.endswith("_run0") or "_run" in base:
                 # subject_run{i}
                 try:
