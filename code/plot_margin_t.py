@@ -258,8 +258,6 @@ def main():
 
     code_dir = os.path.dirname(os.path.abspath(__file__))
 
-    input_files: list[str] = []
-
     if bool(args.auto_eval):
         if not args.pretrained_model_path:
             raise SystemExit("--auto_eval requires --pretrained_model_path")
@@ -277,46 +275,86 @@ def main():
         subprocess.run(cmd, cwd=code_dir, check=True)
 
         collected = _collect_eval_outputs(code_dir, list(args.eval_names), str(args.pretrained_model_path))
-        for ev, files in collected.items():
+        if len(collected) == 0:
+            raise SystemExit("No eval_names provided or no outputs collected.")
+
+        any_plotted = False
+        for ev in list(args.eval_names):
+            files = collected.get(str(ev), []) or []
             if len(files) == 0:
                 print(f"[WARN] No JSONL files found for eval_name='{ev}' in expected save_path.")
-            input_files.extend(files)
-    else:
-        input_files = _expand_inputs(args.input)
+                continue
 
-    input_files = sorted(set(input_files))
+            save_path, task, num_few_shot, setting = _eval_save_path(code_dir, ev, str(args.pretrained_model_path))
+            label = f"{task},{num_few_shot},{setting or 'base'}"
+            is_mmlu = (str(task).lower() == "mmlu")
+            group_tag = f"{task}_allsubjects" if is_mmlu else f"{task}"
+
+            print(f"[{label}] Found {len(files)} JSONL file(s). Loading...")
+            dfs: list[pd.DataFrame] = []
+            for fp in files:
+                df_i = process_jsonl(fp)
+                if len(df_i) > 0:
+                    dfs.append(df_i)
+            if len(dfs) == 0:
+                print(f"[{label}] No valid records found. Skipping.")
+                continue
+
+            df_all = pd.concat(dfs, ignore_index=True)
+            if args.k is not None:
+                df_all = df_all[df_all["k"] == int(args.k)].copy()
+            if len(df_all) == 0:
+                print(f"[{label}] No records after filtering. Skipping.")
+                continue
+
+            ks = sorted([int(x) for x in df_all["k"].dropna().unique().tolist()])
+            print(f"[{label}] Loaded {len(df_all)} samples across k={ks}. Plotting...")
+            for k in ks:
+                dfk = df_all[df_all["k"] == k].copy()
+                if len(dfk) == 0:
+                    continue
+                out_prefix = f"{args.out_prefix}_{group_tag}"
+                out_prefix_k = out_prefix if len(ks) == 1 else f"{out_prefix}_k{k}"
+                plot_heatmap(dfk, out_prefix_k, k)
+                plot_required_t(dfk, out_prefix_k)
+                plot_t_sensitivity(dfk, out_prefix_k)
+                any_plotted = True
+
+        if not any_plotted:
+            raise SystemExit("No plots were generated. Check eval outputs and JSONL format.")
+
+        print(f"Done! Plots saved with base prefix: {args.out_prefix}")
+        return
+
+    # ---- non-auto mode: plot whatever user provided (file/dir/glob) ----
+    input_files = sorted(set(_expand_inputs(args.input)))
     if len(input_files) == 0:
         raise SystemExit("No JSONL inputs found. Provide --input or use --auto_eval.")
 
     print(f"Found {len(input_files)} JSONL file(s). Loading...")
-    dfs: list[pd.DataFrame] = []
+    dfs2: list[pd.DataFrame] = []
     for fp in input_files:
         df_i = process_jsonl(fp)
         if len(df_i) > 0:
-            dfs.append(df_i)
-    if len(dfs) == 0:
+            dfs2.append(df_i)
+    if len(dfs2) == 0:
         print("No valid records found. Check if the JSONL contains 'probs'.")
         return
 
-    df_all = pd.concat(dfs, ignore_index=True)
-
-    # Optional: force k
+    df_all2 = pd.concat(dfs2, ignore_index=True)
     if args.k is not None:
-        df_all = df_all[df_all["k"] == int(args.k)].copy()
-
-    if len(df_all) == 0:
+        df_all2 = df_all2[df_all2["k"] == int(args.k)].copy()
+    if len(df_all2) == 0:
         print("No records after filtering. (k mismatch or empty inputs)")
         return
 
-    # Split by k (4-choice vs 5-choice etc)
-    ks = sorted([int(x) for x in df_all["k"].dropna().unique().tolist()])
-    print(f"Loaded {len(df_all)} valid samples across k={ks}. Generating plots...")
-
-    for k in ks:
-        dfk = df_all[df_all["k"] == k].copy()
+    ks2 = sorted([int(x) for x in df_all2["k"].dropna().unique().tolist()])
+    print(f"Loaded {len(df_all2)} valid samples across k={ks2}. Generating plots...")
+    for k in ks2:
+        dfk = df_all2[df_all2["k"] == k].copy()
         if len(dfk) == 0:
             continue
-        out_prefix_k = args.out_prefix if len(ks) == 1 else f"{args.out_prefix}_k{k}"
+        out_prefix_k = args.out_prefix if len(ks2) == 1 else f"{args.out_prefix}_k{k}"
         plot_heatmap(dfk, out_prefix_k, k)
         plot_required_t(dfk, out_prefix_k)
         plot_t_sensitivity(dfk, out_prefix_k)
