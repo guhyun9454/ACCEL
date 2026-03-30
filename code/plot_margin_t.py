@@ -4,6 +4,7 @@ import argparse
 import glob
 import subprocess
 import sys
+import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -56,10 +57,66 @@ def _expand_inputs(input_path: str) -> list[str]:
     return out
 
 
+def _expand_inputs_multi(base_dirs: list[str], input_path: str | None) -> list[str]:
+    """
+    Try expanding input_path as-is, then relative to each base_dir (if relative).
+    This makes CLI more robust to different current working directories.
+    """
+    if not input_path:
+        return []
+    tried: list[str] = []
+    out: list[str] = []
+
+    def _try(p: str) -> None:
+        nonlocal out
+        if not p or p in tried:
+            return
+        tried.append(p)
+        out.extend(_expand_inputs(p))
+
+    raw = str(input_path)
+    _try(raw)
+
+    if not os.path.isabs(os.path.expandvars(os.path.expanduser(raw))):
+        for bd in base_dirs:
+            _try(os.path.join(bd, raw))
+
+    return sorted(set(out))
+
+
 def _safe_makedirs_for_prefix(out_prefix: str) -> None:
     d = os.path.dirname(out_prefix)
     if d:
         os.makedirs(d, exist_ok=True)
+
+
+def _sanitize_tag(s: str) -> str:
+    s = str(s).strip().replace("\\", "_").replace("/", "_")
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
+
+def _model_name_from_pretrained_path(pretrained_model_path: str) -> str:
+    return os.path.basename(str(pretrained_model_path).rstrip("/\\")).strip()
+
+
+def _infer_model_tag_from_inputs(input_files: list[str]) -> str | None:
+    """
+    Best-effort inference from paths like:
+      .../results_csqa/0s_Olmo-3-7B-Instruct/.../*.jsonl
+    """
+    if not input_files:
+        return None
+    for p in input_files[:50]:
+        parts = str(p).replace("\\", "/").split("/")
+        for seg in parts:
+            m = re.match(r"^\d+s_(.+)$", seg)
+            if m:
+                cand = m.group(1)
+                if cand:
+                    return cand
+    return None
 
 
 def _eval_save_path(
@@ -343,6 +400,7 @@ def main():
         if len(collected) == 0:
             raise SystemExit("No eval_names provided or no outputs collected.")
 
+        model_tag = _sanitize_tag(_model_name_from_pretrained_path(str(args.pretrained_model_path)))
         any_plotted = False
         for ev in list(args.eval_names):
             files = collected.get(str(ev), []) or []
@@ -378,7 +436,7 @@ def main():
                 dfk = df_all[df_all["k"] == k].copy()
                 if len(dfk) == 0:
                     continue
-                out_prefix = f"{args.out_prefix}_{group_tag}"
+                out_prefix = f"{args.out_prefix}_{model_tag}_{group_tag}"
                 out_prefix_k = out_prefix if len(ks) == 1 else f"{out_prefix}_k{k}"
                 plot_heatmap(dfk, out_prefix_k, k)
                 plot_required_t(dfk, out_prefix_k)
@@ -392,7 +450,8 @@ def main():
         return
 
     # ---- non-auto mode: plot whatever user provided (file/dir/glob) ----
-    input_files = sorted(set(_expand_inputs(args.input)))
+    repo_root = os.path.abspath(os.path.join(code_dir, os.pardir))
+    input_files = _expand_inputs_multi([os.getcwd(), repo_root, code_dir], args.input)
     if len(input_files) == 0:
         raise SystemExit("No JSONL inputs found. Provide --input or use --auto_eval.")
 
@@ -415,16 +474,22 @@ def main():
 
     ks2 = sorted([int(x) for x in df_all2["k"].dropna().unique().tolist()])
     print(f"Loaded {len(df_all2)} valid samples across k={ks2}. Generating plots...")
+
+    inferred_model = _infer_model_tag_from_inputs(input_files)
+    base_out_prefix = args.out_prefix
+    if inferred_model:
+        base_out_prefix = f"{args.out_prefix}_{_sanitize_tag(inferred_model)}"
+
     for k in ks2:
         dfk = df_all2[df_all2["k"] == k].copy()
         if len(dfk) == 0:
             continue
-        out_prefix_k = args.out_prefix if len(ks2) == 1 else f"{args.out_prefix}_k{k}"
+        out_prefix_k = base_out_prefix if len(ks2) == 1 else f"{base_out_prefix}_k{k}"
         plot_heatmap(dfk, out_prefix_k, k)
         plot_required_t(dfk, out_prefix_k)
         plot_t_sensitivity(dfk, out_prefix_k)
 
-    print(f"Done! Plots saved with prefix: {args.out_prefix}")
+    print(f"Done! Plots saved with prefix: {base_out_prefix}")
 
 if __name__ == "__main__":
     main()
