@@ -17,6 +17,49 @@ sns.set_theme(style="whitegrid", context="paper", font_scale=1.2)
 def _rotations(k):
     return [tuple((i + s) % k for i in range(k)) for s in range(k)]
 
+
+def _is_factorial(n: int, m: int) -> bool:
+    if n <= 1:
+        return m == 1
+    prod = 1
+    for i in range(2, n + 1):
+        prod *= i
+        if prod > m:
+            return False
+    return prod == m
+
+
+def _cyclic_view_indices(k: int, n_views: int) -> list[int]:
+    """
+    Return indices of views to use as cyclic rotations (k of them) for aggregation.
+
+    - If n_views == k: assume the stored sequence is already cyclic rotations in order [0..k-1].
+    - If n_views == k!: assume eval_clm.py used lexicographically sorted permutations of range(k).
+      Then map rotation tuples to their indices in that sorted permutation list.
+    - Else: fall back to first min(k, n_views) views (best-effort).
+    """
+    if n_views <= 0:
+        return []
+    if n_views == k:
+        return list(range(k))
+    if _is_factorial(k, n_views):
+        # Match eval_clm.py: perm_list = list(sorted(permutations(range(k))))
+        from itertools import permutations
+
+        perm_list = list(sorted(permutations(range(k))))
+        perm_to_idx = {p: i for i, p in enumerate(perm_list)}
+        rots = _rotations(k)
+        idxs: list[int] = []
+        for r in rots:
+            idx = perm_to_idx.get(tuple(r))
+            if idx is not None:
+                idxs.append(int(idx))
+        # Should be length k, but keep it safe
+        if len(idxs) > 0:
+            return idxs
+    # Fallback
+    return list(range(min(k, n_views)))
+
 def _gap(probs):
     vals = np.sort(probs)[::-1]
     return vals[0] - vals[1] if len(vals) > 1 else 0.0
@@ -232,9 +275,11 @@ def process_jsonl(filepath: str) -> pd.DataFrame:
             if probs_seq_np.shape[-1] != k:
                 continue
 
-            # 1. Cyclic indices 추출 (eval_clm.py 방식과 동일)
-            identity_idx = 0
-            cyc_perms = _rotations(k)
+            # 1) Decide which views correspond to cyclic rotations
+            view_indices = _cyclic_view_indices(k=k, n_views=int(len(probs_seq_np)))
+            if len(view_indices) == 0:
+                continue
+            identity_idx = int(view_indices[0])
 
             # 2. 1-view Base 측정
             base_probs = np.asarray(probs_seq_np[identity_idx], dtype=np.float64)
@@ -243,9 +288,7 @@ def process_jsonl(filepath: str) -> pd.DataFrame:
 
             # 3. T-Sensitivity 계산 (k개의 cyclic view에서 gap의 std)
             individual_gaps: list[float] = []
-            for i in range(k):
-                # 결과가 rotation k개만 있을 땐 앞의 k개가 cyclic이라고 가정
-                idx = i if len(probs_seq_np) == k else int(cyc_perms[i][0])
+            for idx in view_indices:
                 if idx < 0 or idx >= len(probs_seq_np):
                     continue
                 view_probs = np.asarray(probs_seq_np[idx], dtype=np.float64)
@@ -255,11 +298,10 @@ def process_jsonl(filepath: str) -> pd.DataFrame:
             # 4. T 1~k 누적 평균으로 Required T 계산
             cum_probs = np.zeros(k, dtype=np.float64)
             preds_at_t: list[int] = []
-            for t in range(1, k + 1):
-                idx = (t - 1) if len(probs_seq_np) == k else int(cyc_perms[t - 1][0])
+            for t, idx in enumerate(view_indices, start=1):
                 if idx < 0 or idx >= len(probs_seq_np):
                     break
-                cum_probs += np.asarray(probs_seq_np[idx], dtype=np.float64)
+                cum_probs += np.asarray(probs_seq_np[int(idx)], dtype=np.float64)
                 pred_t = int(np.argmax(cum_probs / float(t)))
                 preds_at_t.append(pred_t)
 
