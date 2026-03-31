@@ -138,13 +138,36 @@ def _build_sigma_analysis_record(
     q_sigma_high = float(np.quantile(sg, 0.70)) if sg.size > 0 else 0.0
     low_sigma_mask = sg <= q_sigma_low
     high_sigma_mask = sg >= q_sigma_high
+    mid_conf_mask = (~low_conf_mask) & (~high_conf_mask)
 
     def _mean_or_nan(arr: np.ndarray, mask: np.ndarray) -> float:
         if arr.size == 0 or np.sum(mask) == 0:
             return float("nan")
         return float(np.mean(arr[mask]))
 
+    def _std_or_nan(arr: np.ndarray, mask: np.ndarray) -> float:
+        if arr.size == 0 or np.sum(mask) == 0:
+            return float("nan")
+        return float(np.std(arr[mask]))
+
+    def _median_or_nan(arr: np.ndarray, mask: Optional[np.ndarray] = None) -> float:
+        if arr.size == 0:
+            return float("nan")
+        arr_use = arr if mask is None else arr[mask]
+        if arr_use.size == 0:
+            return float("nan")
+        return float(np.median(arr_use))
+
     flip_float = flip.astype(np.float64)
+    abs_resid_single = np.abs(resid_single)
+    abs_resid_two_view = np.abs(resid_two_view)
+    sq_resid_single = resid_single ** 2
+    sq_resid_two_view = resid_two_view ** 2
+    paired_delta_abs = abs_resid_two_view - abs_resid_single
+    paired_delta_sq = sq_resid_two_view - sq_resid_single
+    paired_improve_abs = abs_resid_two_view < abs_resid_single
+    paired_improve_sq = sq_resid_two_view < sq_resid_single
+
     return {
         "subject": str(subject),
         "n": int(dc.size),
@@ -165,6 +188,49 @@ def _build_sigma_analysis_record(
         "flip_high_conf": _mean_or_nan(flip_float, high_conf_mask),
         "flip_low_sigma": _mean_or_nan(flip_float, low_sigma_mask),
         "flip_high_sigma": _mean_or_nan(flip_float, high_sigma_mask),
+        # 1) Same-sample-set comparison on the full sample set
+        "same_set_n": int(dc.size),
+        "same_set_sigma_single": sigma_single,
+        "same_set_sigma_two_view": sigma_two_view,
+        "same_set_sigma_ratio": sigma_ratio,
+        # 2) Confidence-bucket comparison (same bucket, same samples)
+        "low_conf_n": int(np.sum(low_conf_mask)),
+        "mid_conf_n": int(np.sum(mid_conf_mask)),
+        "high_conf_n": int(np.sum(high_conf_mask)),
+        "low_conf_sigma_single": _std_or_nan(resid_single, low_conf_mask),
+        "low_conf_sigma_two_view": _std_or_nan(resid_two_view, low_conf_mask),
+        "mid_conf_sigma_single": _std_or_nan(resid_single, mid_conf_mask),
+        "mid_conf_sigma_two_view": _std_or_nan(resid_two_view, mid_conf_mask),
+        "high_conf_sigma_single": _std_or_nan(resid_single, high_conf_mask),
+        "high_conf_sigma_two_view": _std_or_nan(resid_two_view, high_conf_mask),
+        "low_conf_sigma_ratio": (
+            float(_std_or_nan(resid_two_view, low_conf_mask) / _std_or_nan(resid_single, low_conf_mask))
+            if np.isfinite(_std_or_nan(resid_single, low_conf_mask)) and _std_or_nan(resid_single, low_conf_mask) > 1e-12
+            else float("nan")
+        ),
+        "mid_conf_sigma_ratio": (
+            float(_std_or_nan(resid_two_view, mid_conf_mask) / _std_or_nan(resid_single, mid_conf_mask))
+            if np.isfinite(_std_or_nan(resid_single, mid_conf_mask)) and _std_or_nan(resid_single, mid_conf_mask) > 1e-12
+            else float("nan")
+        ),
+        "high_conf_sigma_ratio": (
+            float(_std_or_nan(resid_two_view, high_conf_mask) / _std_or_nan(resid_single, high_conf_mask))
+            if np.isfinite(_std_or_nan(resid_single, high_conf_mask)) and _std_or_nan(resid_single, high_conf_mask) > 1e-12
+            else float("nan")
+        ),
+        # 3) Paired-difference view on the same samples
+        "paired_delta_abs_mean": float(np.mean(paired_delta_abs)) if paired_delta_abs.size > 0 else float("nan"),
+        "paired_delta_abs_median": _median_or_nan(paired_delta_abs),
+        "paired_delta_sq_mean": float(np.mean(paired_delta_sq)) if paired_delta_sq.size > 0 else float("nan"),
+        "paired_delta_sq_median": _median_or_nan(paired_delta_sq),
+        "paired_improve_rate_abs": float(np.mean(paired_improve_abs.astype(np.float64))) if paired_improve_abs.size > 0 else float("nan"),
+        "paired_improve_rate_sq": float(np.mean(paired_improve_sq.astype(np.float64))) if paired_improve_sq.size > 0 else float("nan"),
+        "paired_delta_abs_low_conf_mean": _mean_or_nan(paired_delta_abs, low_conf_mask),
+        "paired_delta_abs_mid_conf_mean": _mean_or_nan(paired_delta_abs, mid_conf_mask),
+        "paired_delta_abs_high_conf_mean": _mean_or_nan(paired_delta_abs, high_conf_mask),
+        "paired_improve_rate_abs_low_conf": _mean_or_nan(paired_improve_abs.astype(np.float64), low_conf_mask),
+        "paired_improve_rate_abs_mid_conf": _mean_or_nan(paired_improve_abs.astype(np.float64), mid_conf_mask),
+        "paired_improve_rate_abs_high_conf": _mean_or_nan(paired_improve_abs.astype(np.float64), high_conf_mask),
     }
 
 def _pride_correct_row(row: np.ndarray, prior: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -2833,24 +2899,22 @@ def main():
         def _print_sigma_analysis(records: List[dict], name: str):
             if not records:
                 return None
-            keys = [
-                "sigma_mean",
-                "sigma_std",
-                "sigma_single",
-                "sigma_two_view",
-                "sigma_ratio",
-                "corr_default_gap_sigma",
-                "corr_flip_sigma",
-                "sigma_low_conf_mean",
-                "sigma_high_conf_mean",
-                "flip_low_conf",
-                "flip_high_conf",
-                "flip_low_sigma",
-                "flip_high_sigma",
-            ]
+            numeric_keys = sorted({
+                str(key)
+                for rec in records
+                for key, value in rec.items()
+                if str(key) != "subject" and isinstance(value, (int, float, np.integer, np.floating))
+            })
             agg = {}
-            for key in keys:
-                vals = [float(r.get(key, float("nan"))) for r in records if np.isfinite(float(r.get(key, float("nan"))))]
+            for key in numeric_keys:
+                vals = []
+                for rec in records:
+                    try:
+                        v = float(rec.get(key, float("nan")))
+                    except Exception:
+                        v = float("nan")
+                    if np.isfinite(v):
+                        vals.append(v)
                 agg[key] = float(np.mean(vals)) if vals else float("nan")
             logger.info(_purple(f"\n==== SIGMA ANALYSIS: {name} ===="))
             logger.info(
@@ -2869,6 +2933,43 @@ def main():
             )
             logger.info(
                 f"flip_low_sigma={agg['flip_low_sigma']:.4f}, flip_high_sigma={agg['flip_high_sigma']:.4f}"
+            )
+            logger.info(
+                f"[same-set] n={agg.get('same_set_n', float('nan')):.1f}, "
+                f"single={agg.get('same_set_sigma_single', float('nan')):.4f}, "
+                f"two_view={agg.get('same_set_sigma_two_view', float('nan')):.4f}, "
+                f"ratio={agg.get('same_set_sigma_ratio', float('nan')):.4f}"
+            )
+            logger.info(
+                f"[bucket-low] n={agg.get('low_conf_n', float('nan')):.1f}, "
+                f"single={agg.get('low_conf_sigma_single', float('nan')):.4f}, "
+                f"two_view={agg.get('low_conf_sigma_two_view', float('nan')):.4f}, "
+                f"ratio={agg.get('low_conf_sigma_ratio', float('nan')):.4f}"
+            )
+            logger.info(
+                f"[bucket-mid] n={agg.get('mid_conf_n', float('nan')):.1f}, "
+                f"single={agg.get('mid_conf_sigma_single', float('nan')):.4f}, "
+                f"two_view={agg.get('mid_conf_sigma_two_view', float('nan')):.4f}, "
+                f"ratio={agg.get('mid_conf_sigma_ratio', float('nan')):.4f}"
+            )
+            logger.info(
+                f"[bucket-high] n={agg.get('high_conf_n', float('nan')):.1f}, "
+                f"single={agg.get('high_conf_sigma_single', float('nan')):.4f}, "
+                f"two_view={agg.get('high_conf_sigma_two_view', float('nan')):.4f}, "
+                f"ratio={agg.get('high_conf_sigma_ratio', float('nan')):.4f}"
+            )
+            logger.info(
+                f"[paired] delta_abs_mean={agg.get('paired_delta_abs_mean', float('nan')):.4f}, "
+                f"delta_abs_median={agg.get('paired_delta_abs_median', float('nan')):.4f}, "
+                f"improve_rate={agg.get('paired_improve_rate_abs', float('nan')):.4f}"
+            )
+            logger.info(
+                f"[paired-by-conf] low={agg.get('paired_delta_abs_low_conf_mean', float('nan')):.4f}, "
+                f"mid={agg.get('paired_delta_abs_mid_conf_mean', float('nan')):.4f}, "
+                f"high={agg.get('paired_delta_abs_high_conf_mean', float('nan')):.4f}, "
+                f"improve_low={agg.get('paired_improve_rate_abs_low_conf', float('nan')):.4f}, "
+                f"improve_mid={agg.get('paired_improve_rate_abs_mid_conf', float('nan')):.4f}, "
+                f"improve_high={agg.get('paired_improve_rate_abs_high_conf', float('nan')):.4f}"
             )
             logger.info("========================================\n")
             agg["records"] = int(len(records))
