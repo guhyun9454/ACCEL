@@ -20,6 +20,7 @@ import math
 from utils import (
     _norm,
     _purple,
+    normalize_pretrained_model_path_for_fs,
     shuffle_options_with_ids,
     move_answer,
     cycle_options,
@@ -148,6 +149,7 @@ def parse_arguments():
 
     args = parser.parse_args()
 
+    args.pretrained_model_path = normalize_pretrained_model_path_for_fs(args.pretrained_model_path)
     args.model_name = args.pretrained_model_path.split('/')[-1]
 
     for eval_name in args.eval_names:

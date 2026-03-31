@@ -1,6 +1,30 @@
 
 import os
 import json
+
+
+def normalize_pretrained_model_path_for_fs(pretrained_model_path: str) -> str:
+    """
+    Notion/워드/복사 붙여넣기 시 섞이는 유니코드 하이픈·대시를 ASCII '-' (U+002D)로 통일.
+    eval_clm 결과 폴더명(0s_<model_name>)과 CLI 인자가 항상 맞도록 쓴다.
+    """
+    s = str(pretrained_model_path).strip()
+    if not s:
+        return s
+    # hyphen, non-breaking hyphen, en/em dash, minus, fullwidth hyphen-minus, etc.
+    for ch in (
+        "\u2010",
+        "\u2011",
+        "\u2012",
+        "\u2013",
+        "\u2014",
+        "\u2212",
+        "\uFE58",
+        "\uFE63",
+        "\uFF0D",
+    ):
+        s = s.replace(ch, "-")
+    return s
 from tqdm import tqdm
 import numpy as np
 import random
