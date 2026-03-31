@@ -25,6 +25,7 @@ import math
 import os
 import subprocess
 import sys
+import zlib
 from dataclasses import dataclass
 from itertools import combinations, permutations
 from statistics import NormalDist
@@ -161,10 +162,13 @@ def _analyze_cyclic_margin_noise(
     option_ids: List[str],
     subject: str,
     run_idx: int,
+    use_full_reference: bool = False,
+    combo_sample_limit: int = 2048,
+    combo_seed: int = 0,
 ) -> Tuple[Dict[str, object], List[dict], Dict[str, object]]:
     """
-    Treat the cyclic-ensemble content-space top1/top2 margin as a per-sample reference M_ref.
-    For each cyclic single view, compute a signed margin on the same reference pair:
+    Treat the selected ensemble (cyclic or full) content-space top1/top2 margin as a per-sample reference M_ref.
+    For each selected single view, compute a signed margin on the same reference pair:
         M^(pi) = p_pi(top1_ref) - p_pi(top2_ref)
     and define nuisance residual xi^(pi) = M^(pi) - M_ref.
     """
@@ -173,12 +177,15 @@ def _analyze_cyclic_margin_noise(
     identity_idx = perm_list.index(identity_perm) if identity_perm in perm_list else 0
     cyc_perms = _rotations(k)
     cyc_idxs = [perm_list.index(p) for p in cyc_perms if p in perm_list]
-    n_views = len(cyc_idxs)
+    full_available = len(perm_list) > len(cyc_idxs)
+    selected_perm_idxs = list(range(len(perm_list))) if use_full_reference and full_available else list(cyc_idxs)
+    reference_mode = "full" if use_full_reference and full_available else "cyclic"
+    n_views = len(selected_perm_idxs)
 
     if n_views <= 0:
         return (
             {
-                "reference_mode": "cyclic",
+                "reference_mode": reference_mode,
                 "n_samples": 0,
                 "n_views": 0,
             },
@@ -194,7 +201,32 @@ def _analyze_cyclic_margin_noise(
             },
         )
 
-    combo_cache = {t: list(combinations(range(n_views), t)) for t in range(1, n_views + 1)}
+    def _t_values_for_mode() -> List[int]:
+        if n_views <= 8:
+            return list(range(1, n_views + 1))
+        vals = [1, 2, 4, 8, 16, 32, 64, n_views]
+        return sorted({int(t) for t in vals if 1 <= int(t) <= n_views})
+
+    base_seed = (int(zlib.crc32(f"{subject}:{run_idx}:{reference_mode}".encode("utf-8"))) + int(combo_seed)) & 0xFFFFFFFF
+    combo_rng = np.random.default_rng(base_seed)
+    t_values = _t_values_for_mode()
+    combo_cache: Dict[int, List[Tuple[int, ...]]] = {}
+    for t in t_values:
+        total = math.comb(int(n_views), int(t))
+        if total <= int(combo_sample_limit):
+            combo_cache[int(t)] = list(combinations(range(n_views), int(t)))
+            continue
+        seen = set()
+        combos: List[Tuple[int, ...]] = []
+        target = int(combo_sample_limit)
+        while len(combos) < target:
+            chosen = tuple(sorted(int(x) for x in combo_rng.choice(np.arange(n_views), size=int(t), replace=False).tolist()))
+            if chosen in seen:
+                continue
+            seen.add(chosen)
+            combos.append(chosen)
+        combo_cache[int(t)] = combos
+
     sample_records: List[dict] = []
     pooled_residuals: List[float] = []
     pooled_z_scores: List[float] = []
@@ -220,18 +252,18 @@ def _analyze_cyclic_margin_noise(
         if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
             continue
 
-        cyc_dists = []
-        for perm_idx in cyc_idxs:
+        selected_dists = []
+        for perm_idx in selected_perm_idxs:
             dist = _aggregate_probs_over_permutations([probs_seq[perm_idx]], [perm_list[perm_idx]], k)
-            cyc_dists.append(np.asarray(dist, dtype=np.float64))
-        if not cyc_dists:
+            selected_dists.append(np.asarray(dist, dtype=np.float64))
+        if not selected_dists:
             continue
-        cyc_dists_arr = np.asarray(cyc_dists, dtype=np.float64)
-        ref_dist = np.mean(cyc_dists_arr, axis=0)
+        selected_dists_arr = np.asarray(selected_dists, dtype=np.float64)
+        ref_dist = np.mean(selected_dists_arr, axis=0)
         ref_top1, ref_top2 = _top2_indices(ref_dist)
         ref_margin = float(ref_dist[ref_top1] - ref_dist[ref_top2])
 
-        single_margins = cyc_dists_arr[:, ref_top1] - cyc_dists_arr[:, ref_top2]
+        single_margins = selected_dists_arr[:, ref_top1] - selected_dists_arr[:, ref_top2]
         residuals = single_margins - ref_margin
         sigma_i = float(np.std(residuals))
 
@@ -271,7 +303,7 @@ def _analyze_cyclic_margin_noise(
             "run": int(run_idx),
             "idx": int(d.get("idx", -1)),
             "ideal": str(d.get("ideal")),
-            "reference_mode": "cyclic",
+            "reference_mode": reference_mode,
             "n_views": int(n_views),
             "ref_top1": int(ref_top1),
             "ref_top2": int(ref_top2),
@@ -279,8 +311,8 @@ def _analyze_cyclic_margin_noise(
             "base_gap": float(base_gap),
             "base_margin_on_ref_pair": base_margin_on_ref_pair,
             "sigma_i": sigma_i,
-            "cyclic_single_margins": [float(x) for x in single_margins.tolist()],
-            "cyclic_single_residuals": [float(x) for x in residuals.tolist()],
+            "single_view_margins": [float(x) for x in single_margins.tolist()],
+            "single_view_residuals": [float(x) for x in residuals.tolist()],
             "t_summary": t_summary,
         })
 
@@ -314,7 +346,7 @@ def _analyze_cyclic_margin_noise(
         })
 
     summary: Dict[str, object] = {
-        "reference_mode": "cyclic",
+        "reference_mode": reference_mode,
         "n_samples": int(len(sample_records)),
         "n_views": int(n_views),
         "mean_ref_margin": float(np.mean(sample_ref_arr)) if sample_ref_arr.size > 0 else float("nan"),
@@ -390,7 +422,7 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         bucket["t_z_scores"][t_int].extend(vals)
 
 
-def _summarize_margin_noise_bucket(bucket: Dict[str, object], n_views: int) -> Dict[str, object]:
+def _summarize_margin_noise_bucket(bucket: Dict[str, object], n_views: int, reference_mode: str = "cyclic") -> Dict[str, object]:
     residuals = np.asarray(bucket.get("residuals", []), dtype=np.float64)
     z_scores = np.asarray(bucket.get("z_scores", []), dtype=np.float64)
     sample_ref = np.asarray(bucket.get("sample_ref_margins", []), dtype=np.float64)
@@ -425,7 +457,7 @@ def _summarize_margin_noise_bucket(bucket: Dict[str, object], n_views: int) -> D
         })
 
     return {
-        "reference_mode": "cyclic",
+        "reference_mode": str(reference_mode),
         "n_views": int(n_views),
         "n_residuals": int(residuals.size),
         "n_standardized_residuals": int(z_scores.size),
@@ -456,6 +488,8 @@ def _save_multi_model_margin_plots(
         rec = combined_by_k[int(k)]
         pooled = rec.get("pooled_summary", {}) or {}
         per_model = rec.get("per_model", []) or []
+        ref_mode = str((pooled or {}).get("reference_mode", rec.get("reference_mode", "cyclic")))
+        mode_label = "Full-permutation" if ref_mode == "full" else "Cyclic"
         z_scores = np.asarray(rec.get("pooled_bucket", {}).get("z_scores", []), dtype=np.float64)
         t_residuals = rec.get("pooled_bucket", {}).get("t_residuals", {}) or {}
 
@@ -471,7 +505,7 @@ def _save_multi_model_margin_plots(
                 ax.plot(xs, normal_pdf, color="#d62728", lw=2.0, label="N(0,1)")
             fit = pooled.get("standardized_residual_fit", {}) or {}
             ax.set_title(
-                f"Multi-model pooled cyclic residuals (standardized) (k={k})\n"
+                f"Multi-model pooled {ref_mode} residuals (standardized) (k={k})\n"
                 f"models={len(per_model)}, KS={float(fit.get('ks_to_fit', float('nan'))):.3f}, "
                 f"KL={float(fit.get('kl_hist_to_fit', float('nan'))):.3f}"
             )
@@ -496,7 +530,7 @@ def _save_multi_model_margin_plots(
                 width = 0.38
                 ax.bar(x - width / 2, ks_vals, width=width, color="#1f77b4", alpha=0.85, label="KS")
                 ax.bar(x + width / 2, kl_vals, width=width, color="#ff7f0e", alpha=0.85, label="Hist KL")
-                ax.set_title(f"Per-model Gaussian fit metrics (k={k})")
+                ax.set_title(f"Per-model Gaussian fit metrics ({mode_label}, k={k})")
                 ax.set_xticks(x)
                 ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
                 ax.grid(True, axis="y", alpha=0.25)
@@ -529,7 +563,7 @@ def _save_multi_model_margin_plots(
                 ax.plot(ts, sqrt_target, "--s", color="#d62728", lw=1.6, ms=4, label="1/sqrt(T)")
                 if n_views > 1:
                     ax.plot(ts, finite_target, ":^", color="#2ca02c", lw=1.6, ms=4, label="Finite-view target")
-                ax.set_title(f"Multi-model pooled T-scaling (k={k})")
+                ax.set_title(f"Multi-model pooled T-scaling ({ref_mode}, k={k})")
                 ax.set_xlabel("T = #views averaged")
                 ax.set_ylabel("Residual std")
                 ax.grid(True, alpha=0.25)
@@ -551,6 +585,8 @@ def _run_multi_results_analysis(
     max_samples: int,
     aggregate_out_dir: str,
     save_plots: bool,
+    use_full_reference: bool,
+    combo_sample_limit: int,
 ) -> None:
     valid_dirs = [str(x) for x in results_dirs if str(x).strip()]
     if not valid_dirs:
@@ -590,20 +626,40 @@ def _run_multi_results_analysis(
                 option_ids=option_ids,
                 subject=ci.subject,
                 run_idx=int(ci.run_idx),
+                use_full_reference=bool(use_full_reference),
+                combo_sample_limit=int(combo_sample_limit),
             )
             bucket = model_buckets.setdefault(
                 int(k),
-                {"residuals": [], "z_scores": [], "sample_ref_margins": [], "sample_sigmas": [], "sample_base_gaps": [], "t_residuals": {}, "t_z_scores": {}},
+                {
+                    "reference_mode": str(summary.get("reference_mode", "cyclic")),
+                    "residuals": [],
+                    "z_scores": [],
+                    "sample_ref_margins": [],
+                    "sample_sigmas": [],
+                    "sample_base_gaps": [],
+                    "t_residuals": {},
+                    "t_z_scores": {},
+                },
             )
             _merge_margin_noise_payload_into_bucket(bucket, payload)
             model_n_views[int(k)] = int(summary.get("n_views", k))
 
         for k, bucket in model_buckets.items():
             n_views = int(model_n_views.get(int(k), int(k)))
-            model_summary = _summarize_margin_noise_bucket(bucket, n_views=n_views)
+            model_summary = _summarize_margin_noise_bucket(
+                bucket,
+                n_views=n_views,
+                reference_mode=str(bucket.get("reference_mode", "cyclic")),
+            )
             combined = combined_by_k.setdefault(
                 int(k),
-                {"per_model": [], "pooled_bucket": {"residuals": [], "z_scores": [], "sample_ref_margins": [], "sample_sigmas": [], "sample_base_gaps": [], "t_residuals": {}, "t_z_scores": {}}, "n_views": n_views},
+                {
+                    "reference_mode": str(model_summary.get("reference_mode", "cyclic")),
+                    "per_model": [],
+                    "pooled_bucket": {"residuals": [], "z_scores": [], "sample_ref_margins": [], "sample_sigmas": [], "sample_base_gaps": [], "t_residuals": {}, "t_z_scores": {}},
+                    "n_views": n_views,
+                },
             )
             combined["per_model"].append({
                 "model_tag": str(model_tag),
@@ -616,10 +672,15 @@ def _run_multi_results_analysis(
         raise SystemExit("No valid multi-model records found.")
 
     output: Dict[str, object] = {"results_dirs": valid_dirs, "by_k": {}}
-    print("==== Multi-Model Cyclic Margin Noise Analysis ====")
+    mode_name = "Full-Permutation" if use_full_reference else "Cyclic"
+    print(f"==== Multi-Model {mode_name} Margin Noise Analysis ====")
     for k in sorted(combined_by_k.keys()):
         rec = combined_by_k[int(k)]
-        pooled_summary = _summarize_margin_noise_bucket(rec["pooled_bucket"], n_views=int(rec.get("n_views", int(k))))
+        pooled_summary = _summarize_margin_noise_bucket(
+            rec["pooled_bucket"],
+            n_views=int(rec.get("n_views", int(k))),
+            reference_mode=str(rec.get("reference_mode", "cyclic")),
+        )
         rec["pooled_summary"] = pooled_summary
         per_model = rec.get("per_model", []) or []
 
@@ -647,6 +708,7 @@ def _run_multi_results_analysis(
         output["by_k"][str(int(k))] = {
             "n_models": int(len(per_model)),
             "n_views": int(rec.get("n_views", int(k))),
+            "reference_mode": str((pooled_summary or {}).get("reference_mode", "cyclic")),
             "macro_average": macro_average,
             "pooled_summary": pooled_summary,
             "per_model": per_model,
@@ -800,6 +862,8 @@ def _run_analysis(
     wandb_job_type: str,
     task_name: Optional[str],
     save_margin_samples: bool,
+    use_full_reference: bool,
+    combo_sample_limit: int,
 ) -> None:
     subjects_list = [s.strip() for s in str(subjects or []) if str(s).strip()] if subjects else None
     cache_files = _discover_cache_files(str(cache_dir), subjects_list, int(n_runs))
@@ -904,6 +968,9 @@ def _run_analysis(
             option_ids=option_ids,
             subject=ci.subject,
             run_idx=int(ci.run_idx),
+            use_full_reference=bool(use_full_reference),
+            combo_sample_limit=int(combo_sample_limit),
+            combo_seed=int(seed),
         )
 
         per_record_reports.append({
@@ -928,6 +995,8 @@ def _run_analysis(
         bucket = margin_noise_by_k.setdefault(
             int(k),
             {
+                "reference_mode": str(margin_noise_summary.get("reference_mode", "cyclic")),
+                "n_views": int(margin_noise_summary.get("n_views", k)),
                 "residuals": [],
                 "z_scores": [],
                 "sample_ref_margins": [],
@@ -1048,7 +1117,8 @@ def _run_analysis(
             print(f"{name}: {m:.4f} ± {s:.4f}")
         print("")
 
-    print("==== Cyclic Margin Noise Analysis ====")
+    mode_name = "Full-Permutation" if use_full_reference else "Cyclic"
+    print(f"==== {mode_name} Margin Noise Analysis ====")
     for k in sorted(set(int(r["k"]) for r in per_record_reports)):
         rs = [r for r in per_record_reports if int(r["k"]) == k]
         margin_summaries = [r.get("cyclic_margin_noise", {}) for r in rs if isinstance(r.get("cyclic_margin_noise"), dict)]
@@ -1124,6 +1194,7 @@ def _run_analysis(
     margin_noise_summary_by_k: Dict[str, object] = {}
     for k in sorted(margin_noise_by_k.keys()):
         bucket = margin_noise_by_k[int(k)]
+        n_views = int(bucket.get("n_views", int(k)))
         residuals = np.asarray(bucket.get("residuals", []), dtype=np.float64)
         z_scores = np.asarray(bucket.get("z_scores", []), dtype=np.float64)
         sample_ref = np.asarray(bucket.get("sample_ref_margins", []), dtype=np.float64)
@@ -1140,8 +1211,8 @@ def _run_analysis(
             resid_std = float(np.std(resid_arr)) if resid_arr.size > 0 else float("nan")
             sqrt_target = float(t1_std / math.sqrt(float(t))) if np.isfinite(t1_std) else float("nan")
             finite_target = (
-                float(t1_std * math.sqrt(float(max(0, int(k) - int(t))) / float(max(1, int(t)) * max(1, int(k) - 1))))
-                if np.isfinite(t1_std) and int(k) > 1
+                float(t1_std * math.sqrt(float(max(0, int(n_views) - int(t))) / float(max(1, int(t)) * max(1, int(n_views) - 1))))
+                if np.isfinite(t1_std) and int(n_views) > 1
                 else float("nan")
             )
             t_view_summary.append({
@@ -1156,7 +1227,8 @@ def _run_analysis(
                 "standardized_residual_fit": _gaussian_fit_report(z_arr),
             })
         margin_noise_summary_by_k[str(int(k))] = {
-            "reference_mode": "cyclic",
+            "reference_mode": str(bucket.get("reference_mode", "cyclic")),
+            "n_views": int(n_views),
             "n_residuals": int(residuals.size),
             "n_standardized_residuals": int(z_scores.size),
             "n_samples": int(sample_sigma.size),
@@ -1545,6 +1617,8 @@ def _save_noise_plots(
         if margin_noise_by_k and int(k) in margin_noise_by_k:
             try:
                 margin_bucket = margin_noise_by_k[int(k)]
+                ref_mode = str(margin_bucket.get("reference_mode", "cyclic"))
+                mode_label = "Full-permutation" if ref_mode == "full" else "Cyclic"
                 z_scores = np.asarray(margin_bucket.get("z_scores", []), dtype=np.float64)
                 sample_ref = np.asarray(margin_bucket.get("sample_ref_margins", []), dtype=np.float64)
                 sample_sigma = np.asarray(margin_bucket.get("sample_sigmas", []), dtype=np.float64)
@@ -1562,7 +1636,7 @@ def _save_noise_plots(
                         ax.plot(xs, normal_pdf, color="#d62728", lw=2.0, label="N(0,1)")
                     fit = _gaussian_fit_report(z_scores)
                     ax.set_title(
-                        f"Cyclic margin residuals (standardized) (k={k})\n"
+                        f"{mode_label} margin residuals (standardized) (k={k})\n"
                         f"mean={fit['mean']:.3f}, std={fit['std']:.3f}, KS={fit['ks_to_fit']:.3f}, KL={fit['kl_hist_to_fit']:.3f}"
                     )
                     ax.set_xlabel("z = residual / sigma_i")
@@ -1603,7 +1677,7 @@ def _save_noise_plots(
                     ax = fig.add_subplot(1, 1, 1)
                     ax.scatter(sample_ref, sample_sigma, s=12, alpha=0.22, color="#2ca02c")
                     corr = _safe_corr(sample_ref, sample_sigma)
-                    ax.set_title(f"Sample sigma vs cyclic reference margin (k={k})\nCorr={corr:.3f}")
+                    ax.set_title(f"Sample sigma vs {ref_mode} reference margin (k={k})\nCorr={corr:.3f}")
                     ax.set_xlabel("Cyclic reference margin")
                     ax.set_ylabel("sigma_i")
                     ax.grid(True, alpha=0.25)
@@ -1635,7 +1709,7 @@ def _save_noise_plots(
                         ax.plot(ts, target, "--s", color="#d62728", lw=1.6, ms=4, label="std(T=1) / sqrt(T)")
                         if n_views > 1:
                             ax.plot(ts, finite_target, ":^", color="#2ca02c", lw=1.6, ms=4, label="Finite-view target")
-                        ax.set_title(f"View-count scaling of cyclic residual std (k={k})")
+                        ax.set_title(f"View-count scaling of {ref_mode} residual std (k={k})")
                         ax.set_xlabel("T = #views averaged")
                         ax.set_ylabel("Residual std")
                         ax.grid(True, alpha=0.25)
@@ -1884,6 +1958,10 @@ def main() -> None:
     ap.add_argument("--subset_sizes", type=str, default="1,2,3,4,6,8,12,16,24",
                     help="Comma-separated subset sizes m (number of perms to mix). Sizes > P are ignored.")
     ap.add_argument("--max_perms_corr", type=int, default=24, help="Max permutations for correlation calc (subsample if larger).")
+    ap.add_argument("--full", action="store_true",
+                    help="Use the full-permutation ensemble as pseudo-GT/reference when full permutations are available.")
+    ap.add_argument("--max_t_combinations", type=int, default=2048,
+                    help="Max number of subset combinations sampled per T for margin-noise T-scaling.")
     ap.add_argument("--save_plots", action="store_true", help="Save PNG plots into results_dir (default: off).")
     ap.add_argument("--save_margin_samples", action="store_true",
                     help="Save sample-level cyclic margin residuals/sigma_i jsonl into results_dir.")
@@ -1911,6 +1989,8 @@ def main() -> None:
             max_samples=int(args.max_samples),
             aggregate_out_dir=str(args.aggregate_out_dir),
             save_plots=bool(args.save_plots),
+            use_full_reference=bool(args.full),
+            combo_sample_limit=int(args.max_t_combinations),
         )
         return
 
@@ -1939,6 +2019,8 @@ def main() -> None:
             wandb_job_type=str(args.wandb_job_type),
             task_name=task_name,
             save_margin_samples=bool(args.save_margin_samples),
+            use_full_reference=bool(args.full),
+            combo_sample_limit=int(args.max_t_combinations),
         )
         return
 
@@ -2013,6 +2095,8 @@ def main() -> None:
             wandb_job_type=str(args.wandb_job_type),
             task_name=task_name,
             save_margin_samples=bool(args.save_margin_samples),
+            use_full_reference=bool(args.full),
+            combo_sample_limit=int(args.max_t_combinations),
         )
 
 
