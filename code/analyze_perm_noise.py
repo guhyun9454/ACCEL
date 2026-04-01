@@ -219,6 +219,77 @@ def _summarize_peak_bins(
     return summaries
 
 
+def _summarize_tail_bins(
+    *,
+    bin_edges: Sequence[float],
+    bin_label_counts: Dict[str, object],
+    max_right_edge: float = -1.5,
+    top_n_bins: int = 5,
+    top_n_labels: int = 8,
+) -> Dict[str, object]:
+    edges = list(bin_edges)
+    tail_bins: List[Tuple[int, int, Dict[str, object]]] = []
+    aggregate_counts: Dict[str, int] = {}
+    total_tail = 0
+    for bin_idx_s, counts in (bin_label_counts or {}).items():
+        if not isinstance(counts, dict):
+            continue
+        try:
+            bin_idx = int(bin_idx_s)
+        except Exception:
+            continue
+        if not (0 <= bin_idx < len(edges) - 1):
+            continue
+        right_edge = float(edges[bin_idx + 1])
+        if right_edge > float(max_right_edge):
+            continue
+        total = int(sum(int(v) for v in counts.values()))
+        if total <= 0:
+            continue
+        total_tail += total
+        tail_bins.append((total, bin_idx, counts))
+        for label, cnt in counts.items():
+            label_s = str(label)
+            aggregate_counts[label_s] = int(aggregate_counts.get(label_s, 0)) + int(cnt)
+
+    tail_bins.sort(key=lambda x: (-x[0], x[1]))
+    top_bins = []
+    for total, bin_idx, counts in tail_bins[: int(top_n_bins)]:
+        items = sorted(((str(k), int(v)) for k, v in counts.items()), key=lambda x: (-x[1], x[0]))
+        top_bins.append({
+            "bin_index": int(bin_idx),
+            "range_left": float(edges[int(bin_idx)]),
+            "range_right": float(edges[int(bin_idx) + 1]),
+            "count": int(total),
+            "top_perm_labels": [
+                {
+                    "perm_label": str(label),
+                    "count": int(cnt),
+                    "fraction": float(cnt / total) if total > 0 else float("nan"),
+                }
+                for label, cnt in items[: int(top_n_labels)]
+            ],
+        })
+
+    aggregate_items = sorted(
+        ((str(k), int(v)) for k, v in aggregate_counts.items()),
+        key=lambda x: (-x[1], x[0]),
+    )
+    return {
+        "z_cutoff": float(max_right_edge),
+        "count": int(total_tail),
+        "top_perm_labels": [
+            {
+                "perm_label": str(label),
+                "count": int(cnt),
+                "fraction": float(cnt / total_tail) if total_tail > 0 else float("nan"),
+            }
+            for label, cnt in aggregate_items[: int(top_n_labels)]
+        ],
+        "top_bins": top_bins,
+    }
+
+
 def _analyze_cyclic_margin_noise(
     results: List[dict],
     perm_list: List[Tuple[int, ...]],
@@ -228,6 +299,7 @@ def _analyze_cyclic_margin_noise(
     use_full_reference: bool = False,
     combo_sample_limit: int = 2048,
     combo_seed: int = 0,
+    negative_tail_z_cutoff: float = -1.5,
 ) -> Tuple[Dict[str, object], List[dict], Dict[str, object]]:
     """
     Treat the selected ensemble (cyclic or full) content-space top1/top2 margin as a per-sample reference M_ref.
@@ -441,6 +513,11 @@ def _analyze_cyclic_margin_noise(
             bin_edges=std_bin_edges.tolist(),
             bin_label_counts=standardized_bin_label_counts,
         ),
+        "negative_tail_summary": _summarize_tail_bins(
+            bin_edges=std_bin_edges.tolist(),
+            bin_label_counts=standardized_bin_label_counts,
+            max_right_edge=float(negative_tail_z_cutoff),
+        ),
         "t_view_summary": t_view_summary,
     }
 
@@ -515,7 +592,12 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
     )
 
 
-def _summarize_margin_noise_bucket(bucket: Dict[str, object], n_views: int, reference_mode: str = "cyclic") -> Dict[str, object]:
+def _summarize_margin_noise_bucket(
+    bucket: Dict[str, object],
+    n_views: int,
+    reference_mode: str = "cyclic",
+    negative_tail_z_cutoff: float = -1.5,
+) -> Dict[str, object]:
     residuals = np.asarray(bucket.get("residuals", []), dtype=np.float64)
     z_scores = np.asarray(bucket.get("z_scores", []), dtype=np.float64)
     sample_ref = np.asarray(bucket.get("sample_ref_margins", []), dtype=np.float64)
@@ -566,6 +648,11 @@ def _summarize_margin_noise_bucket(bucket: Dict[str, object], n_views: int, refe
         "peak_bin_summary": _summarize_peak_bins(
             bin_edges=std_bin_edges,
             bin_label_counts=std_bin_label_counts,
+        ),
+        "negative_tail_summary": _summarize_tail_bins(
+            bin_edges=std_bin_edges,
+            bin_label_counts=std_bin_label_counts,
+            max_right_edge=float(negative_tail_z_cutoff),
         ),
         "t_view_summary": t_view_summary,
     }
@@ -715,6 +802,7 @@ def _run_multi_results_analysis(
     save_plots: bool,
     use_full_reference: bool,
     combo_sample_limit: int,
+    negative_tail_z_cutoff: float,
 ) -> None:
     valid_dirs = [str(x) for x in results_dirs if str(x).strip()]
     if not valid_dirs:
@@ -756,6 +844,7 @@ def _run_multi_results_analysis(
                 run_idx=int(ci.run_idx),
                 use_full_reference=bool(use_full_reference),
                 combo_sample_limit=int(combo_sample_limit),
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
             )
             bucket = model_buckets.setdefault(
                 int(k),
@@ -781,6 +870,7 @@ def _run_multi_results_analysis(
                 bucket,
                 n_views=n_views,
                 reference_mode=str(bucket.get("reference_mode", "cyclic")),
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
             )
             combined = combined_by_k.setdefault(
                 int(k),
@@ -820,6 +910,7 @@ def _run_multi_results_analysis(
             rec["pooled_bucket"],
             n_views=int(rec.get("n_views", int(k))),
             reference_mode=str(rec.get("reference_mode", "cyclic")),
+            negative_tail_z_cutoff=float(negative_tail_z_cutoff),
         )
         rec["pooled_summary"] = pooled_summary
         per_model = rec.get("per_model", []) or []
@@ -881,6 +972,30 @@ def _run_multi_results_analysis(
             labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in top_labels) if top_labels else ""
             print(
                 "top standardized bin [{:.2f}, {:.2f}] count={} | top perms: {}".format(
+                    float(top_bin.get("range_left", float("nan"))),
+                    float(top_bin.get("range_right", float("nan"))),
+                    int(top_bin.get("count", 0)),
+                    labels_str,
+                )
+            )
+        neg_tail = (pooled_summary or {}).get("negative_tail_summary", {}) or {}
+        neg_labels = (neg_tail.get("top_perm_labels", []) or [])[:5]
+        if neg_labels:
+            labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_labels)
+            print(
+                "negative tail z<={:.2f} count={} | top perms: {}".format(
+                    float(neg_tail.get("z_cutoff", float("nan"))),
+                    int(neg_tail.get("count", 0)),
+                    labels_str,
+                )
+            )
+        neg_bins = (neg_tail.get("top_bins", []) or [])
+        if neg_bins:
+            top_bin = neg_bins[0]
+            top_labels = (top_bin.get("top_perm_labels", []) or [])[:5]
+            labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in top_labels) if top_labels else ""
+            print(
+                "top negative bin [{:.2f}, {:.2f}] count={} | top perms: {}".format(
                     float(top_bin.get("range_left", float("nan"))),
                     float(top_bin.get("range_right", float("nan"))),
                     int(top_bin.get("count", 0)),
@@ -1017,6 +1132,7 @@ def _run_analysis(
     save_margin_samples: bool,
     use_full_reference: bool,
     combo_sample_limit: int,
+    negative_tail_z_cutoff: float,
 ) -> None:
     subjects_list = [s.strip() for s in str(subjects or []) if str(s).strip()] if subjects else None
     cache_files = _discover_cache_files(str(cache_dir), subjects_list, int(n_runs))
@@ -1124,6 +1240,7 @@ def _run_analysis(
             use_full_reference=bool(use_full_reference),
             combo_sample_limit=int(combo_sample_limit),
             combo_seed=int(seed),
+            negative_tail_z_cutoff=float(negative_tail_z_cutoff),
         )
 
         per_record_reports.append({
@@ -1157,21 +1274,11 @@ def _run_analysis(
                 "sample_base_gaps": [],
                 "t_residuals": {},
                 "t_z_scores": {},
+                "standardized_bin_edges": [],
+                "standardized_bin_label_counts": {},
             },
         )
-        bucket["residuals"].extend(pooled_noise_payload.get("residuals", []))
-        bucket["z_scores"].extend(pooled_noise_payload.get("z_scores", []))
-        bucket["sample_ref_margins"].extend(pooled_noise_payload.get("sample_ref_margins", []))
-        bucket["sample_sigmas"].extend(pooled_noise_payload.get("sample_sigmas", []))
-        bucket["sample_base_gaps"].extend(pooled_noise_payload.get("sample_base_gaps", []))
-        for t, vals in (pooled_noise_payload.get("t_residuals", {}) or {}).items():
-            t_int = int(t)
-            bucket["t_residuals"].setdefault(t_int, [])
-            bucket["t_residuals"][t_int].extend(vals)
-        for t, vals in (pooled_noise_payload.get("t_z_scores", {}) or {}).items():
-            t_int = int(t)
-            bucket["t_z_scores"].setdefault(t_int, [])
-            bucket["t_z_scores"][t_int].extend(vals)
+        _merge_margin_noise_payload_into_bucket(bucket, pooled_noise_payload)
         if save_margin_samples and sample_noise_records:
             margin_noise_sample_records.extend(sample_noise_records)
 
@@ -1323,6 +1430,30 @@ def _run_analysis(
             labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in top_labels) if top_labels else ""
             print(
                 "top standardized bin [{:.2f}, {:.2f}] count={} | top perms: {}".format(
+                    float(top_bin.get("range_left", float("nan"))),
+                    float(top_bin.get("range_right", float("nan"))),
+                    int(top_bin.get("count", 0)),
+                    labels_str,
+                )
+            )
+        neg_tail = next((rec.get("negative_tail_summary", {}) for rec in margin_summaries if rec.get("negative_tail_summary")), {})
+        neg_labels = (neg_tail.get("top_perm_labels", []) or [])[:3]
+        if neg_labels:
+            labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_labels)
+            print(
+                "negative tail z<={:.2f} count={} | top perms: {}".format(
+                    float(neg_tail.get("z_cutoff", float("nan"))),
+                    int(neg_tail.get("count", 0)),
+                    labels_str,
+                )
+            )
+        neg_bins = (neg_tail.get("top_bins", []) or [])
+        if neg_bins:
+            top_bin = neg_bins[0]
+            top_labels = (top_bin.get("top_perm_labels", []) or [])[:3]
+            labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in top_labels) if top_labels else ""
+            print(
+                "top negative bin [{:.2f}, {:.2f}] count={} | top perms: {}".format(
                     float(top_bin.get("range_left", float("nan"))),
                     float(top_bin.get("range_right", float("nan"))),
                     int(top_bin.get("count", 0)),
@@ -2156,6 +2287,8 @@ def main() -> None:
                     help="Use the full-permutation ensemble as pseudo-GT/reference when full permutations are available.")
     ap.add_argument("--max_t_combinations", type=int, default=2048,
                     help="Max number of subset combinations sampled per T for margin-noise T-scaling.")
+    ap.add_argument("--negative_tail_z_cutoff", type=float, default=-1.5,
+                    help="Standardized z cutoff for summarizing adverse left-tail permutations.")
     ap.add_argument("--save_plots", action="store_true", help="Save PNG plots into results_dir (default: off).")
     ap.add_argument("--save_margin_samples", action="store_true",
                     help="Save sample-level cyclic margin residuals/sigma_i jsonl into results_dir.")
@@ -2185,6 +2318,7 @@ def main() -> None:
             save_plots=bool(args.save_plots),
             use_full_reference=bool(args.full),
             combo_sample_limit=int(args.max_t_combinations),
+            negative_tail_z_cutoff=float(args.negative_tail_z_cutoff),
         )
         return
 
@@ -2215,6 +2349,7 @@ def main() -> None:
             save_margin_samples=bool(args.save_margin_samples),
             use_full_reference=bool(args.full),
             combo_sample_limit=int(args.max_t_combinations),
+            negative_tail_z_cutoff=float(args.negative_tail_z_cutoff),
         )
         return
 
@@ -2291,6 +2426,7 @@ def main() -> None:
             save_margin_samples=bool(args.save_margin_samples),
             use_full_reference=bool(args.full),
             combo_sample_limit=int(args.max_t_combinations),
+            negative_tail_z_cutoff=float(args.negative_tail_z_cutoff),
         )
 
 
