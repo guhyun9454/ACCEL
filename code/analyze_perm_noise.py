@@ -93,6 +93,15 @@ def _top2_indices(probs: Sequence[float]) -> Tuple[int, int]:
     return int(vals[0]), int(vals[1])
 
 
+def _perm_label(perm: Sequence[int], k: int) -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if int(k) <= len(alphabet):
+        symbols = alphabet[: int(k)]
+    else:
+        symbols = "".join(str(i) for i in range(int(k)))
+    return "".join(symbols[int(x)] for x in perm)
+
+
 def _safe_corr(x: Sequence[float], y: Sequence[float]) -> float:
     xa = np.asarray(x, dtype=np.float64).ravel()
     ya = np.asarray(y, dtype=np.float64).ravel()
@@ -156,6 +165,60 @@ def _gaussian_fit_report(values: Sequence[float], bins: int = 60) -> Dict[str, f
     return out
 
 
+def _merge_count_maps(dst: Dict[str, object], src: Dict[str, object]) -> None:
+    for key, val in (src or {}).items():
+        key_s = str(key)
+        if isinstance(val, dict):
+            cur = dst.setdefault(key_s, {})
+            if not isinstance(cur, dict):
+                cur = {}
+                dst[key_s] = cur
+            _merge_count_maps(cur, val)
+        else:
+            dst[key_s] = int(dst.get(key_s, 0)) + int(val)
+
+
+def _summarize_peak_bins(
+    *,
+    bin_edges: Sequence[float],
+    bin_label_counts: Dict[str, object],
+    top_n_bins: int = 5,
+    top_n_labels: int = 8,
+) -> List[dict]:
+    summaries: List[dict] = []
+    indexed = []
+    for bin_idx_s, counts in (bin_label_counts or {}).items():
+        if not isinstance(counts, dict):
+            continue
+        total = int(sum(int(v) for v in counts.values()))
+        try:
+            bin_idx = int(bin_idx_s)
+        except Exception:
+            continue
+        indexed.append((total, bin_idx, counts))
+    indexed.sort(key=lambda x: (-x[0], x[1]))
+    edges = list(bin_edges)
+    for total, bin_idx, counts in indexed[: int(top_n_bins)]:
+        if not (0 <= int(bin_idx) < len(edges) - 1):
+            continue
+        items = sorted(((str(k), int(v)) for k, v in counts.items()), key=lambda x: (-x[1], x[0]))
+        summaries.append({
+            "bin_index": int(bin_idx),
+            "range_left": float(edges[int(bin_idx)]),
+            "range_right": float(edges[int(bin_idx) + 1]),
+            "count": int(total),
+            "top_perm_labels": [
+                {
+                    "perm_label": str(label),
+                    "count": int(cnt),
+                    "fraction": float(cnt / total) if total > 0 else float("nan"),
+                }
+                for label, cnt in items[: int(top_n_labels)]
+            ],
+        })
+    return summaries
+
+
 def _analyze_cyclic_margin_noise(
     results: List[dict],
     perm_list: List[Tuple[int, ...]],
@@ -181,6 +244,8 @@ def _analyze_cyclic_margin_noise(
     selected_perm_idxs = list(range(len(perm_list))) if use_full_reference and full_available else list(cyc_idxs)
     reference_mode = "full" if use_full_reference and full_available else "cyclic"
     n_views = len(selected_perm_idxs)
+    selected_perm_labels = [_perm_label(perm_list[idx], k) for idx in selected_perm_idxs]
+    selected_perm_tuples = [tuple(int(x) for x in perm_list[idx]) for idx in selected_perm_idxs]
 
     if n_views <= 0:
         return (
@@ -198,6 +263,8 @@ def _analyze_cyclic_margin_noise(
                 "sample_base_gaps": [],
                 "t_residuals": {},
                 "t_z_scores": {},
+                "standardized_bin_edges": [],
+                "standardized_bin_label_counts": {},
             },
         )
 
@@ -235,6 +302,8 @@ def _analyze_cyclic_margin_noise(
     sample_base_gaps: List[float] = []
     t_residuals: Dict[int, List[float]] = {t: [] for t in range(1, n_views + 1)}
     t_z_scores: Dict[int, List[float]] = {t: [] for t in range(1, n_views + 1)}
+    std_bin_edges = np.linspace(-4.0, 4.0, 81, dtype=np.float64)
+    standardized_bin_label_counts: Dict[str, Dict[str, int]] = {}
 
     eps = 1e-12
 
@@ -277,7 +346,13 @@ def _analyze_cyclic_margin_noise(
         sample_base_gaps.append(base_gap)
 
         if sigma_i > eps:
-            pooled_z_scores.extend([float(x / sigma_i) for x in residuals.tolist()])
+            z_vals = [float(x / sigma_i) for x in residuals.tolist()]
+            pooled_z_scores.extend(z_vals)
+            for z_val, perm_label in zip(z_vals, selected_perm_labels):
+                bin_idx = int(np.digitize(z_val, std_bin_edges) - 1)
+                bin_idx = max(0, min(bin_idx, len(std_bin_edges) - 2))
+                counts = standardized_bin_label_counts.setdefault(str(bin_idx), {})
+                counts[str(perm_label)] = int(counts.get(str(perm_label), 0)) + 1
 
         t_summary: List[dict] = []
         for t, combos in combo_cache.items():
@@ -311,8 +386,12 @@ def _analyze_cyclic_margin_noise(
             "base_gap": float(base_gap),
             "base_margin_on_ref_pair": base_margin_on_ref_pair,
             "sigma_i": sigma_i,
+            "single_view_perm_indices": [int(x) for x in selected_perm_idxs],
+            "single_view_perm_tuples": [list(x) for x in selected_perm_tuples],
+            "single_view_perm_labels": [str(x) for x in selected_perm_labels],
             "single_view_margins": [float(x) for x in single_margins.tolist()],
             "single_view_residuals": [float(x) for x in residuals.tolist()],
+            "single_view_z_scores": [float(x / sigma_i) if sigma_i > eps else float("nan") for x in residuals.tolist()],
             "t_summary": t_summary,
         })
 
@@ -358,6 +437,10 @@ def _analyze_cyclic_margin_noise(
         "corr_base_gap_sigma": _safe_corr(sample_base_gap_arr, sample_sigma_arr),
         "pooled_residual_fit": _gaussian_fit_report(pooled_resid_arr),
         "standardized_residual_fit": _gaussian_fit_report(pooled_z_arr),
+        "peak_bin_summary": _summarize_peak_bins(
+            bin_edges=std_bin_edges.tolist(),
+            bin_label_counts=standardized_bin_label_counts,
+        ),
         "t_view_summary": t_view_summary,
     }
 
@@ -369,6 +452,8 @@ def _analyze_cyclic_margin_noise(
         "sample_base_gaps": [float(x) for x in sample_base_gaps],
         "t_residuals": {int(t): [float(x) for x in vals] for t, vals in t_residuals.items()},
         "t_z_scores": {int(t): [float(x) for x in vals] for t, vals in t_z_scores.items()},
+        "standardized_bin_edges": [float(x) for x in std_bin_edges.tolist()],
+        "standardized_bin_label_counts": standardized_bin_label_counts,
     }
     return summary, sample_records, pooled_payload
 
@@ -405,6 +490,8 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
     bucket.setdefault("sample_base_gaps", [])
     bucket.setdefault("t_residuals", {})
     bucket.setdefault("t_z_scores", {})
+    bucket.setdefault("standardized_bin_edges", [])
+    bucket.setdefault("standardized_bin_label_counts", {})
 
     bucket["residuals"].extend(payload.get("residuals", []))
     bucket["z_scores"].extend(payload.get("z_scores", []))
@@ -420,6 +507,12 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         t_int = int(t)
         bucket["t_z_scores"].setdefault(t_int, [])
         bucket["t_z_scores"][t_int].extend(vals)
+    if payload.get("standardized_bin_edges"):
+        bucket["standardized_bin_edges"] = list(payload.get("standardized_bin_edges", []))
+    _merge_count_maps(
+        bucket.setdefault("standardized_bin_label_counts", {}),
+        payload.get("standardized_bin_label_counts", {}) or {},
+    )
 
 
 def _summarize_margin_noise_bucket(bucket: Dict[str, object], n_views: int, reference_mode: str = "cyclic") -> Dict[str, object]:
@@ -430,6 +523,8 @@ def _summarize_margin_noise_bucket(bucket: Dict[str, object], n_views: int, refe
     sample_base_gap = np.asarray(bucket.get("sample_base_gaps", []), dtype=np.float64)
     t_residuals = bucket.get("t_residuals", {}) or {}
     t_z_scores = bucket.get("t_z_scores", {}) or {}
+    std_bin_edges = bucket.get("standardized_bin_edges", []) or []
+    std_bin_label_counts = bucket.get("standardized_bin_label_counts", {}) or {}
     t1_resid = np.asarray(t_residuals.get(1, []), dtype=np.float64)
     t1_std = float(np.std(t1_resid)) if t1_resid.size > 0 else float("nan")
 
@@ -468,6 +563,10 @@ def _summarize_margin_noise_bucket(bucket: Dict[str, object], n_views: int, refe
         "mean_sample_sigma_i": float(np.mean(sample_sigma)) if sample_sigma.size > 0 else float("nan"),
         "corr_ref_margin_sigma": _safe_corr(sample_ref, sample_sigma),
         "corr_base_gap_sigma": _safe_corr(sample_base_gap, sample_sigma),
+        "peak_bin_summary": _summarize_peak_bins(
+            bin_edges=std_bin_edges,
+            bin_label_counts=std_bin_label_counts,
+        ),
         "t_view_summary": t_view_summary,
     }
 
@@ -490,8 +589,37 @@ def _save_multi_model_margin_plots(
         per_model = rec.get("per_model", []) or []
         ref_mode = str((pooled or {}).get("reference_mode", rec.get("reference_mode", "cyclic")))
         mode_label = "Full-permutation" if ref_mode == "full" else "Cyclic"
+        raw_residuals = np.asarray(rec.get("pooled_bucket", {}).get("residuals", []), dtype=np.float64)
         z_scores = np.asarray(rec.get("pooled_bucket", {}).get("z_scores", []), dtype=np.float64)
         t_residuals = rec.get("pooled_bucket", {}).get("t_residuals", {}) or {}
+
+        if raw_residuals.size > 0:
+            fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
+            ax = fig.add_subplot(1, 1, 1)
+            ax.hist(raw_residuals, bins=60, density=True, alpha=0.68, color="#6baed6", label="All models pooled residual")
+            fit_raw = pooled.get("pooled_residual_fit", {}) or {}
+            mu = float(fit_raw.get("mean", float("nan")))
+            sigma = float(fit_raw.get("std", float("nan")))
+            x_min = float(np.min(raw_residuals))
+            x_max = float(np.max(raw_residuals))
+            if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12 and np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+                xs = np.linspace(x_min, x_max, 400)
+                pdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
+                ax.plot(xs, pdf, color="#d62728", lw=2.0, label="Gaussian fit")
+            ax.set_title(
+                f"Multi-model pooled {ref_mode} residuals (raw) (k={k})\n"
+                f"models={len(per_model)}, KS={float(fit_raw.get('ks_to_fit', float('nan'))):.3f}, "
+                f"KL={float(fit_raw.get('kl_hist_to_fit', float('nan'))):.3f}"
+            )
+            ax.set_xlabel("residual = margin - ref_margin")
+            ax.set_ylabel("Density")
+            ax.grid(True, alpha=0.25)
+            ax.legend(fontsize=8)
+            fig.tight_layout()
+            p = os.path.join(out_dir, f"multi_model_margin_noise_raw_hist_k{k}.png")
+            fig.savefig(p)
+            plt.close(fig)
+            saved.append(p)
 
         if z_scores.size > 0:
             fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
@@ -640,6 +768,8 @@ def _run_multi_results_analysis(
                     "sample_base_gaps": [],
                     "t_residuals": {},
                     "t_z_scores": {},
+                    "standardized_bin_edges": [],
+                    "standardized_bin_label_counts": {},
                 },
             )
             _merge_margin_noise_payload_into_bucket(bucket, payload)
@@ -657,7 +787,17 @@ def _run_multi_results_analysis(
                 {
                     "reference_mode": str(model_summary.get("reference_mode", "cyclic")),
                     "per_model": [],
-                    "pooled_bucket": {"residuals": [], "z_scores": [], "sample_ref_margins": [], "sample_sigmas": [], "sample_base_gaps": [], "t_residuals": {}, "t_z_scores": {}},
+                    "pooled_bucket": {
+                        "residuals": [],
+                        "z_scores": [],
+                        "sample_ref_margins": [],
+                        "sample_sigmas": [],
+                        "sample_base_gaps": [],
+                        "t_residuals": {},
+                        "t_z_scores": {},
+                        "standardized_bin_edges": [],
+                        "standardized_bin_label_counts": {},
+                    },
                     "n_views": n_views,
                 },
             )
@@ -734,6 +874,19 @@ def _run_multi_results_analysis(
                 float(macro_average.get("mean_sigma_i", float("nan"))),
             )
         )
+        peak_info = (pooled_summary or {}).get("peak_bin_summary", []) or []
+        if peak_info:
+            top_bin = peak_info[0]
+            top_labels = top_bin.get("top_perm_labels", [])[:5]
+            labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in top_labels) if top_labels else ""
+            print(
+                "top standardized bin [{:.2f}, {:.2f}] count={} | top perms: {}".format(
+                    float(top_bin.get("range_left", float("nan"))),
+                    float(top_bin.get("range_right", float("nan"))),
+                    int(top_bin.get("count", 0)),
+                    labels_str,
+                )
+            )
         print("")
 
     out_dir = str(aggregate_out_dir).strip() or str(valid_dirs[0])
@@ -1163,6 +1316,19 @@ def _run_analysis(
                 _mean_nested(["standardized_residual_fit", "kl_hist_to_fit"]),
             )
         )
+        peak_info = next((rec.get("peak_bin_summary", []) for rec in margin_summaries if rec.get("peak_bin_summary")), [])
+        if peak_info:
+            top_bin = peak_info[0]
+            top_labels = top_bin.get("top_perm_labels", [])[:3]
+            labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in top_labels) if top_labels else ""
+            print(
+                "top standardized bin [{:.2f}, {:.2f}] count={} | top perms: {}".format(
+                    float(top_bin.get("range_left", float("nan"))),
+                    float(top_bin.get("range_right", float("nan"))),
+                    int(top_bin.get("count", 0)),
+                    labels_str,
+                )
+            )
         first_t_summary = next((rec.get("t_view_summary", []) for rec in margin_summaries if rec.get("t_view_summary")), [])
         if first_t_summary:
             ts = sorted({int(x.get("t")) for x in first_t_summary if isinstance(x, dict) and "t" in x})
@@ -1619,10 +1785,38 @@ def _save_noise_plots(
                 margin_bucket = margin_noise_by_k[int(k)]
                 ref_mode = str(margin_bucket.get("reference_mode", "cyclic"))
                 mode_label = "Full-permutation" if ref_mode == "full" else "Cyclic"
+                raw_residuals = np.asarray(margin_bucket.get("residuals", []), dtype=np.float64)
                 z_scores = np.asarray(margin_bucket.get("z_scores", []), dtype=np.float64)
                 sample_ref = np.asarray(margin_bucket.get("sample_ref_margins", []), dtype=np.float64)
                 sample_sigma = np.asarray(margin_bucket.get("sample_sigmas", []), dtype=np.float64)
                 t_residuals = margin_bucket.get("t_residuals", {}) or {}
+
+                if raw_residuals.size > 0:
+                    fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
+                    ax = fig.add_subplot(1, 1, 1)
+                    ax.hist(raw_residuals, bins=50, density=True, alpha=0.68, color="#6baed6", label="Raw residuals")
+                    fit_raw = _gaussian_fit_report(raw_residuals)
+                    mu = float(fit_raw.get("mean", float("nan")))
+                    sigma = float(fit_raw.get("std", float("nan")))
+                    x_min = float(np.min(raw_residuals))
+                    x_max = float(np.max(raw_residuals))
+                    if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12 and np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+                        xs = np.linspace(x_min, x_max, 400)
+                        pdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
+                        ax.plot(xs, pdf, color="#d62728", lw=2.0, label="Gaussian fit")
+                    ax.set_title(
+                        f"{mode_label} margin residuals (raw) (k={k})\n"
+                        f"mean={fit_raw['mean']:.3f}, std={fit_raw['std']:.3f}, KS={fit_raw['ks_to_fit']:.3f}, KL={fit_raw['kl_hist_to_fit']:.3f}"
+                    )
+                    ax.set_xlabel("residual = margin - ref_margin")
+                    ax.set_ylabel("Density")
+                    ax.grid(True, alpha=0.25)
+                    ax.legend(fontsize=8)
+                    fig.tight_layout()
+                    p = os.path.join(out_dir, f"perm_margin_noise_raw_hist_k{k}.png")
+                    fig.savefig(p)
+                    plt.close(fig)
+                    saved.append(p)
 
                 if z_scores.size > 0:
                     fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
