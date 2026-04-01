@@ -178,6 +178,26 @@ def _merge_count_maps(dst: Dict[str, object], src: Dict[str, object]) -> None:
             dst[key_s] = int(dst.get(key_s, 0)) + int(val)
 
 
+def _make_margin_noise_bucket(with_correctness: bool = False) -> Dict[str, object]:
+    bucket: Dict[str, object] = {
+        "residuals": [],
+        "z_scores": [],
+        "sample_ref_margins": [],
+        "sample_sigmas": [],
+        "sample_base_gaps": [],
+        "t_residuals": {},
+        "t_z_scores": {},
+        "standardized_bin_edges": [],
+        "standardized_bin_label_counts": {},
+    }
+    if with_correctness:
+        bucket["correctness_buckets"] = {
+            "correct": _make_margin_noise_bucket(with_correctness=False),
+            "incorrect": _make_margin_noise_bucket(with_correctness=False),
+        }
+    return bucket
+
+
 def _summarize_peak_bins(
     *,
     bin_edges: Sequence[float],
@@ -327,17 +347,7 @@ def _analyze_cyclic_margin_noise(
                 "n_views": 0,
             },
             [],
-            {
-                "residuals": [],
-                "z_scores": [],
-                "sample_ref_margins": [],
-                "sample_sigmas": [],
-                "sample_base_gaps": [],
-                "t_residuals": {},
-                "t_z_scores": {},
-                "standardized_bin_edges": [],
-                "standardized_bin_label_counts": {},
-            },
+            _make_margin_noise_bucket(with_correctness=True),
         )
 
     def _t_values_for_mode() -> List[int]:
@@ -376,6 +386,10 @@ def _analyze_cyclic_margin_noise(
     t_z_scores: Dict[int, List[float]] = {t: [] for t in range(1, n_views + 1)}
     std_bin_edges = np.linspace(-4.0, 4.0, 81, dtype=np.float64)
     standardized_bin_label_counts: Dict[str, Dict[str, int]] = {}
+    correctness_buckets = {
+        "correct": _make_margin_noise_bucket(with_correctness=False),
+        "incorrect": _make_margin_noise_bucket(with_correctness=False),
+    }
 
     eps = 1e-12
 
@@ -403,6 +417,9 @@ def _analyze_cyclic_margin_noise(
         ref_dist = np.mean(selected_dists_arr, axis=0)
         ref_top1, ref_top2 = _top2_indices(ref_dist)
         ref_margin = float(ref_dist[ref_top1] - ref_dist[ref_top2])
+        ref_pred = str(option_ids[ref_top1]) if 0 <= int(ref_top1) < len(option_ids) else str(ref_top1)
+        ideal_label = str(d.get("ideal"))
+        reference_correct = bool(ref_pred == ideal_label)
 
         single_margins = selected_dists_arr[:, ref_top1] - selected_dists_arr[:, ref_top2]
         residuals = single_margins - ref_margin
@@ -424,6 +441,23 @@ def _analyze_cyclic_margin_noise(
                 bin_idx = int(np.digitize(z_val, std_bin_edges) - 1)
                 bin_idx = max(0, min(bin_idx, len(std_bin_edges) - 2))
                 counts = standardized_bin_label_counts.setdefault(str(bin_idx), {})
+                counts[str(perm_label)] = int(counts.get(str(perm_label), 0)) + 1
+        else:
+            z_vals = []
+
+        corr_bucket = correctness_buckets["correct" if reference_correct else "incorrect"]
+        corr_bucket["residuals"].extend([float(x) for x in residuals.tolist()])
+        corr_bucket["sample_ref_margins"].extend([float(ref_margin)])
+        corr_bucket["sample_sigmas"].extend([float(sigma_i)])
+        corr_bucket["sample_base_gaps"].extend([float(base_gap)])
+        if z_vals:
+            corr_bucket["z_scores"].extend(z_vals)
+            if not corr_bucket.get("standardized_bin_edges"):
+                corr_bucket["standardized_bin_edges"] = [float(x) for x in std_bin_edges.tolist()]
+            for z_val, perm_label in zip(z_vals, selected_perm_labels):
+                bin_idx = int(np.digitize(z_val, std_bin_edges) - 1)
+                bin_idx = max(0, min(bin_idx, len(std_bin_edges) - 2))
+                counts = corr_bucket.setdefault("standardized_bin_label_counts", {}).setdefault(str(bin_idx), {})
                 counts[str(perm_label)] = int(counts.get(str(perm_label), 0)) + 1
 
         t_summary: List[dict] = []
@@ -449,9 +483,11 @@ def _analyze_cyclic_margin_noise(
             "subject": str(subject),
             "run": int(run_idx),
             "idx": int(d.get("idx", -1)),
-            "ideal": str(d.get("ideal")),
+            "ideal": ideal_label,
             "reference_mode": reference_mode,
             "n_views": int(n_views),
+            "ref_pred": ref_pred,
+            "reference_correct": bool(reference_correct),
             "ref_top1": int(ref_top1),
             "ref_top2": int(ref_top2),
             "ref_margin": ref_margin,
@@ -518,6 +554,15 @@ def _analyze_cyclic_margin_noise(
             bin_label_counts=standardized_bin_label_counts,
             max_right_edge=float(negative_tail_z_cutoff),
         ),
+        "correctness_split": {
+            name: _summarize_margin_noise_bucket(
+                bucket,
+                n_views=n_views,
+                reference_mode=reference_mode,
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+            )
+            for name, bucket in correctness_buckets.items()
+        },
         "t_view_summary": t_view_summary,
     }
 
@@ -531,6 +576,7 @@ def _analyze_cyclic_margin_noise(
         "t_z_scores": {int(t): [float(x) for x in vals] for t, vals in t_z_scores.items()},
         "standardized_bin_edges": [float(x) for x in std_bin_edges.tolist()],
         "standardized_bin_label_counts": standardized_bin_label_counts,
+        "correctness_buckets": correctness_buckets,
     }
     return summary, sample_records, pooled_payload
 
@@ -590,6 +636,12 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         bucket.setdefault("standardized_bin_label_counts", {}),
         payload.get("standardized_bin_label_counts", {}) or {},
     )
+    payload_corr = payload.get("correctness_buckets", {}) or {}
+    if payload_corr:
+        dst_corr = bucket.setdefault("correctness_buckets", {})
+        for key, sub_payload in payload_corr.items():
+            sub_bucket = dst_corr.setdefault(str(key), _make_margin_noise_bucket(with_correctness=False))
+            _merge_margin_noise_payload_into_bucket(sub_bucket, sub_payload or {})
 
 
 def _summarize_margin_noise_bucket(
@@ -654,6 +706,16 @@ def _summarize_margin_noise_bucket(
             bin_label_counts=std_bin_label_counts,
             max_right_edge=float(negative_tail_z_cutoff),
         ),
+        "correctness_split": {
+            str(name): _summarize_margin_noise_bucket(
+                sub_bucket,
+                n_views=int(n_views),
+                reference_mode=str(reference_mode),
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+            )
+            for name, sub_bucket in (bucket.get("correctness_buckets", {}) or {}).items()
+            if isinstance(sub_bucket, dict)
+        },
         "t_view_summary": t_view_summary,
     }
 
@@ -850,15 +912,7 @@ def _run_multi_results_analysis(
                 int(k),
                 {
                     "reference_mode": str(summary.get("reference_mode", "cyclic")),
-                    "residuals": [],
-                    "z_scores": [],
-                    "sample_ref_margins": [],
-                    "sample_sigmas": [],
-                    "sample_base_gaps": [],
-                    "t_residuals": {},
-                    "t_z_scores": {},
-                    "standardized_bin_edges": [],
-                    "standardized_bin_label_counts": {},
+                    **_make_margin_noise_bucket(with_correctness=True),
                 },
             )
             _merge_margin_noise_payload_into_bucket(bucket, payload)
@@ -878,15 +932,7 @@ def _run_multi_results_analysis(
                     "reference_mode": str(model_summary.get("reference_mode", "cyclic")),
                     "per_model": [],
                     "pooled_bucket": {
-                        "residuals": [],
-                        "z_scores": [],
-                        "sample_ref_margins": [],
-                        "sample_sigmas": [],
-                        "sample_base_gaps": [],
-                        "t_residuals": {},
-                        "t_z_scores": {},
-                        "standardized_bin_edges": [],
-                        "standardized_bin_label_counts": {},
+                        **_make_margin_noise_bucket(with_correctness=True),
                     },
                     "n_views": n_views,
                 },
@@ -1000,6 +1046,22 @@ def _run_multi_results_analysis(
                     float(top_bin.get("range_right", float("nan"))),
                     int(top_bin.get("count", 0)),
                     labels_str,
+                )
+            )
+        corr_split = (pooled_summary or {}).get("correctness_split", {}) or {}
+        for split_name in ("correct", "incorrect"):
+            split = corr_split.get(split_name, {}) or {}
+            if not split:
+                continue
+            neg = (split.get("negative_tail_summary", {}) or {})
+            fit = (split.get("standardized_residual_fit", {}) or {})
+            print(
+                "{} refs: n_samples={}, mean_sigma_i={:.4f}, z_skew={:.4f}, left_tail_count={}".format(
+                    split_name,
+                    int(split.get("n_samples", 0)),
+                    float(split.get("mean_sample_sigma_i", float("nan"))),
+                    float(fit.get("skew", float("nan"))),
+                    int(neg.get("count", 0)),
                 )
             )
         print("")
@@ -1267,15 +1329,7 @@ def _run_analysis(
             {
                 "reference_mode": str(margin_noise_summary.get("reference_mode", "cyclic")),
                 "n_views": int(margin_noise_summary.get("n_views", k)),
-                "residuals": [],
-                "z_scores": [],
-                "sample_ref_margins": [],
-                "sample_sigmas": [],
-                "sample_base_gaps": [],
-                "t_residuals": {},
-                "t_z_scores": {},
-                "standardized_bin_edges": [],
-                "standardized_bin_label_counts": {},
+                **_make_margin_noise_bucket(with_correctness=True),
             },
         )
         _merge_margin_noise_payload_into_bucket(bucket, pooled_noise_payload)
@@ -1460,6 +1514,22 @@ def _run_analysis(
                     labels_str,
                 )
             )
+        corr_split = next((rec.get("correctness_split", {}) for rec in margin_summaries if rec.get("correctness_split")), {})
+        for split_name in ("correct", "incorrect"):
+            split = (corr_split.get(split_name, {}) or {})
+            if not split:
+                continue
+            neg = (split.get("negative_tail_summary", {}) or {})
+            fit = (split.get("standardized_residual_fit", {}) or {})
+            print(
+                "{} refs: n_samples={}, mean_sigma_i={:.4f}, z_skew={:.4f}, left_tail_count={}".format(
+                    split_name,
+                    int(split.get("n_samples", 0)),
+                    float(split.get("mean_sample_sigma_i", float("nan"))),
+                    float(fit.get("skew", float("nan"))),
+                    int(neg.get("count", 0)),
+                )
+            )
         first_t_summary = next((rec.get("t_view_summary", []) for rec in margin_summaries if rec.get("t_view_summary")), [])
         if first_t_summary:
             ts = sorted({int(x.get("t")) for x in first_t_summary if isinstance(x, dict) and "t" in x})
@@ -1491,52 +1561,12 @@ def _run_analysis(
     margin_noise_summary_by_k: Dict[str, object] = {}
     for k in sorted(margin_noise_by_k.keys()):
         bucket = margin_noise_by_k[int(k)]
-        n_views = int(bucket.get("n_views", int(k)))
-        residuals = np.asarray(bucket.get("residuals", []), dtype=np.float64)
-        z_scores = np.asarray(bucket.get("z_scores", []), dtype=np.float64)
-        sample_ref = np.asarray(bucket.get("sample_ref_margins", []), dtype=np.float64)
-        sample_sigma = np.asarray(bucket.get("sample_sigmas", []), dtype=np.float64)
-        sample_base_gap = np.asarray(bucket.get("sample_base_gaps", []), dtype=np.float64)
-        t_residuals = bucket.get("t_residuals", {}) or {}
-        t_z_scores = bucket.get("t_z_scores", {}) or {}
-        t1_resid = np.asarray(t_residuals.get(1, []), dtype=np.float64)
-        t1_std = float(np.std(t1_resid)) if t1_resid.size > 0 else float("nan")
-        t_view_summary = []
-        for t in sorted(int(x) for x in t_residuals.keys()):
-            resid_arr = np.asarray(t_residuals.get(t, []), dtype=np.float64)
-            z_arr = np.asarray(t_z_scores.get(t, []), dtype=np.float64)
-            resid_std = float(np.std(resid_arr)) if resid_arr.size > 0 else float("nan")
-            sqrt_target = float(t1_std / math.sqrt(float(t))) if np.isfinite(t1_std) else float("nan")
-            finite_target = (
-                float(t1_std * math.sqrt(float(max(0, int(n_views) - int(t))) / float(max(1, int(t)) * max(1, int(n_views) - 1))))
-                if np.isfinite(t1_std) and int(n_views) > 1
-                else float("nan")
-            )
-            t_view_summary.append({
-                "t": int(t),
-                "n_residuals": int(resid_arr.size),
-                "resid_std": resid_std,
-                "resid_abs_mean": float(np.mean(np.abs(resid_arr))) if resid_arr.size > 0 else float("nan"),
-                "sqrt_target_from_t1": sqrt_target,
-                "finite_view_target_from_t1": finite_target,
-                "ratio_to_t1_sqrt": float(resid_std / sqrt_target) if np.isfinite(resid_std) and np.isfinite(sqrt_target) and sqrt_target > 1e-12 else float("nan"),
-                "ratio_to_finite_view_target": float(resid_std / finite_target) if np.isfinite(resid_std) and np.isfinite(finite_target) and finite_target > 1e-12 else float("nan"),
-                "standardized_residual_fit": _gaussian_fit_report(z_arr),
-            })
-        margin_noise_summary_by_k[str(int(k))] = {
-            "reference_mode": str(bucket.get("reference_mode", "cyclic")),
-            "n_views": int(n_views),
-            "n_residuals": int(residuals.size),
-            "n_standardized_residuals": int(z_scores.size),
-            "n_samples": int(sample_sigma.size),
-            "pooled_residual_fit": _gaussian_fit_report(residuals),
-            "standardized_residual_fit": _gaussian_fit_report(z_scores),
-            "mean_sample_ref_margin": float(np.mean(sample_ref)) if sample_ref.size > 0 else float("nan"),
-            "mean_sample_sigma_i": float(np.mean(sample_sigma)) if sample_sigma.size > 0 else float("nan"),
-            "corr_ref_margin_sigma": _safe_corr(sample_ref, sample_sigma),
-            "corr_base_gap_sigma": _safe_corr(sample_base_gap, sample_sigma),
-            "t_view_summary": t_view_summary,
-        }
+        margin_noise_summary_by_k[str(int(k))] = _summarize_margin_noise_bucket(
+            bucket,
+            n_views=int(bucket.get("n_views", int(k))),
+            reference_mode=str(bucket.get("reference_mode", "cyclic")),
+            negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+        )
 
     margin_noise_summary_path = os.path.join(str(cache_dir), "perm_margin_noise_summary.json")
     with open(margin_noise_summary_path, "w", encoding="utf-8") as f:
