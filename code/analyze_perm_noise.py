@@ -312,6 +312,28 @@ def _summarize_accuracy_by_group(
     return items[: int(top_n)]
 
 
+def _summarize_rate_by_group(
+    numerator_counts: Dict[str, object],
+    denominator_counts: Dict[str, object],
+    top_n: int = 8,
+) -> List[dict]:
+    items = []
+    labels = set(str(k) for k in (denominator_counts or {}).keys()) | set(str(k) for k in (numerator_counts or {}).keys())
+    for label in labels:
+        denom = int((denominator_counts or {}).get(str(label), 0))
+        numer = int((numerator_counts or {}).get(str(label), 0))
+        if denom <= 0:
+            continue
+        items.append({
+            "label": str(label),
+            "numerator": int(numer),
+            "denominator": int(denom),
+            "rate": float(numer / denom),
+        })
+    items.sort(key=lambda x: (-x["denominator"], x["label"]))
+    return items[: int(top_n)]
+
+
 def _summarize_tail_bins(
     *,
     bin_edges: Sequence[float],
@@ -730,6 +752,10 @@ def _analyze_cyclic_margin_noise(
         "negative_tail_correct_slot_counts": _summarize_flat_counts(negative_tail_correct_slot_counts),
         "negative_tail_by_ideal": _summarize_grouped_counts(negative_tail_perm_by_ideal),
         "negative_tail_by_correct_slot": _summarize_grouped_counts(negative_tail_perm_by_correct_slot),
+        "negative_tail_slot_incidence": _summarize_rate_by_group(
+            negative_tail_correct_slot_total_counts,
+            correct_slot_total_counts,
+        ),
         "correct_slot_accuracy": _summarize_accuracy_by_group(
             correct_slot_total_counts,
             correct_slot_correct_counts,
@@ -989,6 +1015,10 @@ def _summarize_margin_noise_bucket(
         "negative_tail_correct_slot_counts": _summarize_flat_counts(bucket.get("negative_tail_correct_slot_counts", {}) or {}),
         "negative_tail_by_ideal": _summarize_grouped_counts(bucket.get("negative_tail_perm_by_ideal", {}) or {}),
         "negative_tail_by_correct_slot": _summarize_grouped_counts(bucket.get("negative_tail_perm_by_correct_slot", {}) or {}),
+        "negative_tail_slot_incidence": _summarize_rate_by_group(
+            bucket.get("negative_tail_correct_slot_total_counts", {}) or {},
+            bucket.get("correct_slot_total_counts", {}) or {},
+        ),
         "correct_slot_accuracy": _summarize_accuracy_by_group(
             bucket.get("correct_slot_total_counts", {}) or {},
             bucket.get("correct_slot_correct_counts", {}) or {},
@@ -1372,6 +1402,9 @@ def _run_multi_results_analysis(
         neg_slots = (pooled_summary or {}).get("negative_tail_correct_slot_counts", []) or []
         if neg_slots:
             print("negative tail by correct slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_slots[:5]))
+        tail_slot_inc = (pooled_summary or {}).get("negative_tail_slot_incidence", []) or []
+        if tail_slot_inc:
+            print("negative-tail slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in tail_slot_inc[:5]))
         slot_acc = (pooled_summary or {}).get("correct_slot_accuracy", []) or []
         if slot_acc:
             print("correct slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in slot_acc[:5]))
@@ -1877,6 +1910,9 @@ def _run_analysis(
         neg_slots = next((rec.get("negative_tail_correct_slot_counts", []) for rec in margin_summaries if rec.get("negative_tail_correct_slot_counts")), [])
         if neg_slots:
             print("negative tail by correct slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_slots[:3]))
+        tail_slot_inc = next((rec.get("negative_tail_slot_incidence", []) for rec in margin_summaries if rec.get("negative_tail_slot_incidence")), [])
+        if tail_slot_inc:
+            print("negative-tail slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in tail_slot_inc[:3]))
         slot_acc = next((rec.get("correct_slot_accuracy", []) for rec in margin_summaries if rec.get("correct_slot_accuracy")), [])
         if slot_acc:
             print("correct slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in slot_acc[:3]))
