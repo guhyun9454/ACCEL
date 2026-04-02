@@ -193,6 +193,8 @@ def _make_margin_noise_bucket(with_correctness: bool = False) -> Dict[str, objec
         "negative_tail_correct_slot_counts": {},
         "negative_tail_perm_by_ideal": {},
         "negative_tail_perm_by_correct_slot": {},
+        "negative_tail_top1_slot_counts": {},
+        "negative_tail_perm_by_top1_slot": {},
         "standardized_bin_total_counts": {},
         "standardized_bin_correct_counts": {},
         "entry_total_count": 0,
@@ -203,6 +205,10 @@ def _make_margin_noise_bucket(with_correctness: bool = False) -> Dict[str, objec
         "correct_slot_correct_counts": {},
         "negative_tail_correct_slot_total_counts": {},
         "negative_tail_correct_slot_correct_counts": {},
+        "top1_slot_total_counts": {},
+        "top1_slot_correct_counts": {},
+        "negative_tail_top1_slot_total_counts": {},
+        "negative_tail_top1_slot_correct_counts": {},
     }
     if with_correctness:
         bucket["correctness_buckets"] = {
@@ -485,6 +491,8 @@ def _analyze_cyclic_margin_noise(
     negative_tail_correct_slot_counts: Dict[str, int] = {}
     negative_tail_perm_by_ideal: Dict[str, Dict[str, int]] = {}
     negative_tail_perm_by_correct_slot: Dict[str, Dict[str, int]] = {}
+    negative_tail_top1_slot_counts: Dict[str, int] = {}
+    negative_tail_perm_by_top1_slot: Dict[str, Dict[str, int]] = {}
     standardized_bin_total_counts: Dict[str, int] = {}
     standardized_bin_correct_counts: Dict[str, int] = {}
     entry_total_count = 0
@@ -495,6 +503,10 @@ def _analyze_cyclic_margin_noise(
     correct_slot_correct_counts: Dict[str, int] = {}
     negative_tail_correct_slot_total_counts: Dict[str, int] = {}
     negative_tail_correct_slot_correct_counts: Dict[str, int] = {}
+    top1_slot_total_counts: Dict[str, int] = {}
+    top1_slot_correct_counts: Dict[str, int] = {}
+    negative_tail_top1_slot_total_counts: Dict[str, int] = {}
+    negative_tail_top1_slot_correct_counts: Dict[str, int] = {}
     correctness_buckets = {
         "correct": _make_margin_noise_bucket(with_correctness=False),
         "incorrect": _make_margin_noise_bucket(with_correctness=False),
@@ -540,6 +552,11 @@ def _analyze_cyclic_margin_noise(
         ]
         single_view_preds = [str(option_ids[int(np.argmax(dist))]) for dist in selected_dists_arr]
         single_view_correct_flags = [bool(pred == ideal_label) for pred in single_view_preds]
+        single_view_top1_slot_indices = [int(np.argmax(np.asarray(probs_seq[perm_idx], dtype=np.float64))) for perm_idx in selected_perm_idxs]
+        single_view_top1_slot_labels = [
+            str(option_ids[idx]) if 0 <= int(idx) < len(option_ids) else "UNK"
+            for idx in single_view_top1_slot_indices
+        ]
 
         single_margins = selected_dists_arr[:, ref_top1] - selected_dists_arr[:, ref_top2]
         residuals = single_margins - ref_margin
@@ -570,7 +587,11 @@ def _analyze_cyclic_margin_noise(
         corr_bucket["sample_ref_margins"].extend([float(ref_margin)])
         corr_bucket["sample_sigmas"].extend([float(sigma_i)])
         corr_bucket["sample_base_gaps"].extend([float(base_gap)])
-        for correct_slot_label, is_correct in zip(single_view_correct_slot_labels, single_view_correct_flags):
+        for correct_slot_label, top1_slot_label, is_correct in zip(
+            single_view_correct_slot_labels,
+            single_view_top1_slot_labels,
+            single_view_correct_flags,
+        ):
             entry_total_count += 1
             if is_correct:
                 entry_correct_count += 1
@@ -587,12 +608,26 @@ def _analyze_cyclic_margin_noise(
                 corr_bucket.setdefault("correct_slot_correct_counts", {})[str(correct_slot_label)] = int(
                     corr_bucket.setdefault("correct_slot_correct_counts", {}).get(str(correct_slot_label), 0)
                 ) + 1
+            top1_slot_total_counts[str(top1_slot_label)] = int(top1_slot_total_counts.get(str(top1_slot_label), 0)) + 1
+            if is_correct:
+                top1_slot_correct_counts[str(top1_slot_label)] = int(top1_slot_correct_counts.get(str(top1_slot_label), 0)) + 1
+            corr_bucket.setdefault("top1_slot_total_counts", {})[str(top1_slot_label)] = int(
+                corr_bucket.setdefault("top1_slot_total_counts", {}).get(str(top1_slot_label), 0)
+            ) + 1
+            if is_correct:
+                corr_bucket.setdefault("top1_slot_correct_counts", {})[str(top1_slot_label)] = int(
+                    corr_bucket.setdefault("top1_slot_correct_counts", {}).get(str(top1_slot_label), 0)
+                ) + 1
         if z_vals:
             corr_bucket["z_scores"].extend(z_vals)
             if not corr_bucket.get("standardized_bin_edges"):
                 corr_bucket["standardized_bin_edges"] = [float(x) for x in std_bin_edges.tolist()]
-            for z_val, perm_label, correct_slot_label, is_correct in zip(
-                z_vals, selected_perm_labels, single_view_correct_slot_labels, single_view_correct_flags
+            for z_val, perm_label, correct_slot_label, top1_slot_label, is_correct in zip(
+                z_vals,
+                selected_perm_labels,
+                single_view_correct_slot_labels,
+                single_view_top1_slot_labels,
+                single_view_correct_flags,
             ):
                 bin_idx = int(np.digitize(z_val, std_bin_edges) - 1)
                 bin_idx = max(0, min(bin_idx, len(std_bin_edges) - 2))
@@ -616,16 +651,28 @@ def _analyze_cyclic_margin_noise(
                     negative_tail_correct_slot_counts[str(correct_slot_label)] = int(
                         negative_tail_correct_slot_counts.get(str(correct_slot_label), 0)
                     ) + 1
+                    negative_tail_top1_slot_counts[str(top1_slot_label)] = int(
+                        negative_tail_top1_slot_counts.get(str(top1_slot_label), 0)
+                    ) + 1
                     ideal_perm_counts_all = negative_tail_perm_by_ideal.setdefault(str(ideal_label), {})
                     ideal_perm_counts_all[str(perm_label)] = int(ideal_perm_counts_all.get(str(perm_label), 0)) + 1
                     slot_perm_counts_all = negative_tail_perm_by_correct_slot.setdefault(str(correct_slot_label), {})
                     slot_perm_counts_all[str(perm_label)] = int(slot_perm_counts_all.get(str(perm_label), 0)) + 1
+                    top1_slot_perm_counts_all = negative_tail_perm_by_top1_slot.setdefault(str(top1_slot_label), {})
+                    top1_slot_perm_counts_all[str(perm_label)] = int(top1_slot_perm_counts_all.get(str(perm_label), 0)) + 1
                     negative_tail_correct_slot_total_counts[str(correct_slot_label)] = int(
                         negative_tail_correct_slot_total_counts.get(str(correct_slot_label), 0)
                     ) + 1
                     if is_correct:
                         negative_tail_correct_slot_correct_counts[str(correct_slot_label)] = int(
                             negative_tail_correct_slot_correct_counts.get(str(correct_slot_label), 0)
+                        ) + 1
+                    negative_tail_top1_slot_total_counts[str(top1_slot_label)] = int(
+                        negative_tail_top1_slot_total_counts.get(str(top1_slot_label), 0)
+                    ) + 1
+                    if is_correct:
+                        negative_tail_top1_slot_correct_counts[str(top1_slot_label)] = int(
+                            negative_tail_top1_slot_correct_counts.get(str(top1_slot_label), 0)
                         ) + 1
 
                     corr_bucket.setdefault("negative_tail_ideal_counts", {})[str(ideal_label)] = int(
@@ -634,6 +681,9 @@ def _analyze_cyclic_margin_noise(
                     corr_bucket.setdefault("negative_tail_correct_slot_counts", {})[str(correct_slot_label)] = int(
                         corr_bucket.setdefault("negative_tail_correct_slot_counts", {}).get(str(correct_slot_label), 0)
                     ) + 1
+                    corr_bucket.setdefault("negative_tail_top1_slot_counts", {})[str(top1_slot_label)] = int(
+                        corr_bucket.setdefault("negative_tail_top1_slot_counts", {}).get(str(top1_slot_label), 0)
+                    ) + 1
                     corr_bucket["negative_tail_total_count"] = int(corr_bucket.get("negative_tail_total_count", 0)) + 1
                     if is_correct:
                         corr_bucket["negative_tail_correct_count"] = int(corr_bucket.get("negative_tail_correct_count", 0)) + 1
@@ -641,12 +691,21 @@ def _analyze_cyclic_margin_noise(
                     ideal_perm_counts[str(perm_label)] = int(ideal_perm_counts.get(str(perm_label), 0)) + 1
                     slot_perm_counts = corr_bucket.setdefault("negative_tail_perm_by_correct_slot", {}).setdefault(str(correct_slot_label), {})
                     slot_perm_counts[str(perm_label)] = int(slot_perm_counts.get(str(perm_label), 0)) + 1
+                    top1_slot_perm_counts = corr_bucket.setdefault("negative_tail_perm_by_top1_slot", {}).setdefault(str(top1_slot_label), {})
+                    top1_slot_perm_counts[str(perm_label)] = int(top1_slot_perm_counts.get(str(perm_label), 0)) + 1
                     corr_bucket.setdefault("negative_tail_correct_slot_total_counts", {})[str(correct_slot_label)] = int(
                         corr_bucket.setdefault("negative_tail_correct_slot_total_counts", {}).get(str(correct_slot_label), 0)
                     ) + 1
                     if is_correct:
                         corr_bucket.setdefault("negative_tail_correct_slot_correct_counts", {})[str(correct_slot_label)] = int(
                             corr_bucket.setdefault("negative_tail_correct_slot_correct_counts", {}).get(str(correct_slot_label), 0)
+                        ) + 1
+                    corr_bucket.setdefault("negative_tail_top1_slot_total_counts", {})[str(top1_slot_label)] = int(
+                        corr_bucket.setdefault("negative_tail_top1_slot_total_counts", {}).get(str(top1_slot_label), 0)
+                    ) + 1
+                    if is_correct:
+                        corr_bucket.setdefault("negative_tail_top1_slot_correct_counts", {})[str(top1_slot_label)] = int(
+                            corr_bucket.setdefault("negative_tail_top1_slot_correct_counts", {}).get(str(top1_slot_label), 0)
                         ) + 1
 
         t_summary: List[dict] = []
@@ -689,6 +748,8 @@ def _analyze_cyclic_margin_noise(
             "single_view_perm_labels": [str(x) for x in selected_perm_labels],
             "single_view_correct_slot_indices": [int(x) for x in single_view_correct_slot_indices],
             "single_view_correct_slot_labels": [str(x) for x in single_view_correct_slot_labels],
+            "single_view_top1_slot_indices": [int(x) for x in single_view_top1_slot_indices],
+            "single_view_top1_slot_labels": [str(x) for x in single_view_top1_slot_labels],
             "single_view_preds": [str(x) for x in single_view_preds],
             "single_view_correct_flags": [bool(x) for x in single_view_correct_flags],
             "single_view_margins": [float(x) for x in single_margins.tolist()],
@@ -752,9 +813,15 @@ def _analyze_cyclic_margin_noise(
         "negative_tail_correct_slot_counts": _summarize_flat_counts(negative_tail_correct_slot_counts),
         "negative_tail_by_ideal": _summarize_grouped_counts(negative_tail_perm_by_ideal),
         "negative_tail_by_correct_slot": _summarize_grouped_counts(negative_tail_perm_by_correct_slot),
+        "negative_tail_top1_slot_counts": _summarize_flat_counts(negative_tail_top1_slot_counts),
+        "negative_tail_by_top1_slot": _summarize_grouped_counts(negative_tail_perm_by_top1_slot),
         "negative_tail_slot_incidence": _summarize_rate_by_group(
             negative_tail_correct_slot_total_counts,
             correct_slot_total_counts,
+        ),
+        "negative_tail_top1_slot_incidence": _summarize_rate_by_group(
+            negative_tail_top1_slot_total_counts,
+            top1_slot_total_counts,
         ),
         "correct_slot_accuracy": _summarize_accuracy_by_group(
             correct_slot_total_counts,
@@ -763,6 +830,14 @@ def _analyze_cyclic_margin_noise(
         "negative_tail_correct_slot_accuracy": _summarize_accuracy_by_group(
             negative_tail_correct_slot_total_counts,
             negative_tail_correct_slot_correct_counts,
+        ),
+        "top1_slot_accuracy": _summarize_accuracy_by_group(
+            top1_slot_total_counts,
+            top1_slot_correct_counts,
+        ),
+        "negative_tail_top1_slot_accuracy": _summarize_accuracy_by_group(
+            negative_tail_top1_slot_total_counts,
+            negative_tail_top1_slot_correct_counts,
         ),
         "correctness_split": {
             name: _summarize_margin_noise_bucket(
@@ -790,6 +865,8 @@ def _analyze_cyclic_margin_noise(
         "negative_tail_correct_slot_counts": negative_tail_correct_slot_counts,
         "negative_tail_perm_by_ideal": negative_tail_perm_by_ideal,
         "negative_tail_perm_by_correct_slot": negative_tail_perm_by_correct_slot,
+        "negative_tail_top1_slot_counts": negative_tail_top1_slot_counts,
+        "negative_tail_perm_by_top1_slot": negative_tail_perm_by_top1_slot,
         "standardized_bin_total_counts": standardized_bin_total_counts,
         "standardized_bin_correct_counts": standardized_bin_correct_counts,
         "entry_total_count": int(entry_total_count),
@@ -800,6 +877,10 @@ def _analyze_cyclic_margin_noise(
         "correct_slot_correct_counts": correct_slot_correct_counts,
         "negative_tail_correct_slot_total_counts": negative_tail_correct_slot_total_counts,
         "negative_tail_correct_slot_correct_counts": negative_tail_correct_slot_correct_counts,
+        "top1_slot_total_counts": top1_slot_total_counts,
+        "top1_slot_correct_counts": top1_slot_correct_counts,
+        "negative_tail_top1_slot_total_counts": negative_tail_top1_slot_total_counts,
+        "negative_tail_top1_slot_correct_counts": negative_tail_top1_slot_correct_counts,
         "correctness_buckets": correctness_buckets,
     }
     return summary, sample_records, pooled_payload
@@ -877,6 +958,14 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         payload.get("negative_tail_perm_by_correct_slot", {}) or {},
     )
     _merge_count_maps(
+        bucket.setdefault("negative_tail_top1_slot_counts", {}),
+        payload.get("negative_tail_top1_slot_counts", {}) or {},
+    )
+    _merge_count_maps(
+        bucket.setdefault("negative_tail_perm_by_top1_slot", {}),
+        payload.get("negative_tail_perm_by_top1_slot", {}) or {},
+    )
+    _merge_count_maps(
         bucket.setdefault("standardized_bin_total_counts", {}),
         payload.get("standardized_bin_total_counts", {}) or {},
     )
@@ -903,6 +992,22 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
     _merge_count_maps(
         bucket.setdefault("negative_tail_correct_slot_correct_counts", {}),
         payload.get("negative_tail_correct_slot_correct_counts", {}) or {},
+    )
+    _merge_count_maps(
+        bucket.setdefault("top1_slot_total_counts", {}),
+        payload.get("top1_slot_total_counts", {}) or {},
+    )
+    _merge_count_maps(
+        bucket.setdefault("top1_slot_correct_counts", {}),
+        payload.get("top1_slot_correct_counts", {}) or {},
+    )
+    _merge_count_maps(
+        bucket.setdefault("negative_tail_top1_slot_total_counts", {}),
+        payload.get("negative_tail_top1_slot_total_counts", {}) or {},
+    )
+    _merge_count_maps(
+        bucket.setdefault("negative_tail_top1_slot_correct_counts", {}),
+        payload.get("negative_tail_top1_slot_correct_counts", {}) or {},
     )
     payload_corr = payload.get("correctness_buckets", {}) or {}
     if payload_corr:
@@ -1015,9 +1120,15 @@ def _summarize_margin_noise_bucket(
         "negative_tail_correct_slot_counts": _summarize_flat_counts(bucket.get("negative_tail_correct_slot_counts", {}) or {}),
         "negative_tail_by_ideal": _summarize_grouped_counts(bucket.get("negative_tail_perm_by_ideal", {}) or {}),
         "negative_tail_by_correct_slot": _summarize_grouped_counts(bucket.get("negative_tail_perm_by_correct_slot", {}) or {}),
+        "negative_tail_top1_slot_counts": _summarize_flat_counts(bucket.get("negative_tail_top1_slot_counts", {}) or {}),
+        "negative_tail_by_top1_slot": _summarize_grouped_counts(bucket.get("negative_tail_perm_by_top1_slot", {}) or {}),
         "negative_tail_slot_incidence": _summarize_rate_by_group(
             bucket.get("negative_tail_correct_slot_total_counts", {}) or {},
             bucket.get("correct_slot_total_counts", {}) or {},
+        ),
+        "negative_tail_top1_slot_incidence": _summarize_rate_by_group(
+            bucket.get("negative_tail_top1_slot_total_counts", {}) or {},
+            bucket.get("top1_slot_total_counts", {}) or {},
         ),
         "correct_slot_accuracy": _summarize_accuracy_by_group(
             bucket.get("correct_slot_total_counts", {}) or {},
@@ -1026,6 +1137,14 @@ def _summarize_margin_noise_bucket(
         "negative_tail_correct_slot_accuracy": _summarize_accuracy_by_group(
             bucket.get("negative_tail_correct_slot_total_counts", {}) or {},
             bucket.get("negative_tail_correct_slot_correct_counts", {}) or {},
+        ),
+        "top1_slot_accuracy": _summarize_accuracy_by_group(
+            bucket.get("top1_slot_total_counts", {}) or {},
+            bucket.get("top1_slot_correct_counts", {}) or {},
+        ),
+        "negative_tail_top1_slot_accuracy": _summarize_accuracy_by_group(
+            bucket.get("negative_tail_top1_slot_total_counts", {}) or {},
+            bucket.get("negative_tail_top1_slot_correct_counts", {}) or {},
         ),
         "correctness_split": {
             str(name): _summarize_margin_noise_bucket(
@@ -1411,6 +1530,18 @@ def _run_multi_results_analysis(
         tail_slot_acc = (pooled_summary or {}).get("negative_tail_correct_slot_accuracy", []) or []
         if tail_slot_acc:
             print("negative-tail slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in tail_slot_acc[:5]))
+        neg_top1_slots = (pooled_summary or {}).get("negative_tail_top1_slot_counts", []) or []
+        if neg_top1_slots:
+            print("negative tail by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top1_slots[:5]))
+        tail_top1_inc = (pooled_summary or {}).get("negative_tail_top1_slot_incidence", []) or []
+        if tail_top1_inc:
+            print("negative-tail top1-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in tail_top1_inc[:5]))
+        top1_acc = (pooled_summary or {}).get("top1_slot_accuracy", []) or []
+        if top1_acc:
+            print("top1-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in top1_acc[:5]))
+        tail_top1_acc = (pooled_summary or {}).get("negative_tail_top1_slot_accuracy", []) or []
+        if tail_top1_acc:
+            print("negative-tail top1-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in tail_top1_acc[:5]))
         corr_split = (pooled_summary or {}).get("correctness_split", {}) or {}
         for split_name in ("correct", "incorrect"):
             split = corr_split.get(split_name, {}) or {}
@@ -1919,6 +2050,18 @@ def _run_analysis(
         tail_slot_acc = next((rec.get("negative_tail_correct_slot_accuracy", []) for rec in margin_summaries if rec.get("negative_tail_correct_slot_accuracy")), [])
         if tail_slot_acc:
             print("negative-tail slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in tail_slot_acc[:3]))
+        neg_top1_slots = next((rec.get("negative_tail_top1_slot_counts", []) for rec in margin_summaries if rec.get("negative_tail_top1_slot_counts")), [])
+        if neg_top1_slots:
+            print("negative tail by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top1_slots[:3]))
+        tail_top1_inc = next((rec.get("negative_tail_top1_slot_incidence", []) for rec in margin_summaries if rec.get("negative_tail_top1_slot_incidence")), [])
+        if tail_top1_inc:
+            print("negative-tail top1-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in tail_top1_inc[:3]))
+        top1_acc = next((rec.get("top1_slot_accuracy", []) for rec in margin_summaries if rec.get("top1_slot_accuracy")), [])
+        if top1_acc:
+            print("top1-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in top1_acc[:3]))
+        tail_top1_acc = next((rec.get("negative_tail_top1_slot_accuracy", []) for rec in margin_summaries if rec.get("negative_tail_top1_slot_accuracy")), [])
+        if tail_top1_acc:
+            print("negative-tail top1-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in tail_top1_acc[:3]))
         corr_split = next((rec.get("correctness_split", {}) for rec in margin_summaries if rec.get("correctness_split")), {})
         for split_name in ("correct", "incorrect"):
             split = (corr_split.get(split_name, {}) or {})
