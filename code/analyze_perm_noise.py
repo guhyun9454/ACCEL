@@ -193,6 +193,12 @@ def _make_margin_noise_bucket(with_correctness: bool = False) -> Dict[str, objec
         "negative_tail_correct_slot_counts": {},
         "negative_tail_perm_by_ideal": {},
         "negative_tail_perm_by_correct_slot": {},
+        "standardized_bin_total_counts": {},
+        "standardized_bin_correct_counts": {},
+        "entry_total_count": 0,
+        "entry_correct_count": 0,
+        "negative_tail_total_count": 0,
+        "negative_tail_correct_count": 0,
         "correct_slot_total_counts": {},
         "correct_slot_correct_counts": {},
         "negative_tail_correct_slot_total_counts": {},
@@ -457,6 +463,12 @@ def _analyze_cyclic_margin_noise(
     negative_tail_correct_slot_counts: Dict[str, int] = {}
     negative_tail_perm_by_ideal: Dict[str, Dict[str, int]] = {}
     negative_tail_perm_by_correct_slot: Dict[str, Dict[str, int]] = {}
+    standardized_bin_total_counts: Dict[str, int] = {}
+    standardized_bin_correct_counts: Dict[str, int] = {}
+    entry_total_count = 0
+    entry_correct_count = 0
+    negative_tail_total_count = 0
+    negative_tail_correct_count = 0
     correct_slot_total_counts: Dict[str, int] = {}
     correct_slot_correct_counts: Dict[str, int] = {}
     negative_tail_correct_slot_total_counts: Dict[str, int] = {}
@@ -537,6 +549,12 @@ def _analyze_cyclic_margin_noise(
         corr_bucket["sample_sigmas"].extend([float(sigma_i)])
         corr_bucket["sample_base_gaps"].extend([float(base_gap)])
         for correct_slot_label, is_correct in zip(single_view_correct_slot_labels, single_view_correct_flags):
+            entry_total_count += 1
+            if is_correct:
+                entry_correct_count += 1
+            corr_bucket["entry_total_count"] = int(corr_bucket.get("entry_total_count", 0)) + 1
+            if is_correct:
+                corr_bucket["entry_correct_count"] = int(corr_bucket.get("entry_correct_count", 0)) + 1
             correct_slot_total_counts[str(correct_slot_label)] = int(correct_slot_total_counts.get(str(correct_slot_label), 0)) + 1
             if is_correct:
                 correct_slot_correct_counts[str(correct_slot_label)] = int(correct_slot_correct_counts.get(str(correct_slot_label), 0)) + 1
@@ -556,9 +574,22 @@ def _analyze_cyclic_margin_noise(
             ):
                 bin_idx = int(np.digitize(z_val, std_bin_edges) - 1)
                 bin_idx = max(0, min(bin_idx, len(std_bin_edges) - 2))
+                standardized_bin_total_counts[str(bin_idx)] = int(standardized_bin_total_counts.get(str(bin_idx), 0)) + 1
+                if is_correct:
+                    standardized_bin_correct_counts[str(bin_idx)] = int(standardized_bin_correct_counts.get(str(bin_idx), 0)) + 1
                 counts = corr_bucket.setdefault("standardized_bin_label_counts", {}).setdefault(str(bin_idx), {})
                 counts[str(perm_label)] = int(counts.get(str(perm_label), 0)) + 1
+                corr_bucket.setdefault("standardized_bin_total_counts", {})[str(bin_idx)] = int(
+                    corr_bucket.setdefault("standardized_bin_total_counts", {}).get(str(bin_idx), 0)
+                ) + 1
+                if is_correct:
+                    corr_bucket.setdefault("standardized_bin_correct_counts", {})[str(bin_idx)] = int(
+                        corr_bucket.setdefault("standardized_bin_correct_counts", {}).get(str(bin_idx), 0)
+                    ) + 1
                 if float(z_val) <= float(negative_tail_z_cutoff):
+                    negative_tail_total_count += 1
+                    if is_correct:
+                        negative_tail_correct_count += 1
                     negative_tail_ideal_counts[str(ideal_label)] = int(negative_tail_ideal_counts.get(str(ideal_label), 0)) + 1
                     negative_tail_correct_slot_counts[str(correct_slot_label)] = int(
                         negative_tail_correct_slot_counts.get(str(correct_slot_label), 0)
@@ -581,6 +612,9 @@ def _analyze_cyclic_margin_noise(
                     corr_bucket.setdefault("negative_tail_correct_slot_counts", {})[str(correct_slot_label)] = int(
                         corr_bucket.setdefault("negative_tail_correct_slot_counts", {}).get(str(correct_slot_label), 0)
                     ) + 1
+                    corr_bucket["negative_tail_total_count"] = int(corr_bucket.get("negative_tail_total_count", 0)) + 1
+                    if is_correct:
+                        corr_bucket["negative_tail_correct_count"] = int(corr_bucket.get("negative_tail_correct_count", 0)) + 1
                     ideal_perm_counts = corr_bucket.setdefault("negative_tail_perm_by_ideal", {}).setdefault(str(ideal_label), {})
                     ideal_perm_counts[str(perm_label)] = int(ideal_perm_counts.get(str(perm_label), 0)) + 1
                     slot_perm_counts = corr_bucket.setdefault("negative_tail_perm_by_correct_slot", {}).setdefault(str(correct_slot_label), {})
@@ -730,6 +764,12 @@ def _analyze_cyclic_margin_noise(
         "negative_tail_correct_slot_counts": negative_tail_correct_slot_counts,
         "negative_tail_perm_by_ideal": negative_tail_perm_by_ideal,
         "negative_tail_perm_by_correct_slot": negative_tail_perm_by_correct_slot,
+        "standardized_bin_total_counts": standardized_bin_total_counts,
+        "standardized_bin_correct_counts": standardized_bin_correct_counts,
+        "entry_total_count": int(entry_total_count),
+        "entry_correct_count": int(entry_correct_count),
+        "negative_tail_total_count": int(negative_tail_total_count),
+        "negative_tail_correct_count": int(negative_tail_correct_count),
         "correct_slot_total_counts": correct_slot_total_counts,
         "correct_slot_correct_counts": correct_slot_correct_counts,
         "negative_tail_correct_slot_total_counts": negative_tail_correct_slot_total_counts,
@@ -811,6 +851,18 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         payload.get("negative_tail_perm_by_correct_slot", {}) or {},
     )
     _merge_count_maps(
+        bucket.setdefault("standardized_bin_total_counts", {}),
+        payload.get("standardized_bin_total_counts", {}) or {},
+    )
+    _merge_count_maps(
+        bucket.setdefault("standardized_bin_correct_counts", {}),
+        payload.get("standardized_bin_correct_counts", {}) or {},
+    )
+    bucket["entry_total_count"] = int(bucket.get("entry_total_count", 0)) + int(payload.get("entry_total_count", 0))
+    bucket["entry_correct_count"] = int(bucket.get("entry_correct_count", 0)) + int(payload.get("entry_correct_count", 0))
+    bucket["negative_tail_total_count"] = int(bucket.get("negative_tail_total_count", 0)) + int(payload.get("negative_tail_total_count", 0))
+    bucket["negative_tail_correct_count"] = int(bucket.get("negative_tail_correct_count", 0)) + int(payload.get("negative_tail_correct_count", 0))
+    _merge_count_maps(
         bucket.setdefault("correct_slot_total_counts", {}),
         payload.get("correct_slot_total_counts", {}) or {},
     )
@@ -849,8 +901,28 @@ def _summarize_margin_noise_bucket(
     t_z_scores = bucket.get("t_z_scores", {}) or {}
     std_bin_edges = bucket.get("standardized_bin_edges", []) or []
     std_bin_label_counts = bucket.get("standardized_bin_label_counts", {}) or {}
+    std_bin_total_counts = bucket.get("standardized_bin_total_counts", {}) or {}
+    std_bin_correct_counts = bucket.get("standardized_bin_correct_counts", {}) or {}
     t1_resid = np.asarray(t_residuals.get(1, []), dtype=np.float64)
     t1_std = float(np.std(t1_resid)) if t1_resid.size > 0 else float("nan")
+    peak_bin_summary = _summarize_peak_bins(
+        bin_edges=std_bin_edges,
+        bin_label_counts=std_bin_label_counts,
+    )
+    top_bin_accuracy = {}
+    if peak_bin_summary:
+        top_bin = peak_bin_summary[0]
+        bin_idx = int(top_bin.get("bin_index", -1))
+        total = int(std_bin_total_counts.get(str(bin_idx), 0))
+        correct = int(std_bin_correct_counts.get(str(bin_idx), 0))
+        top_bin_accuracy = {
+            "bin_index": int(bin_idx),
+            "range_left": float(top_bin.get("range_left", float("nan"))),
+            "range_right": float(top_bin.get("range_right", float("nan"))),
+            "count": int(total),
+            "correct": int(correct),
+            "accuracy": float(correct / total) if total > 0 else float("nan"),
+        }
 
     t_view_summary = []
     for t in sorted(int(x) for x in t_residuals.keys()):
@@ -883,14 +955,31 @@ def _summarize_margin_noise_bucket(
         "n_samples": int(sample_sigma.size),
         "pooled_residual_fit": _gaussian_fit_report(residuals),
         "standardized_residual_fit": _gaussian_fit_report(z_scores),
+        "entry_accuracy": {
+            "count": int(bucket.get("entry_total_count", 0)),
+            "correct": int(bucket.get("entry_correct_count", 0)),
+            "accuracy": (
+                float(int(bucket.get("entry_correct_count", 0)) / int(bucket.get("entry_total_count", 0)))
+                if int(bucket.get("entry_total_count", 0)) > 0
+                else float("nan")
+            ),
+        },
+        "negative_tail_accuracy": {
+            "z_cutoff": float(negative_tail_z_cutoff),
+            "count": int(bucket.get("negative_tail_total_count", 0)),
+            "correct": int(bucket.get("negative_tail_correct_count", 0)),
+            "accuracy": (
+                float(int(bucket.get("negative_tail_correct_count", 0)) / int(bucket.get("negative_tail_total_count", 0)))
+                if int(bucket.get("negative_tail_total_count", 0)) > 0
+                else float("nan")
+            ),
+        },
+        "top_standardized_bin_accuracy": top_bin_accuracy,
         "mean_sample_ref_margin": float(np.mean(sample_ref)) if sample_ref.size > 0 else float("nan"),
         "mean_sample_sigma_i": float(np.mean(sample_sigma)) if sample_sigma.size > 0 else float("nan"),
         "corr_ref_margin_sigma": _safe_corr(sample_ref, sample_sigma),
         "corr_base_gap_sigma": _safe_corr(sample_base_gap, sample_sigma),
-        "peak_bin_summary": _summarize_peak_bins(
-            bin_edges=std_bin_edges,
-            bin_label_counts=std_bin_label_counts,
-        ),
+        "peak_bin_summary": peak_bin_summary,
         "negative_tail_summary": _summarize_tail_bins(
             bin_edges=std_bin_edges,
             bin_label_counts=std_bin_label_counts,
@@ -1226,6 +1315,15 @@ def _run_multi_results_analysis(
                     labels_str,
                 )
             )
+        top_bin_acc = (pooled_summary or {}).get("top_standardized_bin_accuracy", {}) or {}
+        if top_bin_acc:
+            print(
+                "top standardized bin accuracy: {:.4f} ({}/{})".format(
+                    float(top_bin_acc.get("accuracy", float("nan"))),
+                    int(top_bin_acc.get("correct", 0)),
+                    int(top_bin_acc.get("count", 0)),
+                )
+            )
         neg_tail = (pooled_summary or {}).get("negative_tail_summary", {}) or {}
         neg_labels = (neg_tail.get("top_perm_labels", []) or [])[:5]
         if neg_labels:
@@ -1235,6 +1333,24 @@ def _run_multi_results_analysis(
                     float(neg_tail.get("z_cutoff", float("nan"))),
                     int(neg_tail.get("count", 0)),
                     labels_str,
+                )
+            )
+        neg_tail_acc = (pooled_summary or {}).get("negative_tail_accuracy", {}) or {}
+        if neg_tail_acc:
+            print(
+                "negative tail accuracy: {:.4f} ({}/{})".format(
+                    float(neg_tail_acc.get("accuracy", float("nan"))),
+                    int(neg_tail_acc.get("correct", 0)),
+                    int(neg_tail_acc.get("count", 0)),
+                )
+            )
+        entry_acc = (pooled_summary or {}).get("entry_accuracy", {}) or {}
+        if entry_acc:
+            print(
+                "overall view accuracy: {:.4f} ({}/{})".format(
+                    float(entry_acc.get("accuracy", float("nan"))),
+                    int(entry_acc.get("correct", 0)),
+                    int(entry_acc.get("count", 0)),
                 )
             )
         neg_bins = (neg_tail.get("top_bins", []) or [])
@@ -1704,6 +1820,15 @@ def _run_analysis(
                     labels_str,
                 )
             )
+        top_bin_acc = next((rec.get("top_standardized_bin_accuracy", {}) for rec in margin_summaries if rec.get("top_standardized_bin_accuracy")), {})
+        if top_bin_acc:
+            print(
+                "top standardized bin accuracy: {:.4f} ({}/{})".format(
+                    float(top_bin_acc.get("accuracy", float("nan"))),
+                    int(top_bin_acc.get("correct", 0)),
+                    int(top_bin_acc.get("count", 0)),
+                )
+            )
         neg_tail = next((rec.get("negative_tail_summary", {}) for rec in margin_summaries if rec.get("negative_tail_summary")), {})
         neg_labels = (neg_tail.get("top_perm_labels", []) or [])[:3]
         if neg_labels:
@@ -1713,6 +1838,24 @@ def _run_analysis(
                     float(neg_tail.get("z_cutoff", float("nan"))),
                     int(neg_tail.get("count", 0)),
                     labels_str,
+                )
+            )
+        neg_tail_acc = next((rec.get("negative_tail_accuracy", {}) for rec in margin_summaries if rec.get("negative_tail_accuracy")), {})
+        if neg_tail_acc:
+            print(
+                "negative tail accuracy: {:.4f} ({}/{})".format(
+                    float(neg_tail_acc.get("accuracy", float("nan"))),
+                    int(neg_tail_acc.get("correct", 0)),
+                    int(neg_tail_acc.get("count", 0)),
+                )
+            )
+        entry_acc = next((rec.get("entry_accuracy", {}) for rec in margin_summaries if rec.get("entry_accuracy")), {})
+        if entry_acc:
+            print(
+                "overall view accuracy: {:.4f} ({}/{})".format(
+                    float(entry_acc.get("accuracy", float("nan"))),
+                    int(entry_acc.get("correct", 0)),
+                    int(entry_acc.get("count", 0)),
                 )
             )
         neg_bins = (neg_tail.get("top_bins", []) or [])
