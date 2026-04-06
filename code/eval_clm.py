@@ -1570,6 +1570,7 @@ def _compute_curves_for_one_percentile(
     mean_conf: np.ndarray,
     flip_trigger: np.ndarray,
     probe2_correct: np.ndarray,
+    top1_lastslot_mean_conf: np.ndarray,
     top1_lastslot_probe_needed: np.ndarray,
     top1_lastslot_correct: np.ndarray,
     perc_value: float,
@@ -1702,6 +1703,7 @@ def _compute_curves_for_one_percentile(
     )
     _, _, lastslot_stats = _run_online_top1_last_slot_policy_with_stats(
         default_conf=default_conf,
+        mean_conf=top1_lastslot_mean_conf,
         target_probe_needed=top1_lastslot_probe_needed,
         base_correct=base_correct_list,
         lastslot_correct=top1_lastslot_correct,
@@ -1713,6 +1715,7 @@ def _compute_curves_for_one_percentile(
     )
     c_lastslot, a_lastslot = _run_online_top1_last_slot_policy(
         default_conf=default_conf,
+        mean_conf=top1_lastslot_mean_conf,
         target_probe_needed=top1_lastslot_probe_needed,
         base_correct=base_correct_list,
         lastslot_correct=top1_lastslot_correct,
@@ -1804,7 +1807,7 @@ def _compute_curves_for_one_percentile(
                 default_conf, flip_trigger, base_pred_idx, cyclic_pred_idx, probe2_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids
             )
             _, _, preds_lastslot = _run_online_top1_last_slot_policy_with_preds(
-                default_conf, top1_lastslot_probe_needed, base_pred_idx, top1_lastslot_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids, cyclic_pred_idx
+                default_conf, top1_lastslot_mean_conf, top1_lastslot_probe_needed, base_pred_idx, top1_lastslot_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids, cyclic_pred_idx
             )
             _, _, preds_avg = _run_online_avggap_policy_with_preds(
                 default_conf, mean_conf, base_pred_idx, cyclic_pred_idx, probe2_pred_idx, labels_idx, k, perc_value, perc_value, 0, forced_cyclic_ids
@@ -2360,6 +2363,7 @@ def main():
                         mean_gap_list = []         # gap(mean(base,probe)) (content-space)
                         flip_trigger_mask = []     # pred_base != pred_probe (content-space)
                         probe2_correct_list = []   # correctness of argmax(mean_probs)
+                        top1_lastslot_mean_gap_list = []
                         top1_lastslot_probe_needed_list = []
                         top1_lastslot_correct_list = []
                         top1_lastslot_pred_idx_list = []
@@ -2420,6 +2424,8 @@ def main():
                             probe2_correct_list.append(pred2 == ideals[i])
 
                             lastslot_mean_probs = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_lastslot, dtype=np.float64)) / 2.0
+                            vals_lastslot_mean = np.sort(lastslot_mean_probs)[::-1]
+                            top1_lastslot_mean_gap_list.append(float(vals_lastslot_mean[0] - vals_lastslot_mean[1]) if len(vals_lastslot_mean) > 1 else 0.0)
                             pred_lastslot = option_ids[int(np.argmax(lastslot_mean_probs))]
                             top1_lastslot_pred_idx_list.append(int(np.argmax(lastslot_mean_probs)))
                             top1_lastslot_correct_list.append(pred_lastslot == ideals[i])
@@ -2428,6 +2434,7 @@ def main():
                         mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
                         arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
                         arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
+                        arr_top1_lastslot_mean_conf = np.asarray(top1_lastslot_mean_gap_list, dtype=np.float64)
                         arr_top1_lastslot_probe_needed = np.asarray(top1_lastslot_probe_needed_list, dtype=bool)
                         arr_top1_lastslot_correct = np.asarray(top1_lastslot_correct_list, dtype=bool)
                         cyclic_gap_mean = np.asarray(cyclic_gap_mean_list, dtype=np.float64)
@@ -2513,6 +2520,7 @@ def main():
                                     full_correct_list=full_correct_list if full_enabled else [],
                                     default_conf=default_conf, mean_conf=mean_conf, flip_trigger=arr_flip_trigger,
                                     probe2_correct=arr_probe2_correct,
+                                    top1_lastslot_mean_conf=arr_top1_lastslot_mean_conf,
                                     top1_lastslot_probe_needed=arr_top1_lastslot_probe_needed,
                                     top1_lastslot_correct=arr_top1_lastslot_correct,
                                     perc_value=perc, full_enabled=bool(full_enabled),
@@ -2541,12 +2549,12 @@ def main():
                                         return out
                                     def _get_static_pt_top1last(th1_p):
                                         c, a, st = _run_online_top1_last_slot_policy_with_stats(
-                                            default_conf, arr_top1_lastslot_probe_needed, base_correct_list,
+                                            default_conf, arr_top1_lastslot_mean_conf, arr_top1_lastslot_probe_needed, base_correct_list,
                                             arr_top1_lastslot_correct, k, th1_p, 0, None, cyclic_correct_list)
                                         out = {'cost': c, 'acc': a, 'label': TOP1LAST_OURS_LABEL, 'marker': 'P', 'color': 'gray'}
                                         try:
                                             _, _, preds = _run_online_top1_last_slot_policy_with_preds(
-                                                default_conf, arr_top1_lastslot_probe_needed, base_pred_idx_list,
+                                                default_conf, arr_top1_lastslot_mean_conf, arr_top1_lastslot_probe_needed, base_pred_idx_list,
                                                 top1_lastslot_pred_idx_list, labels_idx_for_curves, k, th1_p, 0, None, cyclic_pred_idx_list)
                                             out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
                                             out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
@@ -2599,6 +2607,7 @@ def main():
                                 mean_gap_list_pr = []
                                 flip_trigger_mask_pr = []
                                 probe2_correct_list_pr = []
+                                top1_lastslot_mean_gap_list_pr = []
                                 top1_lastslot_probe_needed_list_pr = []
                                 top1_lastslot_correct_list_pr = []
                                 base_pred_idx_list_pr = []
@@ -2680,6 +2689,8 @@ def main():
                                     probe2_correct_list_pr.append(pred2 == ideals[i])
 
                                     lastslot_mean_probs_pr = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_lastslot_pr, dtype=np.float64)) / 2.0
+                                    vals_lastslot_mean_pr = np.sort(lastslot_mean_probs_pr)[::-1]
+                                    top1_lastslot_mean_gap_list_pr.append(float(vals_lastslot_mean_pr[0] - vals_lastslot_mean_pr[1]) if len(vals_lastslot_mean_pr) > 1 else 0.0)
                                     pred_lastslot_pr = option_ids[int(np.argmax(lastslot_mean_probs_pr))]
                                     top1_lastslot_pred_idx_list_pr.append(int(np.argmax(lastslot_mean_probs_pr)))
                                     top1_lastslot_correct_list_pr.append(pred_lastslot_pr == ideals[i])
@@ -2688,6 +2699,7 @@ def main():
                                 mean_conf_pr = np.asarray(mean_gap_list_pr, dtype=np.float64)
                                 arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
                                 arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
+                                arr_top1_lastslot_mean_conf_pr = np.asarray(top1_lastslot_mean_gap_list_pr, dtype=np.float64)
                                 arr_top1_lastslot_probe_needed_pr = np.asarray(top1_lastslot_probe_needed_list_pr, dtype=bool)
                                 arr_top1_lastslot_correct_pr = np.asarray(top1_lastslot_correct_list_pr, dtype=bool)
                                 cyclic_gap_mean_pr = np.asarray(cyclic_gap_mean_list_pr, dtype=np.float64)
@@ -2708,6 +2720,7 @@ def main():
                                 cyclic_for_dp = cyclic_correct_list if pride_alpha >= 100 else cyclic_correct_list_pr
                                 base_pred_dp = base_pred_idx_list if pride_alpha >= 100 else base_pred_idx_list_pr
                                 cyclic_pred_dp = cyclic_pred_idx_list if pride_alpha >= 100 else cyclic_pred_idx_list_pr
+                                top1_lastslot_mean_conf_dp = arr_top1_lastslot_mean_conf if pride_alpha >= 100 else arr_top1_lastslot_mean_conf_pr
                                 top1_lastslot_correct_dp = arr_top1_lastslot_correct if pride_alpha >= 100 else arr_top1_lastslot_correct_pr
                                 top1_lastslot_probe_needed_dp = arr_top1_lastslot_probe_needed if pride_alpha >= 100 else arr_top1_lastslot_probe_needed_pr
                                 top1_lastslot_pred_dp = top1_lastslot_pred_idx_list if pride_alpha >= 100 else top1_lastslot_pred_idx_list_pr
@@ -2718,6 +2731,7 @@ def main():
                                     full_correct_list=full_correct_list_pr if full_enabled else [],
                                     default_conf=default_conf_pr, mean_conf=mean_conf_pr,
                                     flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
+                                    top1_lastslot_mean_conf=top1_lastslot_mean_conf_dp,
                                     top1_lastslot_probe_needed=top1_lastslot_probe_needed_dp,
                                     top1_lastslot_correct=top1_lastslot_correct_dp,
                                     perc_value=float(pride_alpha), full_enabled=bool(full_enabled),
@@ -2763,12 +2777,12 @@ def main():
                                         return out
                                     def _get_static_pt_top1last_pride(th1_p):
                                         c, a, st = _run_online_top1_last_slot_policy_with_stats(
-                                            default_conf_pr, top1_lastslot_probe_needed_dp, bc_use,
+                                            default_conf_pr, top1_lastslot_mean_conf_dp, top1_lastslot_probe_needed_dp, bc_use,
                                             top1_lastslot_correct_dp, k, th1_p, 0, prefix_ids_set, cc_use)
                                         out = {'cost': c, 'acc': a, 'label': TOP1LAST_OURS_LABEL, 'th1_p': th1_p, 'marker': 'P', 'color': 'gray'}
                                         try:
                                             _, _, preds = _run_online_top1_last_slot_policy_with_preds(
-                                                default_conf_pr, top1_lastslot_probe_needed_dp, bp_use,
+                                                default_conf_pr, top1_lastslot_mean_conf_dp, top1_lastslot_probe_needed_dp, bp_use,
                                                 top1_lastslot_pred_dp, labels_idx_for_curves, k, th1_p, 0, prefix_ids_set, cp_use)
                                             out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
                                             out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
