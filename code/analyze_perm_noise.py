@@ -197,6 +197,11 @@ def _make_margin_noise_bucket(with_correctness: bool = False) -> Dict[str, objec
         "negative_tail_perm_by_top1_slot": {},
         "negative_tail_top2_slot_counts": {},
         "negative_tail_perm_by_top2_slot": {},
+        "ideal_total_counts": {},
+        "ideal_correct_counts": {},
+        "negative_tail_ideal_correct_counts": {},
+        "standardized_bin_ideal_total_counts": {},
+        "standardized_bin_ideal_correct_counts": {},
         "standardized_bin_total_counts": {},
         "standardized_bin_correct_counts": {},
         "entry_total_count": 0,
@@ -205,16 +210,28 @@ def _make_margin_noise_bucket(with_correctness: bool = False) -> Dict[str, objec
         "negative_tail_correct_count": 0,
         "correct_slot_total_counts": {},
         "correct_slot_correct_counts": {},
+        "correct_slot_ideal_total_counts": {},
+        "correct_slot_ideal_correct_counts": {},
         "negative_tail_correct_slot_total_counts": {},
         "negative_tail_correct_slot_correct_counts": {},
         "top1_slot_total_counts": {},
         "top1_slot_correct_counts": {},
+        "top1_slot_ideal_total_counts": {},
+        "top1_slot_ideal_correct_counts": {},
         "negative_tail_top1_slot_total_counts": {},
         "negative_tail_top1_slot_correct_counts": {},
         "top2_slot_total_counts": {},
         "top2_slot_correct_counts": {},
+        "top2_slot_ideal_total_counts": {},
+        "top2_slot_ideal_correct_counts": {},
         "negative_tail_top2_slot_total_counts": {},
         "negative_tail_top2_slot_correct_counts": {},
+        "negative_tail_correct_slot_ideal_total_counts": {},
+        "negative_tail_correct_slot_ideal_correct_counts": {},
+        "negative_tail_top1_slot_ideal_total_counts": {},
+        "negative_tail_top1_slot_ideal_correct_counts": {},
+        "negative_tail_top2_slot_ideal_total_counts": {},
+        "negative_tail_top2_slot_ideal_correct_counts": {},
     }
     if with_correctness:
         bucket["correctness_buckets"] = {
@@ -324,6 +341,34 @@ def _summarize_accuracy_by_group(
     return items[: int(top_n)]
 
 
+def _summarize_accuracy_rstd_by_group(
+    total_counts: Dict[str, object],
+    correct_counts: Dict[str, object],
+    ideal_total_counts: Dict[str, object],
+    ideal_correct_counts: Dict[str, object],
+    top_n: int = 8,
+) -> List[dict]:
+    items = []
+    labels = set(str(k) for k in (total_counts or {}).keys())
+    for label in labels:
+        total_i = int((total_counts or {}).get(str(label), 0))
+        if total_i <= 0:
+            continue
+        correct_i = int((correct_counts or {}).get(str(label), 0))
+        items.append({
+            "label": str(label),
+            "count": int(total_i),
+            "correct": int(correct_i),
+            "accuracy": float(correct_i / total_i),
+            "recall_std": _recall_std_from_counts(
+                (ideal_total_counts or {}).get(str(label), {}) if isinstance((ideal_total_counts or {}).get(str(label), {}), dict) else {},
+                (ideal_correct_counts or {}).get(str(label), {}) if isinstance((ideal_correct_counts or {}).get(str(label), {}), dict) else {},
+            ),
+        })
+    items.sort(key=lambda x: (-x["count"], x["label"]))
+    return items[: int(top_n)]
+
+
 def _summarize_rate_by_group(
     numerator_counts: Dict[str, object],
     denominator_counts: Dict[str, object],
@@ -344,6 +389,23 @@ def _summarize_rate_by_group(
         })
     items.sort(key=lambda x: (-x["denominator"], x["label"]))
     return items[: int(top_n)]
+
+
+def _recall_std_from_counts(
+    total_counts: Dict[str, object],
+    correct_counts: Dict[str, object],
+) -> float:
+    recalls = []
+    labels = sorted(set(str(k) for k in (total_counts or {}).keys()) | set(str(k) for k in (correct_counts or {}).keys()))
+    for label in labels:
+        total = int((total_counts or {}).get(str(label), 0))
+        if total <= 0:
+            continue
+        correct = int((correct_counts or {}).get(str(label), 0))
+        recalls.append(float(correct / total))
+    if not recalls:
+        return float("nan")
+    return float(np.std(np.asarray(recalls, dtype=np.float64)))
 
 
 def _summarize_tail_bins(
@@ -501,6 +563,11 @@ def _analyze_cyclic_margin_noise(
     negative_tail_perm_by_top1_slot: Dict[str, Dict[str, int]] = {}
     negative_tail_top2_slot_counts: Dict[str, int] = {}
     negative_tail_perm_by_top2_slot: Dict[str, Dict[str, int]] = {}
+    ideal_total_counts: Dict[str, int] = {}
+    ideal_correct_counts: Dict[str, int] = {}
+    negative_tail_ideal_correct_counts: Dict[str, int] = {}
+    standardized_bin_ideal_total_counts: Dict[str, Dict[str, int]] = {}
+    standardized_bin_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
     standardized_bin_total_counts: Dict[str, int] = {}
     standardized_bin_correct_counts: Dict[str, int] = {}
     entry_total_count = 0
@@ -511,14 +578,26 @@ def _analyze_cyclic_margin_noise(
     correct_slot_correct_counts: Dict[str, int] = {}
     negative_tail_correct_slot_total_counts: Dict[str, int] = {}
     negative_tail_correct_slot_correct_counts: Dict[str, int] = {}
+    correct_slot_ideal_total_counts: Dict[str, Dict[str, int]] = {}
+    correct_slot_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
     top1_slot_total_counts: Dict[str, int] = {}
     top1_slot_correct_counts: Dict[str, int] = {}
+    top1_slot_ideal_total_counts: Dict[str, Dict[str, int]] = {}
+    top1_slot_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
     negative_tail_top1_slot_total_counts: Dict[str, int] = {}
     negative_tail_top1_slot_correct_counts: Dict[str, int] = {}
     top2_slot_total_counts: Dict[str, int] = {}
     top2_slot_correct_counts: Dict[str, int] = {}
+    top2_slot_ideal_total_counts: Dict[str, Dict[str, int]] = {}
+    top2_slot_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
     negative_tail_top2_slot_total_counts: Dict[str, int] = {}
     negative_tail_top2_slot_correct_counts: Dict[str, int] = {}
+    negative_tail_correct_slot_ideal_total_counts: Dict[str, Dict[str, int]] = {}
+    negative_tail_correct_slot_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
+    negative_tail_top1_slot_ideal_total_counts: Dict[str, Dict[str, int]] = {}
+    negative_tail_top1_slot_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
+    negative_tail_top2_slot_ideal_total_counts: Dict[str, Dict[str, int]] = {}
+    negative_tail_top2_slot_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
     correctness_buckets = {
         "correct": _make_margin_noise_bucket(with_correctness=False),
         "incorrect": _make_margin_noise_bucket(with_correctness=False),
@@ -615,20 +694,44 @@ def _analyze_cyclic_margin_noise(
             single_view_correct_flags,
         ):
             entry_total_count += 1
+            ideal_total_counts[str(ideal_label)] = int(ideal_total_counts.get(str(ideal_label), 0)) + 1
             if is_correct:
                 entry_correct_count += 1
+                ideal_correct_counts[str(ideal_label)] = int(ideal_correct_counts.get(str(ideal_label), 0)) + 1
             corr_bucket["entry_total_count"] = int(corr_bucket.get("entry_total_count", 0)) + 1
+            corr_bucket.setdefault("ideal_total_counts", {})[str(ideal_label)] = int(
+                corr_bucket.setdefault("ideal_total_counts", {}).get(str(ideal_label), 0)
+            ) + 1
             if is_correct:
                 corr_bucket["entry_correct_count"] = int(corr_bucket.get("entry_correct_count", 0)) + 1
+                corr_bucket.setdefault("ideal_correct_counts", {})[str(ideal_label)] = int(
+                    corr_bucket.setdefault("ideal_correct_counts", {}).get(str(ideal_label), 0)
+                ) + 1
             correct_slot_total_counts[str(correct_slot_label)] = int(correct_slot_total_counts.get(str(correct_slot_label), 0)) + 1
             if is_correct:
                 correct_slot_correct_counts[str(correct_slot_label)] = int(correct_slot_correct_counts.get(str(correct_slot_label), 0)) + 1
             corr_bucket.setdefault("correct_slot_total_counts", {})[str(correct_slot_label)] = int(
                 corr_bucket.setdefault("correct_slot_total_counts", {}).get(str(correct_slot_label), 0)
             ) + 1
+            corr_bucket.setdefault("correct_slot_ideal_total_counts", {}).setdefault(str(correct_slot_label), {})
+            corr_bucket["correct_slot_ideal_total_counts"][str(correct_slot_label)][str(ideal_label)] = int(
+                corr_bucket["correct_slot_ideal_total_counts"][str(correct_slot_label)].get(str(ideal_label), 0)
+            ) + 1
+            correct_slot_ideal_total_counts.setdefault(str(correct_slot_label), {})
+            correct_slot_ideal_total_counts[str(correct_slot_label)][str(ideal_label)] = int(
+                correct_slot_ideal_total_counts[str(correct_slot_label)].get(str(ideal_label), 0)
+            ) + 1
             if is_correct:
                 corr_bucket.setdefault("correct_slot_correct_counts", {})[str(correct_slot_label)] = int(
                     corr_bucket.setdefault("correct_slot_correct_counts", {}).get(str(correct_slot_label), 0)
+                ) + 1
+                corr_bucket.setdefault("correct_slot_ideal_correct_counts", {}).setdefault(str(correct_slot_label), {})
+                corr_bucket["correct_slot_ideal_correct_counts"][str(correct_slot_label)][str(ideal_label)] = int(
+                    corr_bucket["correct_slot_ideal_correct_counts"][str(correct_slot_label)].get(str(ideal_label), 0)
+                ) + 1
+                correct_slot_ideal_correct_counts.setdefault(str(correct_slot_label), {})
+                correct_slot_ideal_correct_counts[str(correct_slot_label)][str(ideal_label)] = int(
+                    correct_slot_ideal_correct_counts[str(correct_slot_label)].get(str(ideal_label), 0)
                 ) + 1
             top1_slot_total_counts[str(top1_slot_label)] = int(top1_slot_total_counts.get(str(top1_slot_label), 0)) + 1
             if is_correct:
@@ -636,9 +739,25 @@ def _analyze_cyclic_margin_noise(
             corr_bucket.setdefault("top1_slot_total_counts", {})[str(top1_slot_label)] = int(
                 corr_bucket.setdefault("top1_slot_total_counts", {}).get(str(top1_slot_label), 0)
             ) + 1
+            corr_bucket.setdefault("top1_slot_ideal_total_counts", {}).setdefault(str(top1_slot_label), {})
+            corr_bucket["top1_slot_ideal_total_counts"][str(top1_slot_label)][str(ideal_label)] = int(
+                corr_bucket["top1_slot_ideal_total_counts"][str(top1_slot_label)].get(str(ideal_label), 0)
+            ) + 1
+            top1_slot_ideal_total_counts.setdefault(str(top1_slot_label), {})
+            top1_slot_ideal_total_counts[str(top1_slot_label)][str(ideal_label)] = int(
+                top1_slot_ideal_total_counts[str(top1_slot_label)].get(str(ideal_label), 0)
+            ) + 1
             if is_correct:
                 corr_bucket.setdefault("top1_slot_correct_counts", {})[str(top1_slot_label)] = int(
                     corr_bucket.setdefault("top1_slot_correct_counts", {}).get(str(top1_slot_label), 0)
+                ) + 1
+                corr_bucket.setdefault("top1_slot_ideal_correct_counts", {}).setdefault(str(top1_slot_label), {})
+                corr_bucket["top1_slot_ideal_correct_counts"][str(top1_slot_label)][str(ideal_label)] = int(
+                    corr_bucket["top1_slot_ideal_correct_counts"][str(top1_slot_label)].get(str(ideal_label), 0)
+                ) + 1
+                top1_slot_ideal_correct_counts.setdefault(str(top1_slot_label), {})
+                top1_slot_ideal_correct_counts[str(top1_slot_label)][str(ideal_label)] = int(
+                    top1_slot_ideal_correct_counts[str(top1_slot_label)].get(str(ideal_label), 0)
                 ) + 1
             top2_slot_total_counts[str(top2_slot_label)] = int(top2_slot_total_counts.get(str(top2_slot_label), 0)) + 1
             if is_correct:
@@ -646,9 +765,25 @@ def _analyze_cyclic_margin_noise(
             corr_bucket.setdefault("top2_slot_total_counts", {})[str(top2_slot_label)] = int(
                 corr_bucket.setdefault("top2_slot_total_counts", {}).get(str(top2_slot_label), 0)
             ) + 1
+            corr_bucket.setdefault("top2_slot_ideal_total_counts", {}).setdefault(str(top2_slot_label), {})
+            corr_bucket["top2_slot_ideal_total_counts"][str(top2_slot_label)][str(ideal_label)] = int(
+                corr_bucket["top2_slot_ideal_total_counts"][str(top2_slot_label)].get(str(ideal_label), 0)
+            ) + 1
+            top2_slot_ideal_total_counts.setdefault(str(top2_slot_label), {})
+            top2_slot_ideal_total_counts[str(top2_slot_label)][str(ideal_label)] = int(
+                top2_slot_ideal_total_counts[str(top2_slot_label)].get(str(ideal_label), 0)
+            ) + 1
             if is_correct:
                 corr_bucket.setdefault("top2_slot_correct_counts", {})[str(top2_slot_label)] = int(
                     corr_bucket.setdefault("top2_slot_correct_counts", {}).get(str(top2_slot_label), 0)
+                ) + 1
+                corr_bucket.setdefault("top2_slot_ideal_correct_counts", {}).setdefault(str(top2_slot_label), {})
+                corr_bucket["top2_slot_ideal_correct_counts"][str(top2_slot_label)][str(ideal_label)] = int(
+                    corr_bucket["top2_slot_ideal_correct_counts"][str(top2_slot_label)].get(str(ideal_label), 0)
+                ) + 1
+                top2_slot_ideal_correct_counts.setdefault(str(top2_slot_label), {})
+                top2_slot_ideal_correct_counts[str(top2_slot_label)][str(ideal_label)] = int(
+                    top2_slot_ideal_correct_counts[str(top2_slot_label)].get(str(ideal_label), 0)
                 ) + 1
         if z_vals:
             corr_bucket["z_scores"].extend(z_vals)
@@ -665,22 +800,42 @@ def _analyze_cyclic_margin_noise(
                 bin_idx = int(np.digitize(z_val, std_bin_edges) - 1)
                 bin_idx = max(0, min(bin_idx, len(std_bin_edges) - 2))
                 standardized_bin_total_counts[str(bin_idx)] = int(standardized_bin_total_counts.get(str(bin_idx), 0)) + 1
+                standardized_bin_ideal_total_counts.setdefault(str(bin_idx), {})
+                standardized_bin_ideal_total_counts[str(bin_idx)][str(ideal_label)] = int(
+                    standardized_bin_ideal_total_counts[str(bin_idx)].get(str(ideal_label), 0)
+                ) + 1
                 if is_correct:
                     standardized_bin_correct_counts[str(bin_idx)] = int(standardized_bin_correct_counts.get(str(bin_idx), 0)) + 1
+                    standardized_bin_ideal_correct_counts.setdefault(str(bin_idx), {})
+                    standardized_bin_ideal_correct_counts[str(bin_idx)][str(ideal_label)] = int(
+                        standardized_bin_ideal_correct_counts[str(bin_idx)].get(str(ideal_label), 0)
+                    ) + 1
                 counts = corr_bucket.setdefault("standardized_bin_label_counts", {}).setdefault(str(bin_idx), {})
                 counts[str(perm_label)] = int(counts.get(str(perm_label), 0)) + 1
                 corr_bucket.setdefault("standardized_bin_total_counts", {})[str(bin_idx)] = int(
                     corr_bucket.setdefault("standardized_bin_total_counts", {}).get(str(bin_idx), 0)
                 ) + 1
+                corr_bucket.setdefault("standardized_bin_ideal_total_counts", {}).setdefault(str(bin_idx), {})
+                corr_bucket["standardized_bin_ideal_total_counts"][str(bin_idx)][str(ideal_label)] = int(
+                    corr_bucket["standardized_bin_ideal_total_counts"][str(bin_idx)].get(str(ideal_label), 0)
+                ) + 1
                 if is_correct:
                     corr_bucket.setdefault("standardized_bin_correct_counts", {})[str(bin_idx)] = int(
                         corr_bucket.setdefault("standardized_bin_correct_counts", {}).get(str(bin_idx), 0)
+                    ) + 1
+                    corr_bucket.setdefault("standardized_bin_ideal_correct_counts", {}).setdefault(str(bin_idx), {})
+                    corr_bucket["standardized_bin_ideal_correct_counts"][str(bin_idx)][str(ideal_label)] = int(
+                        corr_bucket["standardized_bin_ideal_correct_counts"][str(bin_idx)].get(str(ideal_label), 0)
                     ) + 1
                 if float(z_val) <= float(negative_tail_z_cutoff):
                     negative_tail_total_count += 1
                     if is_correct:
                         negative_tail_correct_count += 1
                     negative_tail_ideal_counts[str(ideal_label)] = int(negative_tail_ideal_counts.get(str(ideal_label), 0)) + 1
+                    if is_correct:
+                        negative_tail_ideal_correct_counts[str(ideal_label)] = int(
+                            negative_tail_ideal_correct_counts.get(str(ideal_label), 0)
+                        ) + 1
                     negative_tail_correct_slot_counts[str(correct_slot_label)] = int(
                         negative_tail_correct_slot_counts.get(str(correct_slot_label), 0)
                     ) + 1
@@ -701,28 +856,56 @@ def _analyze_cyclic_margin_noise(
                     negative_tail_correct_slot_total_counts[str(correct_slot_label)] = int(
                         negative_tail_correct_slot_total_counts.get(str(correct_slot_label), 0)
                     ) + 1
+                    negative_tail_correct_slot_ideal_total_counts.setdefault(str(correct_slot_label), {})
+                    negative_tail_correct_slot_ideal_total_counts[str(correct_slot_label)][str(ideal_label)] = int(
+                        negative_tail_correct_slot_ideal_total_counts[str(correct_slot_label)].get(str(ideal_label), 0)
+                    ) + 1
                     if is_correct:
                         negative_tail_correct_slot_correct_counts[str(correct_slot_label)] = int(
                             negative_tail_correct_slot_correct_counts.get(str(correct_slot_label), 0)
                         ) + 1
+                        negative_tail_correct_slot_ideal_correct_counts.setdefault(str(correct_slot_label), {})
+                        negative_tail_correct_slot_ideal_correct_counts[str(correct_slot_label)][str(ideal_label)] = int(
+                            negative_tail_correct_slot_ideal_correct_counts[str(correct_slot_label)].get(str(ideal_label), 0)
+                        ) + 1
                     negative_tail_top1_slot_total_counts[str(top1_slot_label)] = int(
                         negative_tail_top1_slot_total_counts.get(str(top1_slot_label), 0)
+                    ) + 1
+                    negative_tail_top1_slot_ideal_total_counts.setdefault(str(top1_slot_label), {})
+                    negative_tail_top1_slot_ideal_total_counts[str(top1_slot_label)][str(ideal_label)] = int(
+                        negative_tail_top1_slot_ideal_total_counts[str(top1_slot_label)].get(str(ideal_label), 0)
                     ) + 1
                     if is_correct:
                         negative_tail_top1_slot_correct_counts[str(top1_slot_label)] = int(
                             negative_tail_top1_slot_correct_counts.get(str(top1_slot_label), 0)
                         ) + 1
+                        negative_tail_top1_slot_ideal_correct_counts.setdefault(str(top1_slot_label), {})
+                        negative_tail_top1_slot_ideal_correct_counts[str(top1_slot_label)][str(ideal_label)] = int(
+                            negative_tail_top1_slot_ideal_correct_counts[str(top1_slot_label)].get(str(ideal_label), 0)
+                        ) + 1
                     negative_tail_top2_slot_total_counts[str(top2_slot_label)] = int(
                         negative_tail_top2_slot_total_counts.get(str(top2_slot_label), 0)
+                    ) + 1
+                    negative_tail_top2_slot_ideal_total_counts.setdefault(str(top2_slot_label), {})
+                    negative_tail_top2_slot_ideal_total_counts[str(top2_slot_label)][str(ideal_label)] = int(
+                        negative_tail_top2_slot_ideal_total_counts[str(top2_slot_label)].get(str(ideal_label), 0)
                     ) + 1
                     if is_correct:
                         negative_tail_top2_slot_correct_counts[str(top2_slot_label)] = int(
                             negative_tail_top2_slot_correct_counts.get(str(top2_slot_label), 0)
                         ) + 1
+                        negative_tail_top2_slot_ideal_correct_counts.setdefault(str(top2_slot_label), {})
+                        negative_tail_top2_slot_ideal_correct_counts[str(top2_slot_label)][str(ideal_label)] = int(
+                            negative_tail_top2_slot_ideal_correct_counts[str(top2_slot_label)].get(str(ideal_label), 0)
+                        ) + 1
 
                     corr_bucket.setdefault("negative_tail_ideal_counts", {})[str(ideal_label)] = int(
                         corr_bucket.setdefault("negative_tail_ideal_counts", {}).get(str(ideal_label), 0)
                     ) + 1
+                    if is_correct:
+                        corr_bucket.setdefault("negative_tail_ideal_correct_counts", {})[str(ideal_label)] = int(
+                            corr_bucket.setdefault("negative_tail_ideal_correct_counts", {}).get(str(ideal_label), 0)
+                        ) + 1
                     corr_bucket.setdefault("negative_tail_correct_slot_counts", {})[str(correct_slot_label)] = int(
                         corr_bucket.setdefault("negative_tail_correct_slot_counts", {}).get(str(correct_slot_label), 0)
                     ) + 1
@@ -746,23 +929,47 @@ def _analyze_cyclic_margin_noise(
                     corr_bucket.setdefault("negative_tail_correct_slot_total_counts", {})[str(correct_slot_label)] = int(
                         corr_bucket.setdefault("negative_tail_correct_slot_total_counts", {}).get(str(correct_slot_label), 0)
                     ) + 1
+                    corr_bucket.setdefault("negative_tail_correct_slot_ideal_total_counts", {}).setdefault(str(correct_slot_label), {})
+                    corr_bucket["negative_tail_correct_slot_ideal_total_counts"][str(correct_slot_label)][str(ideal_label)] = int(
+                        corr_bucket["negative_tail_correct_slot_ideal_total_counts"][str(correct_slot_label)].get(str(ideal_label), 0)
+                    ) + 1
                     if is_correct:
                         corr_bucket.setdefault("negative_tail_correct_slot_correct_counts", {})[str(correct_slot_label)] = int(
                             corr_bucket.setdefault("negative_tail_correct_slot_correct_counts", {}).get(str(correct_slot_label), 0)
                         ) + 1
+                        corr_bucket.setdefault("negative_tail_correct_slot_ideal_correct_counts", {}).setdefault(str(correct_slot_label), {})
+                        corr_bucket["negative_tail_correct_slot_ideal_correct_counts"][str(correct_slot_label)][str(ideal_label)] = int(
+                            corr_bucket["negative_tail_correct_slot_ideal_correct_counts"][str(correct_slot_label)].get(str(ideal_label), 0)
+                        ) + 1
                     corr_bucket.setdefault("negative_tail_top1_slot_total_counts", {})[str(top1_slot_label)] = int(
                         corr_bucket.setdefault("negative_tail_top1_slot_total_counts", {}).get(str(top1_slot_label), 0)
+                    ) + 1
+                    corr_bucket.setdefault("negative_tail_top1_slot_ideal_total_counts", {}).setdefault(str(top1_slot_label), {})
+                    corr_bucket["negative_tail_top1_slot_ideal_total_counts"][str(top1_slot_label)][str(ideal_label)] = int(
+                        corr_bucket["negative_tail_top1_slot_ideal_total_counts"][str(top1_slot_label)].get(str(ideal_label), 0)
                     ) + 1
                     if is_correct:
                         corr_bucket.setdefault("negative_tail_top1_slot_correct_counts", {})[str(top1_slot_label)] = int(
                             corr_bucket.setdefault("negative_tail_top1_slot_correct_counts", {}).get(str(top1_slot_label), 0)
                         ) + 1
+                        corr_bucket.setdefault("negative_tail_top1_slot_ideal_correct_counts", {}).setdefault(str(top1_slot_label), {})
+                        corr_bucket["negative_tail_top1_slot_ideal_correct_counts"][str(top1_slot_label)][str(ideal_label)] = int(
+                            corr_bucket["negative_tail_top1_slot_ideal_correct_counts"][str(top1_slot_label)].get(str(ideal_label), 0)
+                        ) + 1
                     corr_bucket.setdefault("negative_tail_top2_slot_total_counts", {})[str(top2_slot_label)] = int(
                         corr_bucket.setdefault("negative_tail_top2_slot_total_counts", {}).get(str(top2_slot_label), 0)
+                    ) + 1
+                    corr_bucket.setdefault("negative_tail_top2_slot_ideal_total_counts", {}).setdefault(str(top2_slot_label), {})
+                    corr_bucket["negative_tail_top2_slot_ideal_total_counts"][str(top2_slot_label)][str(ideal_label)] = int(
+                        corr_bucket["negative_tail_top2_slot_ideal_total_counts"][str(top2_slot_label)].get(str(ideal_label), 0)
                     ) + 1
                     if is_correct:
                         corr_bucket.setdefault("negative_tail_top2_slot_correct_counts", {})[str(top2_slot_label)] = int(
                             corr_bucket.setdefault("negative_tail_top2_slot_correct_counts", {}).get(str(top2_slot_label), 0)
+                        ) + 1
+                        corr_bucket.setdefault("negative_tail_top2_slot_ideal_correct_counts", {}).setdefault(str(top2_slot_label), {})
+                        corr_bucket["negative_tail_top2_slot_ideal_correct_counts"][str(top2_slot_label)][str(ideal_label)] = int(
+                            corr_bucket["negative_tail_top2_slot_ideal_correct_counts"][str(top2_slot_label)].get(str(ideal_label), 0)
                         ) + 1
 
         t_summary: List[dict] = []
@@ -942,6 +1149,11 @@ def _analyze_cyclic_margin_noise(
         "negative_tail_perm_by_top1_slot": negative_tail_perm_by_top1_slot,
         "negative_tail_top2_slot_counts": negative_tail_top2_slot_counts,
         "negative_tail_perm_by_top2_slot": negative_tail_perm_by_top2_slot,
+        "ideal_total_counts": ideal_total_counts,
+        "ideal_correct_counts": ideal_correct_counts,
+        "negative_tail_ideal_correct_counts": negative_tail_ideal_correct_counts,
+        "standardized_bin_ideal_total_counts": standardized_bin_ideal_total_counts,
+        "standardized_bin_ideal_correct_counts": standardized_bin_ideal_correct_counts,
         "standardized_bin_total_counts": standardized_bin_total_counts,
         "standardized_bin_correct_counts": standardized_bin_correct_counts,
         "entry_total_count": int(entry_total_count),
@@ -950,16 +1162,28 @@ def _analyze_cyclic_margin_noise(
         "negative_tail_correct_count": int(negative_tail_correct_count),
         "correct_slot_total_counts": correct_slot_total_counts,
         "correct_slot_correct_counts": correct_slot_correct_counts,
+        "correct_slot_ideal_total_counts": correct_slot_ideal_total_counts,
+        "correct_slot_ideal_correct_counts": correct_slot_ideal_correct_counts,
         "negative_tail_correct_slot_total_counts": negative_tail_correct_slot_total_counts,
         "negative_tail_correct_slot_correct_counts": negative_tail_correct_slot_correct_counts,
+        "negative_tail_correct_slot_ideal_total_counts": negative_tail_correct_slot_ideal_total_counts,
+        "negative_tail_correct_slot_ideal_correct_counts": negative_tail_correct_slot_ideal_correct_counts,
         "top1_slot_total_counts": top1_slot_total_counts,
         "top1_slot_correct_counts": top1_slot_correct_counts,
+        "top1_slot_ideal_total_counts": top1_slot_ideal_total_counts,
+        "top1_slot_ideal_correct_counts": top1_slot_ideal_correct_counts,
         "negative_tail_top1_slot_total_counts": negative_tail_top1_slot_total_counts,
         "negative_tail_top1_slot_correct_counts": negative_tail_top1_slot_correct_counts,
+        "negative_tail_top1_slot_ideal_total_counts": negative_tail_top1_slot_ideal_total_counts,
+        "negative_tail_top1_slot_ideal_correct_counts": negative_tail_top1_slot_ideal_correct_counts,
         "top2_slot_total_counts": top2_slot_total_counts,
         "top2_slot_correct_counts": top2_slot_correct_counts,
+        "top2_slot_ideal_total_counts": top2_slot_ideal_total_counts,
+        "top2_slot_ideal_correct_counts": top2_slot_ideal_correct_counts,
         "negative_tail_top2_slot_total_counts": negative_tail_top2_slot_total_counts,
         "negative_tail_top2_slot_correct_counts": negative_tail_top2_slot_correct_counts,
+        "negative_tail_top2_slot_ideal_total_counts": negative_tail_top2_slot_ideal_total_counts,
+        "negative_tail_top2_slot_ideal_correct_counts": negative_tail_top2_slot_ideal_correct_counts,
         "correctness_buckets": correctness_buckets,
     }
     return summary, sample_records, pooled_payload
@@ -1052,6 +1276,11 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         bucket.setdefault("negative_tail_perm_by_top2_slot", {}),
         payload.get("negative_tail_perm_by_top2_slot", {}) or {},
     )
+    _merge_count_maps(bucket.setdefault("ideal_total_counts", {}), payload.get("ideal_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("ideal_correct_counts", {}), payload.get("ideal_correct_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("negative_tail_ideal_correct_counts", {}), payload.get("negative_tail_ideal_correct_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("standardized_bin_ideal_total_counts", {}), payload.get("standardized_bin_ideal_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("standardized_bin_ideal_correct_counts", {}), payload.get("standardized_bin_ideal_correct_counts", {}) or {})
     _merge_count_maps(
         bucket.setdefault("standardized_bin_total_counts", {}),
         payload.get("standardized_bin_total_counts", {}) or {},
@@ -1072,6 +1301,8 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         bucket.setdefault("correct_slot_correct_counts", {}),
         payload.get("correct_slot_correct_counts", {}) or {},
     )
+    _merge_count_maps(bucket.setdefault("correct_slot_ideal_total_counts", {}), payload.get("correct_slot_ideal_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("correct_slot_ideal_correct_counts", {}), payload.get("correct_slot_ideal_correct_counts", {}) or {})
     _merge_count_maps(
         bucket.setdefault("negative_tail_correct_slot_total_counts", {}),
         payload.get("negative_tail_correct_slot_total_counts", {}) or {},
@@ -1080,6 +1311,8 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         bucket.setdefault("negative_tail_correct_slot_correct_counts", {}),
         payload.get("negative_tail_correct_slot_correct_counts", {}) or {},
     )
+    _merge_count_maps(bucket.setdefault("negative_tail_correct_slot_ideal_total_counts", {}), payload.get("negative_tail_correct_slot_ideal_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("negative_tail_correct_slot_ideal_correct_counts", {}), payload.get("negative_tail_correct_slot_ideal_correct_counts", {}) or {})
     _merge_count_maps(
         bucket.setdefault("top1_slot_total_counts", {}),
         payload.get("top1_slot_total_counts", {}) or {},
@@ -1088,6 +1321,8 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         bucket.setdefault("top1_slot_correct_counts", {}),
         payload.get("top1_slot_correct_counts", {}) or {},
     )
+    _merge_count_maps(bucket.setdefault("top1_slot_ideal_total_counts", {}), payload.get("top1_slot_ideal_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("top1_slot_ideal_correct_counts", {}), payload.get("top1_slot_ideal_correct_counts", {}) or {})
     _merge_count_maps(
         bucket.setdefault("negative_tail_top1_slot_total_counts", {}),
         payload.get("negative_tail_top1_slot_total_counts", {}) or {},
@@ -1096,6 +1331,8 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         bucket.setdefault("negative_tail_top1_slot_correct_counts", {}),
         payload.get("negative_tail_top1_slot_correct_counts", {}) or {},
     )
+    _merge_count_maps(bucket.setdefault("negative_tail_top1_slot_ideal_total_counts", {}), payload.get("negative_tail_top1_slot_ideal_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("negative_tail_top1_slot_ideal_correct_counts", {}), payload.get("negative_tail_top1_slot_ideal_correct_counts", {}) or {})
     _merge_count_maps(
         bucket.setdefault("top2_slot_total_counts", {}),
         payload.get("top2_slot_total_counts", {}) or {},
@@ -1104,6 +1341,8 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         bucket.setdefault("top2_slot_correct_counts", {}),
         payload.get("top2_slot_correct_counts", {}) or {},
     )
+    _merge_count_maps(bucket.setdefault("top2_slot_ideal_total_counts", {}), payload.get("top2_slot_ideal_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("top2_slot_ideal_correct_counts", {}), payload.get("top2_slot_ideal_correct_counts", {}) or {})
     _merge_count_maps(
         bucket.setdefault("negative_tail_top2_slot_total_counts", {}),
         payload.get("negative_tail_top2_slot_total_counts", {}) or {},
@@ -1112,6 +1351,8 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         bucket.setdefault("negative_tail_top2_slot_correct_counts", {}),
         payload.get("negative_tail_top2_slot_correct_counts", {}) or {},
     )
+    _merge_count_maps(bucket.setdefault("negative_tail_top2_slot_ideal_total_counts", {}), payload.get("negative_tail_top2_slot_ideal_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("negative_tail_top2_slot_ideal_correct_counts", {}), payload.get("negative_tail_top2_slot_ideal_correct_counts", {}) or {})
     payload_corr = payload.get("correctness_buckets", {}) or {}
     if payload_corr:
         dst_corr = bucket.setdefault("correctness_buckets", {})
@@ -1137,6 +1378,10 @@ def _summarize_margin_noise_bucket(
     std_bin_label_counts = bucket.get("standardized_bin_label_counts", {}) or {}
     std_bin_total_counts = bucket.get("standardized_bin_total_counts", {}) or {}
     std_bin_correct_counts = bucket.get("standardized_bin_correct_counts", {}) or {}
+    std_bin_ideal_total_counts = bucket.get("standardized_bin_ideal_total_counts", {}) or {}
+    std_bin_ideal_correct_counts = bucket.get("standardized_bin_ideal_correct_counts", {}) or {}
+    ideal_total_counts = bucket.get("ideal_total_counts", {}) or {}
+    ideal_correct_counts = bucket.get("ideal_correct_counts", {}) or {}
     t1_resid = np.asarray(t_residuals.get(1, []), dtype=np.float64)
     t1_std = float(np.std(t1_resid)) if t1_resid.size > 0 else float("nan")
     peak_bin_summary = _summarize_peak_bins(
@@ -1156,6 +1401,10 @@ def _summarize_margin_noise_bucket(
             "count": int(total),
             "correct": int(correct),
             "accuracy": float(correct / total) if total > 0 else float("nan"),
+            "recall_std": _recall_std_from_counts(
+                std_bin_ideal_total_counts.get(str(bin_idx), {}) if isinstance(std_bin_ideal_total_counts.get(str(bin_idx), {}), dict) else {},
+                std_bin_ideal_correct_counts.get(str(bin_idx), {}) if isinstance(std_bin_ideal_correct_counts.get(str(bin_idx), {}), dict) else {},
+            ),
         }
 
     t_view_summary = []
@@ -1197,6 +1446,7 @@ def _summarize_margin_noise_bucket(
                 if int(bucket.get("entry_total_count", 0)) > 0
                 else float("nan")
             ),
+            "recall_std": _recall_std_from_counts(ideal_total_counts, ideal_correct_counts),
         },
         "negative_tail_accuracy": {
             "z_cutoff": float(negative_tail_z_cutoff),
@@ -1206,6 +1456,10 @@ def _summarize_margin_noise_bucket(
                 float(int(bucket.get("negative_tail_correct_count", 0)) / int(bucket.get("negative_tail_total_count", 0)))
                 if int(bucket.get("negative_tail_total_count", 0)) > 0
                 else float("nan")
+            ),
+            "recall_std": _recall_std_from_counts(
+                bucket.get("negative_tail_ideal_counts", {}) or {},
+                bucket.get("negative_tail_ideal_correct_counts", {}) or {},
             ),
         },
         "top_standardized_bin_accuracy": top_bin_accuracy,
@@ -1239,29 +1493,41 @@ def _summarize_margin_noise_bucket(
             bucket.get("negative_tail_top2_slot_total_counts", {}) or {},
             bucket.get("top2_slot_total_counts", {}) or {},
         ),
-        "correct_slot_accuracy": _summarize_accuracy_by_group(
+        "correct_slot_accuracy": _summarize_accuracy_rstd_by_group(
             bucket.get("correct_slot_total_counts", {}) or {},
             bucket.get("correct_slot_correct_counts", {}) or {},
+            bucket.get("correct_slot_ideal_total_counts", {}) or {},
+            bucket.get("correct_slot_ideal_correct_counts", {}) or {},
         ),
-        "negative_tail_correct_slot_accuracy": _summarize_accuracy_by_group(
+        "negative_tail_correct_slot_accuracy": _summarize_accuracy_rstd_by_group(
             bucket.get("negative_tail_correct_slot_total_counts", {}) or {},
             bucket.get("negative_tail_correct_slot_correct_counts", {}) or {},
+            bucket.get("negative_tail_correct_slot_ideal_total_counts", {}) or {},
+            bucket.get("negative_tail_correct_slot_ideal_correct_counts", {}) or {},
         ),
-        "top1_slot_accuracy": _summarize_accuracy_by_group(
+        "top1_slot_accuracy": _summarize_accuracy_rstd_by_group(
             bucket.get("top1_slot_total_counts", {}) or {},
             bucket.get("top1_slot_correct_counts", {}) or {},
+            bucket.get("top1_slot_ideal_total_counts", {}) or {},
+            bucket.get("top1_slot_ideal_correct_counts", {}) or {},
         ),
-        "negative_tail_top1_slot_accuracy": _summarize_accuracy_by_group(
+        "negative_tail_top1_slot_accuracy": _summarize_accuracy_rstd_by_group(
             bucket.get("negative_tail_top1_slot_total_counts", {}) or {},
             bucket.get("negative_tail_top1_slot_correct_counts", {}) or {},
+            bucket.get("negative_tail_top1_slot_ideal_total_counts", {}) or {},
+            bucket.get("negative_tail_top1_slot_ideal_correct_counts", {}) or {},
         ),
-        "top2_slot_accuracy": _summarize_accuracy_by_group(
+        "top2_slot_accuracy": _summarize_accuracy_rstd_by_group(
             bucket.get("top2_slot_total_counts", {}) or {},
             bucket.get("top2_slot_correct_counts", {}) or {},
+            bucket.get("top2_slot_ideal_total_counts", {}) or {},
+            bucket.get("top2_slot_ideal_correct_counts", {}) or {},
         ),
-        "negative_tail_top2_slot_accuracy": _summarize_accuracy_by_group(
+        "negative_tail_top2_slot_accuracy": _summarize_accuracy_rstd_by_group(
             bucket.get("negative_tail_top2_slot_total_counts", {}) or {},
             bucket.get("negative_tail_top2_slot_correct_counts", {}) or {},
+            bucket.get("negative_tail_top2_slot_ideal_total_counts", {}) or {},
+            bucket.get("negative_tail_top2_slot_ideal_correct_counts", {}) or {},
         ),
         "correctness_split": {
             str(name): _summarize_margin_noise_bucket(
@@ -1584,8 +1850,9 @@ def _run_multi_results_analysis(
         top_bin_acc = (pooled_summary or {}).get("top_standardized_bin_accuracy", {}) or {}
         if top_bin_acc:
             print(
-                "top standardized bin accuracy: {:.4f} ({}/{})".format(
+                "top standardized bin acc/rstd: {:.4f}/{:.4f} ({}/{})".format(
                     float(top_bin_acc.get("accuracy", float("nan"))),
+                    float(top_bin_acc.get("recall_std", float("nan"))),
                     int(top_bin_acc.get("correct", 0)),
                     int(top_bin_acc.get("count", 0)),
                 )
@@ -1604,8 +1871,9 @@ def _run_multi_results_analysis(
         neg_tail_acc = (pooled_summary or {}).get("negative_tail_accuracy", {}) or {}
         if neg_tail_acc:
             print(
-                "negative tail accuracy: {:.4f} ({}/{})".format(
+                "negative tail acc/rstd: {:.4f}/{:.4f} ({}/{})".format(
                     float(neg_tail_acc.get("accuracy", float("nan"))),
+                    float(neg_tail_acc.get("recall_std", float("nan"))),
                     int(neg_tail_acc.get("correct", 0)),
                     int(neg_tail_acc.get("count", 0)),
                 )
@@ -1613,8 +1881,9 @@ def _run_multi_results_analysis(
         entry_acc = (pooled_summary or {}).get("entry_accuracy", {}) or {}
         if entry_acc:
             print(
-                "overall view accuracy: {:.4f} ({}/{})".format(
+                "overall view acc/rstd: {:.4f}/{:.4f} ({}/{})".format(
                     float(entry_acc.get("accuracy", float("nan"))),
+                    float(entry_acc.get("recall_std", float("nan"))),
                     int(entry_acc.get("correct", 0)),
                     int(entry_acc.get("count", 0)),
                 )
@@ -1643,10 +1912,10 @@ def _run_multi_results_analysis(
             print("negative-tail slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in tail_slot_inc[:5]))
         slot_acc = (pooled_summary or {}).get("correct_slot_accuracy", []) or []
         if slot_acc:
-            print("correct slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in slot_acc[:5]))
+            print("correct slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in slot_acc[:5]))
         tail_slot_acc = (pooled_summary or {}).get("negative_tail_correct_slot_accuracy", []) or []
         if tail_slot_acc:
-            print("negative-tail slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in tail_slot_acc[:5]))
+            print("negative-tail slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_slot_acc[:5]))
         neg_top1_slots = (pooled_summary or {}).get("negative_tail_top1_slot_counts", []) or []
         if neg_top1_slots:
             print("negative tail by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top1_slots[:5]))
@@ -1655,10 +1924,10 @@ def _run_multi_results_analysis(
             print("negative-tail top1-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in tail_top1_inc[:5]))
         top1_acc = (pooled_summary or {}).get("top1_slot_accuracy", []) or []
         if top1_acc:
-            print("top1-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in top1_acc[:5]))
+            print("top1-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top1_acc[:5]))
         tail_top1_acc = (pooled_summary or {}).get("negative_tail_top1_slot_accuracy", []) or []
         if tail_top1_acc:
-            print("negative-tail top1-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in tail_top1_acc[:5]))
+            print("negative-tail top1-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_top1_acc[:5]))
         neg_top2_slots = (pooled_summary or {}).get("negative_tail_top2_slot_counts", []) or []
         if neg_top2_slots:
             print("negative tail by top2 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top2_slots[:5]))
@@ -1667,10 +1936,10 @@ def _run_multi_results_analysis(
             print("negative-tail top2-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in tail_top2_inc[:5]))
         top2_acc = (pooled_summary or {}).get("top2_slot_accuracy", []) or []
         if top2_acc:
-            print("top2-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in top2_acc[:5]))
+            print("top2-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top2_acc[:5]))
         tail_top2_acc = (pooled_summary or {}).get("negative_tail_top2_slot_accuracy", []) or []
         if tail_top2_acc:
-            print("negative-tail top2-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in tail_top2_acc[:5]))
+            print("negative-tail top2-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_top2_acc[:5]))
         corr_split = (pooled_summary or {}).get("correctness_split", {}) or {}
         for split_name in ("correct", "incorrect"):
             split = corr_split.get(split_name, {}) or {}
@@ -2116,8 +2385,9 @@ def _run_analysis(
         top_bin_acc = next((rec.get("top_standardized_bin_accuracy", {}) for rec in margin_summaries if rec.get("top_standardized_bin_accuracy")), {})
         if top_bin_acc:
             print(
-                "top standardized bin accuracy: {:.4f} ({}/{})".format(
+                "top standardized bin acc/rstd: {:.4f}/{:.4f} ({}/{})".format(
                     float(top_bin_acc.get("accuracy", float("nan"))),
+                    float(top_bin_acc.get("recall_std", float("nan"))),
                     int(top_bin_acc.get("correct", 0)),
                     int(top_bin_acc.get("count", 0)),
                 )
@@ -2136,8 +2406,9 @@ def _run_analysis(
         neg_tail_acc = next((rec.get("negative_tail_accuracy", {}) for rec in margin_summaries if rec.get("negative_tail_accuracy")), {})
         if neg_tail_acc:
             print(
-                "negative tail accuracy: {:.4f} ({}/{})".format(
+                "negative tail acc/rstd: {:.4f}/{:.4f} ({}/{})".format(
                     float(neg_tail_acc.get("accuracy", float("nan"))),
+                    float(neg_tail_acc.get("recall_std", float("nan"))),
                     int(neg_tail_acc.get("correct", 0)),
                     int(neg_tail_acc.get("count", 0)),
                 )
@@ -2145,8 +2416,9 @@ def _run_analysis(
         entry_acc = next((rec.get("entry_accuracy", {}) for rec in margin_summaries if rec.get("entry_accuracy")), {})
         if entry_acc:
             print(
-                "overall view accuracy: {:.4f} ({}/{})".format(
+                "overall view acc/rstd: {:.4f}/{:.4f} ({}/{})".format(
                     float(entry_acc.get("accuracy", float("nan"))),
+                    float(entry_acc.get("recall_std", float("nan"))),
                     int(entry_acc.get("correct", 0)),
                     int(entry_acc.get("count", 0)),
                 )
@@ -2175,10 +2447,10 @@ def _run_analysis(
             print("negative-tail slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in tail_slot_inc[:3]))
         slot_acc = next((rec.get("correct_slot_accuracy", []) for rec in margin_summaries if rec.get("correct_slot_accuracy")), [])
         if slot_acc:
-            print("correct slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in slot_acc[:3]))
+            print("correct slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in slot_acc[:3]))
         tail_slot_acc = next((rec.get("negative_tail_correct_slot_accuracy", []) for rec in margin_summaries if rec.get("negative_tail_correct_slot_accuracy")), [])
         if tail_slot_acc:
-            print("negative-tail slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in tail_slot_acc[:3]))
+            print("negative-tail slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_slot_acc[:3]))
         neg_top1_slots = next((rec.get("negative_tail_top1_slot_counts", []) for rec in margin_summaries if rec.get("negative_tail_top1_slot_counts")), [])
         if neg_top1_slots:
             print("negative tail by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top1_slots[:3]))
@@ -2187,10 +2459,10 @@ def _run_analysis(
             print("negative-tail top1-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in tail_top1_inc[:3]))
         top1_acc = next((rec.get("top1_slot_accuracy", []) for rec in margin_summaries if rec.get("top1_slot_accuracy")), [])
         if top1_acc:
-            print("top1-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in top1_acc[:3]))
+            print("top1-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top1_acc[:3]))
         tail_top1_acc = next((rec.get("negative_tail_top1_slot_accuracy", []) for rec in margin_summaries if rec.get("negative_tail_top1_slot_accuracy")), [])
         if tail_top1_acc:
-            print("negative-tail top1-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in tail_top1_acc[:3]))
+            print("negative-tail top1-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_top1_acc[:3]))
         neg_top2_slots = next((rec.get("negative_tail_top2_slot_counts", []) for rec in margin_summaries if rec.get("negative_tail_top2_slot_counts")), [])
         if neg_top2_slots:
             print("negative tail by top2 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top2_slots[:3]))
@@ -2199,10 +2471,10 @@ def _run_analysis(
             print("negative-tail top2-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in tail_top2_inc[:3]))
         top2_acc = next((rec.get("top2_slot_accuracy", []) for rec in margin_summaries if rec.get("top2_slot_accuracy")), [])
         if top2_acc:
-            print("top2-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in top2_acc[:3]))
+            print("top2-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top2_acc[:3]))
         tail_top2_acc = next((rec.get("negative_tail_top2_slot_accuracy", []) for rec in margin_summaries if rec.get("negative_tail_top2_slot_accuracy")), [])
         if tail_top2_acc:
-            print("negative-tail top2-slot accuracy:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}" for x in tail_top2_acc[:3]))
+            print("negative-tail top2-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_top2_acc[:3]))
         corr_split = next((rec.get("correctness_split", {}) for rec in margin_summaries if rec.get("correctness_split")), {})
         for split_name in ("correct", "incorrect"):
             split = (corr_split.get(split_name, {}) or {})
