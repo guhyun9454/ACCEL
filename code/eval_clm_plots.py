@@ -122,6 +122,28 @@ def _plot_three_curves_acc_recall_std(
             rstd_stds.append(float(np.nanstd(rl)) if len(rl) > 1 else 0.0)
         return costs, accs, rstds, acc_stds, rstd_stds
 
+    def _agg_policy(by_p, key, fracs):
+        costs, accs, rstds, acc_stds, rstd_stds = [], [], [], [], []
+        for p in fracs:
+            pts = by_p.get(float(p), [])
+            cl, al, rl = [], [], []
+            for c in pts:
+                pobj = c.get(key, {})
+                if isinstance(pobj, dict):
+                    if "costs" in pobj and pobj["costs"]:
+                        cl.append(float(pobj["costs"][0]))
+                    if "accuracies" in pobj and pobj["accuracies"]:
+                        al.append(float(pobj["accuracies"][0]) * 100.0)
+                rkey = f"{key}_recall_std"
+                if rkey in c and isinstance(c.get(rkey), (int, float)):
+                    rl.append(float(c[rkey]))
+            costs.append(np.mean(cl) if cl else float("nan"))
+            accs.append(np.mean(al) if al else float("nan"))
+            rstds.append(np.nanmean(rl) if rl else float("nan"))
+            acc_stds.append(float(np.nanstd(al)) if len(al) > 1 else 0.0)
+            rstd_stds.append(float(np.nanstd(rl)) if len(rl) > 1 else 0.0)
+        return costs, accs, rstds, acc_stds, rstd_stds
+
     cost_cyc, acc_cyc, rstd_cyc, acc_std_cyc, rstd_std_cyc = _agg_cyclic(derived_records_by_p, cyclic_fractions)
     _n = len(pride_prefix_list) if pride_prefix_list else len(pride_ours_fractions)
     _def5 = ([float("nan")] * _n, [float("nan")] * _n, [float("nan")] * _n, [0.0] * _n, [0.0] * _n)
@@ -295,6 +317,32 @@ def _plot_three_curves_acc_recall_std(
             "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_legacy],
         }
 
+    def _build_direct_policy_payload(by_p, fracs, policy_key, def_acc, def_rstd):
+        co, ac, rs, asd, rsd = _agg_policy(by_p, policy_key, fracs)
+        return {
+            "p": [float(x) for x in fracs],
+            "cost": [float(x) if np.isfinite(x) else float("nan") for x in co],
+            "acc": [float(x) if np.isfinite(x) else float("nan") for x in ac],
+            "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rs],
+            "delta_acc": [float(a - def_acc) if np.isfinite(a) and np.isfinite(def_acc) else float("nan") for a in ac],
+            "delta_recall_std": [float(def_rstd - r) if np.isfinite(r) and np.isfinite(def_rstd) else float("nan") for r in rs],
+            "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in asd],
+            "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rsd],
+        }
+
+    def _build_direct_policy_pride_payload(by_alpha, prefix_list, policy_key, def_acc, def_rstd):
+        out = {}
+        for alpha in prefix_list:
+            cobjs = by_alpha.get(alpha, [])
+            if not cobjs:
+                continue
+            by_tmp = {float(alpha): cobjs}
+            out[f"{float(alpha):g}"] = _build_direct_policy_payload(by_tmp, [float(alpha)], policy_key, def_acc, def_rstd)
+        return {
+            "pride_prefix_fractions": [float(a) for a in prefix_list],
+            "by_alpha": out,
+        }
+
     try:
         points_path = os.path.join(out_dir, f"{task}_three_curves_points.json")
         payload = {
@@ -351,6 +399,22 @@ def _plot_three_curves_acc_recall_std(
                     acc_std_ours_pride,
                     rstd_std_ours_pride,
                 ),
+                "direct_policies": {
+                    "ours_top1_lastslot": _build_direct_policy_payload(
+                        derived_records_by_p,
+                        pride_ours_fractions,
+                        "ours_top1_lastslot",
+                        default_acc,
+                        default_recall_std,
+                    ),
+                    "ours_top1_lastslot_pride": _build_direct_policy_pride_payload(
+                        derived_records_pride_by_alpha,
+                        pride_prefix_list,
+                        "ours_top1_lastslot",
+                        default_acc,
+                        default_recall_std,
+                    ),
+                },
             },
         }
         with open(points_path, "w", encoding="utf-8") as f:

@@ -3128,6 +3128,36 @@ def main():
                 mean_nc = float(np.mean(nc)) if nc else 0.0
                 return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
 
+            def get_policy_stats(cobjs, policy_key):
+                costs, accs, rstds, nb, np2, nc = [], [], [], [], [], []
+                rkey = f"{policy_key}_recall_std"
+                for c in cobjs:
+                    pobj = c.get(policy_key, {})
+                    if isinstance(pobj, dict):
+                        if "costs" in pobj and pobj["costs"]:
+                            costs.append(float(pobj["costs"][0]))
+                        if "accuracies" in pobj and pobj["accuracies"]:
+                            accs.append(float(pobj["accuracies"][0]))
+                        st = pobj.get("stats", {})
+                        if isinstance(st, dict):
+                            if "n_base" in st:
+                                nb.append(float(st["n_base"]))
+                            if "n_probe2" in st:
+                                np2.append(float(st["n_probe2"]))
+                            if "n_cyclic" in st:
+                                nc.append(float(st["n_cyclic"]))
+                    if rkey in c:
+                        rstds.append(float(c[rkey]))
+                if not accs:
+                    return float("nan"), float("nan"), float("nan"), 0.0, 0.0, 0.0, float("nan"), float("nan"), float("nan")
+                mean_c, std_c = _macro_mean_std_over_runs(costs, n_subjects, n_runs)
+                mean_a, std_a = _macro_mean_std_over_runs(accs, n_subjects, n_runs)
+                mean_r, std_r = _macro_mean_std_over_runs(rstds, n_subjects, n_runs)
+                mean_nb = float(np.mean(nb)) if nb else 0.0
+                mean_np2 = float(np.mean(np2)) if np2 else 0.0
+                mean_nc = float(np.mean(nc)) if nc else 0.0
+                return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
+
             pride_fracs = [float(x) for x in _parse_percent_value_list(
                 getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")
             ) if 0.0 <= float(x) <= 100.0] or [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
@@ -3173,6 +3203,13 @@ def main():
                     p_str = f"{float(p):g}"
                     logger.info(f"ours_pride_sqrt_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
+            logger.info("---- ours + pride (Top1->last-slot targeted) ----")
+            for alpha in pride_alphas:
+                cobjs = derived_records_pride_by_alpha[alpha]
+                cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_policy_stats(cobjs, "ours_top1_lastslot")
+                a_str = f"{float(alpha):g}"
+                logger.info(f"ours_pride_top1last_α{a_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+
             # 3. ours
             logger.info("---- ours ----")
             for p in pride_fracs:
@@ -3180,6 +3217,13 @@ def main():
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], PRIMARY_OURS_LABEL)
                     p_str = f"{float(p):g}"
                     logger.info(f"ours_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+
+            logger.info("---- ours (Top1->last-slot targeted) ----")
+            for p in pride_fracs:
+                if float(p) in derived_records_by_p:
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_policy_stats(derived_records_by_p[float(p)], "ours_top1_lastslot")
+                    p_str = f"{float(p):g}"
+                    logger.info(f"ours_top1last_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 4. cyclic
             logger.info("---- cyclic ----")
