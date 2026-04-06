@@ -40,6 +40,9 @@ from eval_clm_online import (
     _run_online_sqrt_policy_lowconf_update,
     _run_online_sqrt_policy_with_preds,
     _run_online_sqrt_policy_with_stats,
+    _run_online_top1_last_slot_policy,
+    _run_online_top1_last_slot_policy_with_preds,
+    _run_online_top1_last_slot_policy_with_stats,
     _run_online_switch_cyclic_with_preds,
     _run_online_switch_cyclic_with_stats,
     _run_online_th1_quantile_th2_from_th1_rule,
@@ -371,6 +374,22 @@ def _probe_shift_cyclic_put_top2_into_top1_slot(base_probs: np.ndarray, k: int) 
     return s, t1, t2
 
 
+def _probe_shift_cyclic_move_top1_to_target_slot(
+    base_probs: np.ndarray,
+    k: int,
+    target_slot: int,
+) -> Tuple[int, int, int]:
+    """
+    Move the current top-1 option to a target slot via a cyclic rotation.
+    For k=5 and target_slot=k-1, this is equivalent to sending the winner to E.
+    """
+    bp = np.asarray(base_probs, dtype=np.float64)
+    t1 = int(np.argmax(bp)) if bp.size > 0 else 0
+    tgt = int(target_slot) % int(k) if int(k) > 0 else 0
+    s = int((tgt - t1) % int(k)) if int(k) > 0 else 0
+    return s, t1, tgt
+
+
 def _read_results_file(file_path):
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -460,9 +479,9 @@ def _plot_baseline_points_scatter(
     #                marker='X', s=150, color='black', label='Full', zorder=10)
 
     # 2. Policy Points (REAL-WORLD online; single point)
-    policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
-    markers = ['s', '^', 'v', 'o']
-    colors = ['orange', 'brown', 'green', 'blue']
+    policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_top1_lastslot", "ours_avggap"]
+    markers = ['s', '^', 'v', 'P', 'o']
+    colors = ['orange', 'brown', 'green', 'teal', 'blue']
     
     for key, m, c in zip(policies, markers, colors):
         if key in curve_obj:
@@ -529,9 +548,9 @@ def _plot_baseline_vs_pride_points_scatter(
                 zorder=10,
             )
 
-        policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
-        markers = ['s', '^', 'v', 'o']
-        colors = ['orange', 'brown', 'green', 'blue']
+        policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_top1_lastslot", "ours_avggap"]
+        markers = ['s', '^', 'v', 'P', 'o']
+        colors = ['orange', 'brown', 'green', 'teal', 'blue']
         for key, m, c in zip(policies, markers, colors):
             if key not in obj:
                 continue
@@ -1550,6 +1569,8 @@ def _compute_curves_for_one_percentile(
     mean_conf: np.ndarray,
     flip_trigger: np.ndarray,
     probe2_correct: np.ndarray,
+    top1_lastslot_probe_needed: np.ndarray,
+    top1_lastslot_correct: np.ndarray,
     perc_value: float,
     full_enabled: bool = True,
     forced_cyclic_ids: Optional[set] = None,
@@ -1557,6 +1578,7 @@ def _compute_curves_for_one_percentile(
     base_pred_idx: Optional[List[int]] = None,
     cyclic_pred_idx: Optional[List[int]] = None,
     probe2_pred_idx: Optional[List[int]] = None,
+    top1_lastslot_pred_idx: Optional[List[int]] = None,
     full_pred_idx: Optional[List[int]] = None,
     cyclic_fractions: Optional[List[float]] = None,
     run_seed_offset: int = 0,
@@ -1677,6 +1699,28 @@ def _compute_curves_for_one_percentile(
         offline_prefix_n=0,
         forced_cyclic_ids=forced_cyclic_ids,
     )
+    _, _, lastslot_stats = _run_online_top1_last_slot_policy_with_stats(
+        default_conf=default_conf,
+        target_probe_needed=top1_lastslot_probe_needed,
+        base_correct=base_correct_list,
+        lastslot_correct=top1_lastslot_correct,
+        cyclic_correct=cyclic_correct_list,
+        k=k,
+        th1_percent=perc_value,
+        offline_prefix_n=0,
+        forced_cyclic_ids=forced_cyclic_ids,
+    )
+    c_lastslot, a_lastslot = _run_online_top1_last_slot_policy(
+        default_conf=default_conf,
+        target_probe_needed=top1_lastslot_probe_needed,
+        base_correct=base_correct_list,
+        lastslot_correct=top1_lastslot_correct,
+        cyclic_correct=cyclic_correct_list,
+        k=k,
+        th1_percent=perc_value,
+        offline_prefix_n=0,
+        forced_cyclic_ids=forced_cyclic_ids,
+    )
     _, _, sc_stats = _run_online_switch_cyclic_with_stats(
         default_conf=default_conf,
         base_correct=base_correct_list,
@@ -1745,11 +1789,12 @@ def _compute_curves_for_one_percentile(
         **{key: {"costs": [cyclic_random_costs[key]], "accuracies": [cyclic_random_accs[key]]} for key in cyclic_random_costs},
         "switch_cyclic": {"costs": [float(switch_cyclic_cost)], "accuracies": [float(switch_cyclic_acc)], "stats": dict(sc_stats)},
         "ours_top2flip": {"costs": [float(c_top2)], "accuracies": [float(a_top2)], "stats": dict(top2_stats)},
+        "ours_top1_lastslot": {"costs": [float(c_lastslot)], "accuracies": [float(a_lastslot)], "stats": dict(lastslot_stats)},
         "ours_avggap": {"costs": [float(c_avg)], "accuracies": [float(a_avg)]},
         "ours_avggap_stats": dict(avg_stats),
     }
     # Optional: add recall_std when labels_idx and preds available
-    if labels_idx is not None and base_pred_idx is not None and cyclic_pred_idx is not None and probe2_pred_idx is not None:
+    if labels_idx is not None and base_pred_idx is not None and cyclic_pred_idx is not None and probe2_pred_idx is not None and top1_lastslot_pred_idx is not None:
         try:
             _, _, preds_sc = _run_online_switch_cyclic_with_preds(
                 default_conf, base_pred_idx, cyclic_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids
@@ -1757,11 +1802,15 @@ def _compute_curves_for_one_percentile(
             _, _, preds_top2 = _run_online_top2flip_policy_with_preds(
                 default_conf, flip_trigger, base_pred_idx, cyclic_pred_idx, probe2_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids
             )
+            _, _, preds_lastslot = _run_online_top1_last_slot_policy_with_preds(
+                default_conf, top1_lastslot_probe_needed, base_pred_idx, top1_lastslot_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids, cyclic_pred_idx
+            )
             _, _, preds_avg = _run_online_avggap_policy_with_preds(
                 default_conf, mean_conf, base_pred_idx, cyclic_pred_idx, probe2_pred_idx, labels_idx, k, perc_value, perc_value, 0, forced_cyclic_ids
             )
             curve_obj["switch_cyclic_recall_std"] = float(_recall_std(labels_idx, preds_sc, k))
             curve_obj["ours_top2flip_recall_std"] = float(_recall_std(labels_idx, preds_top2, k))
+            curve_obj["ours_top1_lastslot_recall_std"] = float(_recall_std(labels_idx, preds_lastslot, k))
             curve_obj["ours_avggap_recall_std"] = float(_recall_std(labels_idx, preds_avg, k))
             # Default: prefix->cyclic, postfix->base (debias_pride.py와 동일)
             default_pred_idx = (
@@ -2310,6 +2359,9 @@ def main():
                         mean_gap_list = []         # gap(mean(base,probe)) (content-space)
                         flip_trigger_mask = []     # pred_base != pred_probe (content-space)
                         probe2_correct_list = []   # correctness of argmax(mean_probs)
+                        top1_lastslot_probe_needed_list = []
+                        top1_lastslot_correct_list = []
+                        top1_lastslot_pred_idx_list = []
                         cyclic_gap_mean_list = []  # per-sample mean gap over cyclic rotations
                         cyclic_gap_std_list = []   # per-sample sigma over cyclic rotations
 
@@ -2325,6 +2377,18 @@ def main():
 
                             probs_base_raw = per_sample_probs[i][identity_idx]
                             agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [tuple(range(k))], k)
+                            lastslot_shift, _, _ = _probe_shift_cyclic_move_top1_to_target_slot(bp, k, k - 1)
+                            top1_lastslot_probe_needed_list.append(bool(lastslot_shift != 0))
+                            if int(lastslot_shift) == 0:
+                                agg_lastslot = np.asarray(agg_base, dtype=np.float64)
+                            else:
+                                lastslot_perm_idx = cyclic_indices[lastslot_shift]
+                                probs_lastslot_raw = per_sample_probs[i][lastslot_perm_idx]
+                                agg_lastslot = _aggregate_probs_over_permutations(
+                                    [probs_lastslot_raw.tolist()],
+                                    [cyc_perms[lastslot_shift]],
+                                    k,
+                                )
 
                             cyc_gaps_i = []
                             for cyc_local_idx, perm_idx in enumerate(cyclic_indices):
@@ -2354,10 +2418,17 @@ def main():
                             probe2_pred_idx_list.append(int(np.argmax(mean_probs)))
                             probe2_correct_list.append(pred2 == ideals[i])
 
+                            lastslot_mean_probs = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_lastslot, dtype=np.float64)) / 2.0
+                            pred_lastslot = option_ids[int(np.argmax(lastslot_mean_probs))]
+                            top1_lastslot_pred_idx_list.append(int(np.argmax(lastslot_mean_probs)))
+                            top1_lastslot_correct_list.append(pred_lastslot == ideals[i])
+
                         default_conf = np.asarray(default_conf, dtype=np.float64)
                         mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
                         arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
                         arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
+                        arr_top1_lastslot_probe_needed = np.asarray(top1_lastslot_probe_needed_list, dtype=bool)
+                        arr_top1_lastslot_correct = np.asarray(top1_lastslot_correct_list, dtype=bool)
                         cyclic_gap_mean = np.asarray(cyclic_gap_mean_list, dtype=np.float64)
                         cyclic_gap_std = np.asarray(cyclic_gap_std_list, dtype=np.float64)
                         sigma_analysis_baseline_records.append(
@@ -2440,9 +2511,13 @@ def main():
                                     base_correct_list=base_correct_list, cyclic_correct_list=cyclic_correct_list,
                                     full_correct_list=full_correct_list if full_enabled else [],
                                     default_conf=default_conf, mean_conf=mean_conf, flip_trigger=arr_flip_trigger,
-                                    probe2_correct=arr_probe2_correct, perc_value=perc, full_enabled=bool(full_enabled),
+                                    probe2_correct=arr_probe2_correct,
+                                    top1_lastslot_probe_needed=arr_top1_lastslot_probe_needed,
+                                    top1_lastslot_correct=arr_top1_lastslot_correct,
+                                    perc_value=perc, full_enabled=bool(full_enabled),
                                     labels_idx=labels_idx_for_curves, base_pred_idx=base_pred_idx_list,
                                     cyclic_pred_idx=cyclic_pred_idx_list, probe2_pred_idx=probe2_pred_idx_list,
+                                    top1_lastslot_pred_idx=top1_lastslot_pred_idx_list,
                                     full_pred_idx=full_pred_idx_list if full_enabled and len(full_pred_idx_list) == len(ideals) else None,
                                     cyclic_fractions=cyclic_fracs_run, run_seed_offset=run_idx_inner,
                                 )
@@ -2508,9 +2583,12 @@ def main():
                                 mean_gap_list_pr = []
                                 flip_trigger_mask_pr = []
                                 probe2_correct_list_pr = []
+                                top1_lastslot_probe_needed_list_pr = []
+                                top1_lastslot_correct_list_pr = []
                                 base_pred_idx_list_pr = []
                                 cyclic_pred_idx_list_pr = []
                                 probe2_pred_idx_list_pr = []
+                                top1_lastslot_pred_idx_list_pr = []
                                 cyclic_gap_mean_list_pr = []
                                 cyclic_gap_std_list_pr = []
 
@@ -2545,6 +2623,18 @@ def main():
                                     shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_row_corr, k)
                                     probe_perm_idx = cyclic_indices[shift]
                                     agg_base = _aggregate_probs_over_permutations([base_row_corr.tolist()], [tuple(range(k))], k)
+                                    lastslot_shift, _, _ = _probe_shift_cyclic_move_top1_to_target_slot(base_row_corr, k, k - 1)
+                                    top1_lastslot_probe_needed_list_pr.append(bool(lastslot_shift != 0))
+                                    if int(lastslot_shift) == 0:
+                                        agg_lastslot_pr = np.asarray(agg_base, dtype=np.float64)
+                                    else:
+                                        lastslot_perm_idx_pr = cyclic_indices[lastslot_shift]
+                                        probe_lastslot_row_corr = np.asarray(ps_corr[lastslot_perm_idx_pr], dtype=np.float64)
+                                        agg_lastslot_pr = _aggregate_probs_over_permutations(
+                                            [probe_lastslot_row_corr.tolist()],
+                                            [cyc_perms[lastslot_shift]],
+                                            k,
+                                        )
 
                                     cyc_gaps_i_pr = []
                                     for cyc_local_idx, perm_idx in enumerate(cyclic_indices):
@@ -2573,10 +2663,17 @@ def main():
                                     probe2_pred_idx_list_pr.append(int(np.argmax(mean_probs)))
                                     probe2_correct_list_pr.append(pred2 == ideals[i])
 
+                                    lastslot_mean_probs_pr = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_lastslot_pr, dtype=np.float64)) / 2.0
+                                    pred_lastslot_pr = option_ids[int(np.argmax(lastslot_mean_probs_pr))]
+                                    top1_lastslot_pred_idx_list_pr.append(int(np.argmax(lastslot_mean_probs_pr)))
+                                    top1_lastslot_correct_list_pr.append(pred_lastslot_pr == ideals[i])
+
                                 default_conf_pr = np.asarray(default_conf_pr, dtype=np.float64)
                                 mean_conf_pr = np.asarray(mean_gap_list_pr, dtype=np.float64)
                                 arr_flip_trigger_pr = np.asarray(flip_trigger_mask_pr, dtype=bool)
                                 arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
+                                arr_top1_lastslot_probe_needed_pr = np.asarray(top1_lastslot_probe_needed_list_pr, dtype=bool)
+                                arr_top1_lastslot_correct_pr = np.asarray(top1_lastslot_correct_list_pr, dtype=bool)
                                 cyclic_gap_mean_pr = np.asarray(cyclic_gap_mean_list_pr, dtype=np.float64)
                                 cyclic_gap_std_pr = np.asarray(cyclic_gap_std_list_pr, dtype=np.float64)
                                 sigma_analysis_pride_by_alpha.setdefault(float(pride_alpha), []).append(
@@ -2595,6 +2692,9 @@ def main():
                                 cyclic_for_dp = cyclic_correct_list if pride_alpha >= 100 else cyclic_correct_list_pr
                                 base_pred_dp = base_pred_idx_list if pride_alpha >= 100 else base_pred_idx_list_pr
                                 cyclic_pred_dp = cyclic_pred_idx_list if pride_alpha >= 100 else cyclic_pred_idx_list_pr
+                                top1_lastslot_correct_dp = arr_top1_lastslot_correct if pride_alpha >= 100 else arr_top1_lastslot_correct_pr
+                                top1_lastslot_probe_needed_dp = arr_top1_lastslot_probe_needed if pride_alpha >= 100 else arr_top1_lastslot_probe_needed_pr
+                                top1_lastslot_pred_dp = top1_lastslot_pred_idx_list if pride_alpha >= 100 else top1_lastslot_pred_idx_list_pr
 
                                 cobj_pr = _compute_curves_for_one_percentile(
                                     subject=subject, tag="pride_mix", k=k, perm_list=perm_list,
@@ -2602,10 +2702,13 @@ def main():
                                     full_correct_list=full_correct_list_pr if full_enabled else [],
                                     default_conf=default_conf_pr, mean_conf=mean_conf_pr,
                                     flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
+                                    top1_lastslot_probe_needed=top1_lastslot_probe_needed_dp,
+                                    top1_lastslot_correct=top1_lastslot_correct_dp,
                                     perc_value=float(pride_alpha), full_enabled=bool(full_enabled),
                                     forced_cyclic_ids=prefix_ids_set, labels_idx=labels_idx_for_curves,
                                     base_pred_idx=base_pred_dp, cyclic_pred_idx=cyclic_pred_dp,
                                     probe2_pred_idx=probe2_pred_idx_list_pr,
+                                    top1_lastslot_pred_idx=top1_lastslot_pred_dp,
                                     full_pred_idx=full_pred_idx_list_pr if full_enabled and len(full_pred_idx_list_pr) == len(ideals) else None,
                                     cyclic_fractions=[pride_alpha],
                                     run_seed_offset=run_idx_inner,

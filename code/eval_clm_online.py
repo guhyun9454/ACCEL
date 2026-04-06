@@ -218,6 +218,67 @@ def _run_online_switch_cyclic_with_preds(
     return total_cost / float(N), corrects / float(N), preds
 
 
+def _run_online_top1_last_slot_policy_with_preds(
+    default_conf: np.ndarray,
+    target_probe_needed: np.ndarray,
+    base_pred_idx: List[int],
+    lastslot_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+    cyclic_pred_idx: Optional[List[int]] = None,
+) -> Tuple[float, float, List[int]]:
+    """
+    Low-confidence samples use a single targeted probe that moves the current
+    top-1 option to the last slot (for k=5, this is the E slot), then averages
+    base + targeted probe in content space.
+    """
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), []
+    dc = np.asarray(default_conf, dtype=np.float64)
+    need_probe = np.asarray(target_probe_needed, dtype=bool)
+    q = float(th1_percent) / 100.0
+
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    past_dc: List[float] = []
+
+    for i in range(N):
+        gap_i = float(dc[i])
+
+        if i < int(offline_prefix_n):
+            pred_i = int(base_pred_idx[i])
+            preds.append(pred_i)
+            total_cost += 1.0
+            corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+            past_dc.append(gap_i)
+            continue
+
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+
+        if is_forced and cyclic_pred_idx is not None:
+            pred_i = int(cyclic_pred_idx[i])
+            c_step = float(k)
+        elif gap_i >= th1_val or not bool(need_probe[i]):
+            pred_i = int(base_pred_idx[i])
+            c_step = 1.0
+        else:
+            pred_i = int(lastslot_pred_idx[i])
+            c_step = 2.0
+
+        preds.append(pred_i)
+        total_cost += float(c_step)
+        corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+        past_dc.append(gap_i)
+
+    return total_cost / float(N), corrects / float(N), preds
+
+
 def _run_online_switch_cyclic_with_stats(
     default_conf: np.ndarray,
     base_correct: List[bool],
@@ -257,6 +318,113 @@ def _run_online_switch_cyclic_with_stats(
         total_cost += float(c_step)
         past_dc.append(gap_i)
     return total_cost / float(N), corrects / float(N), {"n_base": int(n_base), "n_cyclic": int(n_cyclic)}
+
+
+def _run_online_top1_last_slot_policy(
+    default_conf: np.ndarray,
+    target_probe_needed: np.ndarray,
+    base_correct: List[bool],
+    lastslot_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+    cyclic_correct: Optional[List[bool]] = None,
+) -> Tuple[float, float]:
+    """Correctness-only version of `_run_online_top1_last_slot_policy_with_preds`."""
+    N = len(base_correct)
+    if N == 0:
+        return float("nan"), float("nan")
+    dc = np.asarray(default_conf, dtype=np.float64)
+    need_probe = np.asarray(target_probe_needed, dtype=bool)
+    last_ok = np.asarray(lastslot_correct, dtype=bool)
+    q = float(th1_percent) / 100.0
+
+    total_cost = 0.0
+    corrects = 0
+    past_dc: List[float] = []
+
+    for i in range(N):
+        gap_i = float(dc[i])
+
+        if i < int(offline_prefix_n):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            past_dc.append(gap_i)
+            continue
+
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+
+        if is_forced and cyclic_correct is not None:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+        elif gap_i >= th1_val or not bool(need_probe[i]):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+        else:
+            total_cost += 2.0
+            corrects += 1 if bool(last_ok[i]) else 0
+
+        past_dc.append(gap_i)
+
+    return total_cost / float(N), corrects / float(N)
+
+
+def _run_online_top1_last_slot_policy_with_stats(
+    default_conf: np.ndarray,
+    target_probe_needed: np.ndarray,
+    base_correct: List[bool],
+    lastslot_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+    cyclic_correct: Optional[List[bool]] = None,
+) -> Tuple[float, float, Dict[str, int]]:
+    """Returns (cost, acc, {n_base, n_probe2, n_cyclic})."""
+    N = len(base_correct)
+    if N == 0:
+        return float("nan"), float("nan"), {"n_base": 0, "n_probe2": 0, "n_cyclic": 0}
+    dc = np.asarray(default_conf, dtype=np.float64)
+    need_probe = np.asarray(target_probe_needed, dtype=bool)
+    last_ok = np.asarray(lastslot_correct, dtype=bool)
+    q = float(th1_percent) / 100.0
+
+    total_cost = 0.0
+    corrects = 0
+    n_base, n_probe2, n_cyclic = 0, 0, 0
+    past_dc: List[float] = []
+
+    for i in range(N):
+        gap_i = float(dc[i])
+
+        if i < int(offline_prefix_n):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+            past_dc.append(gap_i)
+            continue
+
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        is_forced = (forced_cyclic_ids is not None and int(i) in forced_cyclic_ids)
+
+        if is_forced and cyclic_correct is not None:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+            n_cyclic += 1
+        elif gap_i >= th1_val or not bool(need_probe[i]):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+        else:
+            total_cost += 2.0
+            corrects += 1 if bool(last_ok[i]) else 0
+            n_probe2 += 1
+
+        past_dc.append(gap_i)
+
+    return total_cost / float(N), corrects / float(N), {"n_base": int(n_base), "n_probe2": int(n_probe2), "n_cyclic": int(n_cyclic)}
 
 
 def _run_online_sqrt_policy_with_preds(

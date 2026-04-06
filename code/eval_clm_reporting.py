@@ -26,7 +26,7 @@ def _log_baseline_report(curve_obj: dict):
     else:
         logger.info("BASELINE full(ensemble)    : (disabled)")
 
-    for key in ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]:
+    for key in ["switch_full", "switch_cyclic", "ours_top2flip", "ours_top1_lastslot", "ours_avggap"]:
         if key in curve_obj:
             c0 = float(curve_obj[key]["costs"][0])
             a0 = float(curve_obj[key]["accuracies"][0])
@@ -86,7 +86,7 @@ def _log_named_report(name: str, curve_obj: dict):
     if "full" in always:
         logger.info(f"{name} full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}{_recall_str(curve_obj.get('full_recall_std'))}")
 
-    for key in ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]:
+    for key in ["switch_full", "switch_cyclic", "ours_top2flip", "ours_top1_lastslot", "ours_avggap"]:
         if key in curve_obj:
             c0 = float(curve_obj[key]["costs"][0])
             a0 = float(curve_obj[key]["accuracies"][0])
