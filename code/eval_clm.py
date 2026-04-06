@@ -82,6 +82,7 @@ logger = logging.getLogger(__name__)
 
 PRIMARY_OURS_LABEL = "th1/sqrt2"
 LEGACY_OURS_LABEL = "th1/2"
+TOP1LAST_OURS_LABEL = "top1_lastslot"
 
 
 def _rule_th1_half(th1_val: float) -> float:
@@ -2538,10 +2539,25 @@ def main():
                                         except Exception:
                                             pass
                                         return out
+                                    def _get_static_pt_top1last(th1_p):
+                                        c, a, st = _run_online_top1_last_slot_policy_with_stats(
+                                            default_conf, arr_top1_lastslot_probe_needed, base_correct_list,
+                                            arr_top1_lastslot_correct, k, th1_p, 0, None, cyclic_correct_list)
+                                        out = {'cost': c, 'acc': a, 'label': TOP1LAST_OURS_LABEL, 'marker': 'P', 'color': 'gray'}
+                                        try:
+                                            _, _, preds = _run_online_top1_last_slot_policy_with_preds(
+                                                default_conf, arr_top1_lastslot_probe_needed, base_pred_idx_list,
+                                                top1_lastslot_pred_idx_list, labels_idx_for_curves, k, th1_p, 0, None, cyclic_pred_idx_list)
+                                            out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
+                                            out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
+                                        except Exception:
+                                            pass
+                                        return out
                                     if "heuristic_points" not in cobj:
                                         cobj["heuristic_points"] = [
                                             _get_static_pt(perc, _rule_th1_half, LEGACY_OURS_LABEL, "*"),
                                             _get_static_pt(perc, _rule_th1_sqrt2, PRIMARY_OURS_LABEL, "v"),
+                                            _get_static_pt_top1last(perc),
                                         ]
 
                                     # Ours (baseline) transition 기록
@@ -2745,10 +2761,25 @@ def main():
                                         except Exception:
                                             pass
                                         return out
+                                    def _get_static_pt_top1last_pride(th1_p):
+                                        c, a, st = _run_online_top1_last_slot_policy_with_stats(
+                                            default_conf_pr, top1_lastslot_probe_needed_dp, bc_use,
+                                            top1_lastslot_correct_dp, k, th1_p, 0, prefix_ids_set, cc_use)
+                                        out = {'cost': c, 'acc': a, 'label': TOP1LAST_OURS_LABEL, 'th1_p': th1_p, 'marker': 'P', 'color': 'gray'}
+                                        try:
+                                            _, _, preds = _run_online_top1_last_slot_policy_with_preds(
+                                                default_conf_pr, top1_lastslot_probe_needed_dp, bp_use,
+                                                top1_lastslot_pred_dp, labels_idx_for_curves, k, th1_p, 0, prefix_ids_set, cp_use)
+                                            out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
+                                            out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
+                                        except Exception:
+                                            pass
+                                        return out
                                     pts_th12 = [_get_static_pt_pride(float(th1), _rule_th1_half, LEGACY_OURS_LABEL, "*") for th1 in ours_th1_list]
                                     pts_var = [_get_static_pt_pride(float(th1), _rule_th1_sqrt2, PRIMARY_OURS_LABEL, "v") for th1 in ours_th1_list]
                                     pts_sqrt = [_get_static_pt_online_sqrt(float(th1)) for th1 in ours_th1_list]
-                                    cobj_pr["heuristic_points"] = pts_th12 + pts_var + pts_sqrt
+                                    pts_top1last = [_get_static_pt_top1last_pride(float(th1)) for th1 in ours_th1_list]
+                                    cobj_pr["heuristic_points"] = pts_th12 + pts_var + pts_sqrt + pts_top1last
                                     by_pride_alpha[pride_alpha].append(cobj_pr)
 
                                 for ours_th1 in ours_th1_list:
@@ -3206,9 +3237,11 @@ def main():
             logger.info("---- ours + pride (Top1->last-slot targeted) ----")
             for alpha in pride_alphas:
                 cobjs = derived_records_pride_by_alpha[alpha]
-                cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_policy_stats(cobjs, "ours_top1_lastslot")
-                a_str = f"{float(alpha):g}"
-                logger.info(f"ours_pride_top1last_α{a_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                for p in pride_fracs:
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, TOP1LAST_OURS_LABEL)
+                    a_str = f"{float(alpha):g}"
+                    p_str = f"{float(p):g}"
+                    logger.info(f"ours_pride_top1last_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 3. ours
             logger.info("---- ours ----")
@@ -3221,7 +3254,7 @@ def main():
             logger.info("---- ours (Top1->last-slot targeted) ----")
             for p in pride_fracs:
                 if float(p) in derived_records_by_p:
-                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_policy_stats(derived_records_by_p[float(p)], "ours_top1_lastslot")
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], TOP1LAST_OURS_LABEL)
                     p_str = f"{float(p):g}"
                     logger.info(f"ours_top1last_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 

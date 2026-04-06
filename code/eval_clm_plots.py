@@ -12,6 +12,7 @@ from utils import _purple
 logger = logging.getLogger(__name__)
 
 PRIMARY_OURS_LABEL = "th1/sqrt2"
+TOP1LAST_OURS_LABEL = "top1_lastslot"
 
 
 def _plot_three_curves_acc_recall_std(
@@ -158,13 +159,16 @@ def _plot_three_curves_acc_recall_std(
         cost_pride, acc_pride, rstd_pride, acc_std_pride, rstd_std_pride = _agg_pride_default(derived_records_pride_by_p, pride_ours_fractions) if derived_records_pride_by_p else _def5
 
     cost_ours, acc_ours, rstd_ours, acc_std_ours, rstd_std_ours = _agg_heur(derived_records_by_p, PRIMARY_OURS_LABEL, pride_ours_fractions)
+    cost_ours_top1last, acc_ours_top1last, rstd_ours_top1last, acc_std_ours_top1last, rstd_std_ours_top1last = _agg_heur(derived_records_by_p, TOP1LAST_OURS_LABEL, pride_ours_fractions)
 
     if derived_records_pride_by_alpha:
         alpha_ours = pride_prefix_list[0] if pride_prefix_list else 10
         cobjs_op = derived_records_pride_by_alpha.get(alpha_ours, [])
         cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, PRIMARY_OURS_LABEL) if cobjs_op else _def5
+        cost_ours_top1last_pride, acc_ours_top1last_pride, rstd_ours_top1last_pride, acc_std_ours_top1last_pride, rstd_std_ours_top1last_pride = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, TOP1LAST_OURS_LABEL) if cobjs_op else _def5
     else:
         cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur(derived_records_pride_by_p, PRIMARY_OURS_LABEL, pride_ours_fractions) if derived_records_pride_by_p else _def5
+        cost_ours_top1last_pride, acc_ours_top1last_pride, rstd_ours_top1last_pride, acc_std_ours_top1last_pride, rstd_std_ours_top1last_pride = _agg_heur(derived_records_pride_by_p, TOP1LAST_OURS_LABEL, pride_ours_fractions) if derived_records_pride_by_p else _def5
 
     default_acc = float(acc_cyc[0]) if acc_cyc and np.isfinite(acc_cyc[0]) else float("nan")
     default_recall_std = float(rstd_cyc[0]) if rstd_cyc and np.isfinite(rstd_cyc[0]) else float("nan")
@@ -285,7 +289,7 @@ def _plot_three_curves_acc_recall_std(
                 if not cobjs:
                     continue
                 entry = {}
-                for variant in ("th1/2", PRIMARY_OURS_LABEL, "online_sqrt_all"):
+                for variant in ("th1/2", PRIMARY_OURS_LABEL, "online_sqrt_all", TOP1LAST_OURS_LABEL):
                     co, ac, rs, asd, rsd = agg_fn(cobjs, th1_fracs, variant)
                     entry[variant] = {
                         "p": [float(x) for x in th1_fracs],
@@ -383,6 +387,17 @@ def _plot_three_curves_acc_recall_std(
                     "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_ours],
                     "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_ours],
                     "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours],
+                },
+                "ours_top1last": {
+                    "label": TOP1LAST_OURS_LABEL,
+                    "p": [float(x) for x in pride_ours_fractions],
+                    "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours_top1last],
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours_top1last],
+                    "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours_top1last],
+                    "delta_acc": [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours_top1last],
+                    "delta_recall_std": [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours_top1last],
+                    "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_ours_top1last],
+                    "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours_top1last],
                 },
                 "ours_pride": _build_ours_pride_payload(
                     derived_records_pride_by_alpha,

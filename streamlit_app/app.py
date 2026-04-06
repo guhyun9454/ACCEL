@@ -232,7 +232,12 @@ def _curve_series_from_payload(
         return {}
     curves = payload.get("curves", {}) or {}
     curve = curves.get(curve_key, {}) or {}
-    if curve_key in ("ours_pride_primary", "ours_pride_th1_2", "ours_pride_online_sqrt"):
+    if curve_key == "ours_top1last":
+        curve = curves.get("ours_top1last", {}) or {}
+        if not curve:
+            direct = curves.get("direct_policies", {}) or {}
+            curve = direct.get("ours_top1_lastslot", {}) or {}
+    elif curve_key in ("ours_pride_primary", "ours_pride_th1_2", "ours_pride_online_sqrt", "ours_pride_top1last"):
         ours_pride_data = curves.get("ours_pride", {}) or {}
         by_alpha = ours_pride_data.get("by_alpha") or {}
         if by_alpha:
@@ -244,6 +249,8 @@ def _curve_series_from_payload(
                         variant = ours_pride_variant
                     elif curve_key == "ours_pride_online_sqrt":
                         variant = "online_sqrt_all"
+                    elif curve_key == "ours_pride_top1last":
+                        variant = "top1_lastslot"
                     elif curve_key == "ours_pride_primary":
                         variant = "th1/sqrt2"
                     else:
@@ -254,11 +261,20 @@ def _curve_series_from_payload(
                         curve = (
                             alpha_curves.get("th1/sqrt2")
                             or alpha_curves.get("online_sqrt_all")
+                            or alpha_curves.get("top1_lastslot")
                             or alpha_curves.get("th1/2")
                             or alpha_curves
                         )
                 else:
                     curve = alpha_curves
+        if curve_key == "ours_pride_top1last" and not curve:
+            direct = curves.get("direct_policies", {}) or {}
+            pride_direct = direct.get("ours_top1_lastslot_pride", {}) or {}
+            by_alpha = pride_direct.get("by_alpha") or {}
+            if by_alpha:
+                alpha_key = (f"{float(ours_pride_alpha):g}" if ours_pride_alpha is not None else (list(by_alpha.keys())[0] if by_alpha else None))
+                if alpha_key and alpha_key in by_alpha:
+                    curve = by_alpha[alpha_key]
     x_key = CURVE_DEFS.get(curve_key, {}).get("x_key") or "p"
 
     xs = curve.get(x_key, []) or []
