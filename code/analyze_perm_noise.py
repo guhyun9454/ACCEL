@@ -182,6 +182,12 @@ def _make_margin_noise_bucket(with_correctness: bool = False) -> Dict[str, objec
     bucket: Dict[str, object] = {
         "residuals": [],
         "z_scores": [],
+        "z_perm_labels": [],
+        "z_ideal_labels": [],
+        "z_correct_slot_labels": [],
+        "z_top1_slot_labels": [],
+        "z_top2_slot_labels": [],
+        "z_is_correct_flags": [],
         "sample_ref_margins": [],
         "sample_sigmas": [],
         "sample_base_gaps": [],
@@ -435,6 +441,7 @@ def _summarize_tail_bins(
     bin_edges: Sequence[float],
     bin_label_counts: Dict[str, object],
     max_right_edge: float = -1.5,
+    min_left_edge: Optional[float] = None,
     top_n_bins: int = 5,
     top_n_labels: int = 8,
 ) -> Dict[str, object]:
@@ -452,8 +459,13 @@ def _summarize_tail_bins(
         if not (0 <= bin_idx < len(edges) - 1):
             continue
         right_edge = float(edges[bin_idx + 1])
-        if right_edge > float(max_right_edge):
-            continue
+        left_edge = float(edges[bin_idx])
+        if min_left_edge is not None:
+            if left_edge < float(min_left_edge):
+                continue
+        else:
+            if right_edge > float(max_right_edge):
+                continue
         total = int(sum(int(v) for v in counts.values()))
         if total <= 0:
             continue
@@ -487,7 +499,7 @@ def _summarize_tail_bins(
         key=lambda x: (-x[1], x[0]),
     )
     return {
-        "z_cutoff": float(max_right_edge),
+        "z_cutoff": float(min_left_edge if min_left_edge is not None else max_right_edge),
         "count": int(total_tail),
         "top_perm_labels": [
             {
@@ -501,6 +513,44 @@ def _summarize_tail_bins(
     }
 
 
+def _count_labels(labels: Sequence[str]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for label in labels:
+        label_s = str(label)
+        counts[label_s] = int(counts.get(label_s, 0)) + 1
+    return counts
+
+
+def _count_labels_by_ideal(labels: Sequence[str], ideal_labels: Sequence[str]) -> Tuple[Dict[str, int], Dict[str, Dict[str, int]]]:
+    total_counts: Dict[str, int] = {}
+    ideal_counts: Dict[str, Dict[str, int]] = {}
+    for label, ideal in zip(labels, ideal_labels):
+        label_s = str(label)
+        ideal_s = str(ideal)
+        total_counts[label_s] = int(total_counts.get(label_s, 0)) + 1
+        ideal_counts.setdefault(label_s, {})
+        ideal_counts[label_s][ideal_s] = int(ideal_counts[label_s].get(ideal_s, 0)) + 1
+    return total_counts, ideal_counts
+
+
+def _count_correct_by_label_and_ideal(
+    labels: Sequence[str],
+    ideal_labels: Sequence[str],
+    correct_flags: Sequence[bool],
+) -> Tuple[Dict[str, int], Dict[str, Dict[str, int]]]:
+    correct_counts: Dict[str, int] = {}
+    ideal_correct_counts: Dict[str, Dict[str, int]] = {}
+    for label, ideal, is_correct in zip(labels, ideal_labels, correct_flags):
+        if not bool(is_correct):
+            continue
+        label_s = str(label)
+        ideal_s = str(ideal)
+        correct_counts[label_s] = int(correct_counts.get(label_s, 0)) + 1
+        ideal_correct_counts.setdefault(label_s, {})
+        ideal_correct_counts[label_s][ideal_s] = int(ideal_correct_counts[label_s].get(ideal_s, 0)) + 1
+    return correct_counts, ideal_correct_counts
+
+
 def _analyze_cyclic_margin_noise(
     results: List[dict],
     perm_list: List[Tuple[int, ...]],
@@ -511,6 +561,7 @@ def _analyze_cyclic_margin_noise(
     combo_sample_limit: int = 2048,
     combo_seed: int = 0,
     negative_tail_z_cutoff: float = -1.5,
+    right_tail_z_cutoff: float = 1.5,
 ) -> Tuple[Dict[str, object], List[dict], Dict[str, object]]:
     """
     Treat the selected ensemble (cyclic or full) content-space top1/top2 margin as a per-sample reference M_ref.
@@ -570,6 +621,12 @@ def _analyze_cyclic_margin_noise(
     sample_records: List[dict] = []
     pooled_residuals: List[float] = []
     pooled_z_scores: List[float] = []
+    z_perm_labels_all: List[str] = []
+    z_ideal_labels_all: List[str] = []
+    z_correct_slot_labels_all: List[str] = []
+    z_top1_slot_labels_all: List[str] = []
+    z_top2_slot_labels_all: List[str] = []
+    z_is_correct_flags_all: List[bool] = []
     sample_ref_margins: List[float] = []
     sample_sigmas: List[float] = []
     sample_base_gaps: List[float] = []
@@ -856,6 +913,18 @@ def _analyze_cyclic_margin_noise(
                 ) + 1
         if z_vals:
             corr_bucket["z_scores"].extend(z_vals)
+            z_perm_labels_all.extend([str(x) for x in selected_perm_labels])
+            z_ideal_labels_all.extend([str(ideal_label) for _ in z_vals])
+            z_correct_slot_labels_all.extend([str(x) for x in single_view_correct_slot_labels])
+            z_top1_slot_labels_all.extend([str(x) for x in single_view_top1_slot_labels])
+            z_top2_slot_labels_all.extend([str(x) for x in single_view_top2_slot_labels])
+            z_is_correct_flags_all.extend([bool(x) for x in single_view_correct_flags])
+            corr_bucket.setdefault("z_perm_labels", []).extend([str(x) for x in selected_perm_labels])
+            corr_bucket.setdefault("z_ideal_labels", []).extend([str(ideal_label) for _ in z_vals])
+            corr_bucket.setdefault("z_correct_slot_labels", []).extend([str(x) for x in single_view_correct_slot_labels])
+            corr_bucket.setdefault("z_top1_slot_labels", []).extend([str(x) for x in single_view_top1_slot_labels])
+            corr_bucket.setdefault("z_top2_slot_labels", []).extend([str(x) for x in single_view_top2_slot_labels])
+            corr_bucket.setdefault("z_is_correct_flags", []).extend([bool(x) for x in single_view_correct_flags])
             if not corr_bucket.get("standardized_bin_edges"):
                 corr_bucket["standardized_bin_edges"] = [float(x) for x in std_bin_edges.tolist()]
             for z_val, perm_label, correct_slot_label, top1_slot_label, top2_slot_label, is_correct in zip(
@@ -1345,6 +1414,12 @@ def _analyze_cyclic_margin_noise(
     pooled_payload = {
         "residuals": [float(x) for x in pooled_residuals],
         "z_scores": [float(x) for x in pooled_z_scores],
+        "z_perm_labels": z_perm_labels_all,
+        "z_ideal_labels": z_ideal_labels_all,
+        "z_correct_slot_labels": z_correct_slot_labels_all,
+        "z_top1_slot_labels": z_top1_slot_labels_all,
+        "z_top2_slot_labels": z_top2_slot_labels_all,
+        "z_is_correct_flags": [bool(x) for x in z_is_correct_flags_all],
         "sample_ref_margins": [float(x) for x in sample_ref_margins],
         "sample_sigmas": [float(x) for x in sample_sigmas],
         "sample_base_gaps": [float(x) for x in sample_base_gaps],
@@ -1459,6 +1534,18 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
 
     bucket["residuals"].extend(payload.get("residuals", []))
     bucket["z_scores"].extend(payload.get("z_scores", []))
+    bucket.setdefault("z_perm_labels", [])
+    bucket["z_perm_labels"].extend([str(x) for x in (payload.get("z_perm_labels", []) or [])])
+    bucket.setdefault("z_ideal_labels", [])
+    bucket["z_ideal_labels"].extend([str(x) for x in (payload.get("z_ideal_labels", []) or [])])
+    bucket.setdefault("z_correct_slot_labels", [])
+    bucket["z_correct_slot_labels"].extend([str(x) for x in (payload.get("z_correct_slot_labels", []) or [])])
+    bucket.setdefault("z_top1_slot_labels", [])
+    bucket["z_top1_slot_labels"].extend([str(x) for x in (payload.get("z_top1_slot_labels", []) or [])])
+    bucket.setdefault("z_top2_slot_labels", [])
+    bucket["z_top2_slot_labels"].extend([str(x) for x in (payload.get("z_top2_slot_labels", []) or [])])
+    bucket.setdefault("z_is_correct_flags", [])
+    bucket["z_is_correct_flags"].extend([bool(x) for x in (payload.get("z_is_correct_flags", []) or [])])
     bucket["sample_ref_margins"].extend(payload.get("sample_ref_margins", []))
     bucket["sample_sigmas"].extend(payload.get("sample_sigmas", []))
     bucket["sample_base_gaps"].extend(payload.get("sample_base_gaps", []))
@@ -1663,9 +1750,16 @@ def _summarize_margin_noise_bucket(
     n_views: int,
     reference_mode: str = "cyclic",
     negative_tail_z_cutoff: float = -1.5,
+    right_tail_z_cutoff: float = 1.5,
 ) -> Dict[str, object]:
     residuals = np.asarray(bucket.get("residuals", []), dtype=np.float64)
     z_scores = np.asarray(bucket.get("z_scores", []), dtype=np.float64)
+    z_perm_labels = [str(x) for x in (bucket.get("z_perm_labels", []) or [])]
+    z_ideal_labels = [str(x) for x in (bucket.get("z_ideal_labels", []) or [])]
+    z_correct_slot_labels = [str(x) for x in (bucket.get("z_correct_slot_labels", []) or [])]
+    z_top1_slot_labels = [str(x) for x in (bucket.get("z_top1_slot_labels", []) or [])]
+    z_top2_slot_labels = [str(x) for x in (bucket.get("z_top2_slot_labels", []) or [])]
+    z_is_correct_flags = [bool(x) for x in (bucket.get("z_is_correct_flags", []) or [])]
     sample_ref = np.asarray(bucket.get("sample_ref_margins", []), dtype=np.float64)
     sample_sigma = np.asarray(bucket.get("sample_sigmas", []), dtype=np.float64)
     sample_base_gap = np.asarray(bucket.get("sample_base_gaps", []), dtype=np.float64)
@@ -1711,6 +1805,37 @@ def _summarize_margin_noise_bucket(
         bucket.get("negative_tail_perm_correct_counts", {}) or {},
         bucket.get("negative_tail_perm_ideal_total_counts", {}) or {},
         bucket.get("negative_tail_perm_ideal_correct_counts", {}) or {},
+    )
+    right_tail_idxs = [i for i, z in enumerate(z_scores.tolist()) if float(z) >= float(right_tail_z_cutoff)]
+    right_tail_perm_labels = [z_perm_labels[i] for i in right_tail_idxs if i < len(z_perm_labels)]
+    right_tail_ideal_labels = [z_ideal_labels[i] for i in right_tail_idxs if i < len(z_ideal_labels)]
+    right_tail_correct_slot_labels = [z_correct_slot_labels[i] for i in right_tail_idxs if i < len(z_correct_slot_labels)]
+    right_tail_top1_slot_labels = [z_top1_slot_labels[i] for i in right_tail_idxs if i < len(z_top1_slot_labels)]
+    right_tail_top2_slot_labels = [z_top2_slot_labels[i] for i in right_tail_idxs if i < len(z_top2_slot_labels)]
+    right_tail_correct_flags = [z_is_correct_flags[i] for i in right_tail_idxs if i < len(z_is_correct_flags)]
+    right_tail_perm_total_counts, right_tail_perm_ideal_total_counts = _count_labels_by_ideal(right_tail_perm_labels, right_tail_ideal_labels)
+    right_tail_perm_correct_counts, right_tail_perm_ideal_correct_counts = _count_correct_by_label_and_ideal(
+        right_tail_perm_labels, right_tail_ideal_labels, right_tail_correct_flags
+    )
+    right_tail_perm_accuracy = _summarize_accuracy_rstd_by_group(
+        right_tail_perm_total_counts,
+        right_tail_perm_correct_counts,
+        right_tail_perm_ideal_total_counts,
+        right_tail_perm_ideal_correct_counts,
+    )
+    right_tail_ideal_counts_map = _count_labels(right_tail_ideal_labels)
+    right_tail_ideal_correct_counts_map = _count_labels([label for label, flag in zip(right_tail_ideal_labels, right_tail_correct_flags) if flag])
+    right_tail_correct_slot_total_counts, right_tail_correct_slot_ideal_total_counts = _count_labels_by_ideal(right_tail_correct_slot_labels, right_tail_ideal_labels)
+    right_tail_correct_slot_correct_counts, right_tail_correct_slot_ideal_correct_counts = _count_correct_by_label_and_ideal(
+        right_tail_correct_slot_labels, right_tail_ideal_labels, right_tail_correct_flags
+    )
+    right_tail_top1_slot_total_counts, right_tail_top1_slot_ideal_total_counts = _count_labels_by_ideal(right_tail_top1_slot_labels, right_tail_ideal_labels)
+    right_tail_top1_slot_correct_counts, right_tail_top1_slot_ideal_correct_counts = _count_correct_by_label_and_ideal(
+        right_tail_top1_slot_labels, right_tail_ideal_labels, right_tail_correct_flags
+    )
+    right_tail_top2_slot_total_counts, right_tail_top2_slot_ideal_total_counts = _count_labels_by_ideal(right_tail_top2_slot_labels, right_tail_ideal_labels)
+    right_tail_top2_slot_correct_counts, right_tail_top2_slot_ideal_correct_counts = _count_correct_by_label_and_ideal(
+        right_tail_top2_slot_labels, right_tail_ideal_labels, right_tail_correct_flags
     )
     top_bin_perm_accuracy = []
     top_bin_top1_counts = []
@@ -1814,9 +1939,24 @@ def _summarize_margin_noise_bucket(
                 bucket.get("negative_tail_ideal_correct_counts", {}) or {},
             ),
         },
+        "right_tail_accuracy": {
+            "z_cutoff": float(right_tail_z_cutoff),
+            "count": int(len(right_tail_idxs)),
+            "correct": int(sum(1 for x in right_tail_correct_flags if x)),
+            "accuracy": (
+                float(sum(1 for x in right_tail_correct_flags if x) / len(right_tail_correct_flags))
+                if right_tail_correct_flags
+                else float("nan")
+            ),
+            "recall_std": _recall_std_from_counts(
+                right_tail_ideal_counts_map,
+                right_tail_ideal_correct_counts_map,
+            ),
+        },
         "top_standardized_bin_accuracy": top_bin_accuracy,
         "overall_perm_accuracy": overall_perm_accuracy,
         "negative_tail_perm_accuracy": negative_tail_perm_accuracy,
+        "right_tail_perm_accuracy": right_tail_perm_accuracy,
         "top_standardized_bin_perm_accuracy": top_bin_perm_accuracy,
         "top_standardized_bin_top1_slot_counts": top_bin_top1_counts,
         "top_standardized_bin_top1_slot_accuracy": top_bin_top1_accuracy,
@@ -1832,24 +1972,45 @@ def _summarize_margin_noise_bucket(
             bin_label_counts=std_bin_label_counts,
             max_right_edge=float(negative_tail_z_cutoff),
         ),
+        "right_tail_summary": _summarize_tail_bins(
+            bin_edges=std_bin_edges,
+            bin_label_counts=std_bin_label_counts,
+            min_left_edge=float(right_tail_z_cutoff),
+        ),
         "negative_tail_ideal_counts": _summarize_flat_counts(bucket.get("negative_tail_ideal_counts", {}) or {}),
+        "right_tail_ideal_counts": _summarize_flat_counts(right_tail_ideal_counts_map),
         "negative_tail_correct_slot_counts": _summarize_flat_counts(bucket.get("negative_tail_correct_slot_counts", {}) or {}),
+        "right_tail_correct_slot_counts": _summarize_flat_counts(right_tail_correct_slot_total_counts),
         "negative_tail_by_ideal": _summarize_grouped_counts(bucket.get("negative_tail_perm_by_ideal", {}) or {}),
         "negative_tail_by_correct_slot": _summarize_grouped_counts(bucket.get("negative_tail_perm_by_correct_slot", {}) or {}),
         "negative_tail_top1_slot_counts": _summarize_flat_counts(bucket.get("negative_tail_top1_slot_counts", {}) or {}),
         "negative_tail_by_top1_slot": _summarize_grouped_counts(bucket.get("negative_tail_perm_by_top1_slot", {}) or {}),
         "negative_tail_top2_slot_counts": _summarize_flat_counts(bucket.get("negative_tail_top2_slot_counts", {}) or {}),
         "negative_tail_by_top2_slot": _summarize_grouped_counts(bucket.get("negative_tail_perm_by_top2_slot", {}) or {}),
+        "right_tail_top1_slot_counts": _summarize_flat_counts(right_tail_top1_slot_total_counts),
+        "right_tail_top2_slot_counts": _summarize_flat_counts(right_tail_top2_slot_total_counts),
         "negative_tail_slot_incidence": _summarize_rate_by_group(
             bucket.get("negative_tail_correct_slot_total_counts", {}) or {},
+            bucket.get("correct_slot_total_counts", {}) or {},
+        ),
+        "right_tail_slot_incidence": _summarize_rate_by_group(
+            right_tail_correct_slot_total_counts,
             bucket.get("correct_slot_total_counts", {}) or {},
         ),
         "negative_tail_top1_slot_incidence": _summarize_rate_by_group(
             bucket.get("negative_tail_top1_slot_total_counts", {}) or {},
             bucket.get("top1_slot_total_counts", {}) or {},
         ),
+        "right_tail_top1_slot_incidence": _summarize_rate_by_group(
+            right_tail_top1_slot_total_counts,
+            bucket.get("top1_slot_total_counts", {}) or {},
+        ),
         "negative_tail_top2_slot_incidence": _summarize_rate_by_group(
             bucket.get("negative_tail_top2_slot_total_counts", {}) or {},
+            bucket.get("top2_slot_total_counts", {}) or {},
+        ),
+        "right_tail_top2_slot_incidence": _summarize_rate_by_group(
+            right_tail_top2_slot_total_counts,
             bucket.get("top2_slot_total_counts", {}) or {},
         ),
         "correct_slot_accuracy": _summarize_accuracy_rstd_by_group(
@@ -1864,6 +2025,12 @@ def _summarize_margin_noise_bucket(
             bucket.get("negative_tail_correct_slot_ideal_total_counts", {}) or {},
             bucket.get("negative_tail_correct_slot_ideal_correct_counts", {}) or {},
         ),
+        "right_tail_correct_slot_accuracy": _summarize_accuracy_rstd_by_group(
+            right_tail_correct_slot_total_counts,
+            right_tail_correct_slot_correct_counts,
+            right_tail_correct_slot_ideal_total_counts,
+            right_tail_correct_slot_ideal_correct_counts,
+        ),
         "top1_slot_accuracy": _summarize_accuracy_rstd_by_group(
             bucket.get("top1_slot_total_counts", {}) or {},
             bucket.get("top1_slot_correct_counts", {}) or {},
@@ -1875,6 +2042,12 @@ def _summarize_margin_noise_bucket(
             bucket.get("negative_tail_top1_slot_correct_counts", {}) or {},
             bucket.get("negative_tail_top1_slot_ideal_total_counts", {}) or {},
             bucket.get("negative_tail_top1_slot_ideal_correct_counts", {}) or {},
+        ),
+        "right_tail_top1_slot_accuracy": _summarize_accuracy_rstd_by_group(
+            right_tail_top1_slot_total_counts,
+            right_tail_top1_slot_correct_counts,
+            right_tail_top1_slot_ideal_total_counts,
+            right_tail_top1_slot_ideal_correct_counts,
         ),
         "top2_slot_accuracy": _summarize_accuracy_rstd_by_group(
             bucket.get("top2_slot_total_counts", {}) or {},
@@ -1888,12 +2061,19 @@ def _summarize_margin_noise_bucket(
             bucket.get("negative_tail_top2_slot_ideal_total_counts", {}) or {},
             bucket.get("negative_tail_top2_slot_ideal_correct_counts", {}) or {},
         ),
+        "right_tail_top2_slot_accuracy": _summarize_accuracy_rstd_by_group(
+            right_tail_top2_slot_total_counts,
+            right_tail_top2_slot_correct_counts,
+            right_tail_top2_slot_ideal_total_counts,
+            right_tail_top2_slot_ideal_correct_counts,
+        ),
         "correctness_split": {
             str(name): _summarize_margin_noise_bucket(
                 sub_bucket,
                 n_views=int(n_views),
                 reference_mode=str(reference_mode),
                 negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
             )
             for name, sub_bucket in (bucket.get("correctness_buckets", {}) or {}).items()
             if isinstance(sub_bucket, dict)
@@ -2047,6 +2227,7 @@ def _run_multi_results_analysis(
     use_full_reference: bool,
     combo_sample_limit: int,
     negative_tail_z_cutoff: float,
+    right_tail_z_cutoff: float,
 ) -> None:
     valid_dirs = [str(x) for x in results_dirs if str(x).strip()]
     if not valid_dirs:
@@ -2089,6 +2270,7 @@ def _run_multi_results_analysis(
                 use_full_reference=bool(use_full_reference),
                 combo_sample_limit=int(combo_sample_limit),
                 negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
             )
             bucket = model_buckets.setdefault(
                 int(k),
@@ -2107,6 +2289,7 @@ def _run_multi_results_analysis(
                 n_views=n_views,
                 reference_mode=str(bucket.get("reference_mode", "cyclic")),
                 negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
             )
             combined = combined_by_k.setdefault(
                 int(k),
@@ -2139,6 +2322,7 @@ def _run_multi_results_analysis(
             n_views=int(rec.get("n_views", int(k))),
             reference_mode=str(rec.get("reference_mode", "cyclic")),
             negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+            right_tail_z_cutoff=float(right_tail_z_cutoff),
         )
         rec["pooled_summary"] = pooled_summary
         per_model = rec.get("per_model", []) or []
@@ -2255,6 +2439,30 @@ def _run_multi_results_analysis(
         neg_tail_perm_acc = (pooled_summary or {}).get("negative_tail_perm_accuracy", []) or []
         if neg_tail_perm_acc:
             print("negative-tail perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in neg_tail_perm_acc[:5]))
+        right_tail = (pooled_summary or {}).get("right_tail_summary", {}) or {}
+        right_labels = (right_tail.get("top_perm_labels", []) or [])[:5]
+        if right_labels:
+            labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in right_labels)
+            print(
+                "right tail z>={:.2f} count={} | top perms: {}".format(
+                    float(right_tail.get("z_cutoff", float("nan"))),
+                    int(right_tail.get("count", 0)),
+                    labels_str,
+                )
+            )
+        right_tail_acc = (pooled_summary or {}).get("right_tail_accuracy", {}) or {}
+        if right_tail_acc:
+            print(
+                "right tail acc/rstd: {:.4f}/{:.4f} ({}/{})".format(
+                    float(right_tail_acc.get("accuracy", float("nan"))),
+                    float(right_tail_acc.get("recall_std", float("nan"))),
+                    int(right_tail_acc.get("correct", 0)),
+                    int(right_tail_acc.get("count", 0)),
+                )
+            )
+        right_tail_perm_acc = (pooled_summary or {}).get("right_tail_perm_accuracy", []) or []
+        if right_tail_perm_acc:
+            print("right-tail perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in right_tail_perm_acc[:5]))
         entry_acc = (pooled_summary or {}).get("entry_accuracy", {}) or {}
         if entry_acc:
             print(
@@ -2296,6 +2504,18 @@ def _run_multi_results_analysis(
         tail_slot_acc = (pooled_summary or {}).get("negative_tail_correct_slot_accuracy", []) or []
         if tail_slot_acc:
             print("negative-tail slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_slot_acc[:5]))
+        right_ideals = (pooled_summary or {}).get("right_tail_ideal_counts", []) or []
+        if right_ideals:
+            print("right tail by ideal:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in right_ideals[:5]))
+        right_slots = (pooled_summary or {}).get("right_tail_correct_slot_counts", []) or []
+        if right_slots:
+            print("right tail by correct slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in right_slots[:5]))
+        right_slot_inc = (pooled_summary or {}).get("right_tail_slot_incidence", []) or []
+        if right_slot_inc:
+            print("right-tail slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in right_slot_inc[:5]))
+        right_slot_acc = (pooled_summary or {}).get("right_tail_correct_slot_accuracy", []) or []
+        if right_slot_acc:
+            print("right-tail slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in right_slot_acc[:5]))
         neg_top1_slots = (pooled_summary or {}).get("negative_tail_top1_slot_counts", []) or []
         if neg_top1_slots:
             print("negative tail by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top1_slots[:5]))
@@ -2308,6 +2528,15 @@ def _run_multi_results_analysis(
         tail_top1_acc = (pooled_summary or {}).get("negative_tail_top1_slot_accuracy", []) or []
         if tail_top1_acc:
             print("negative-tail top1-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_top1_acc[:5]))
+        right_top1_slots = (pooled_summary or {}).get("right_tail_top1_slot_counts", []) or []
+        if right_top1_slots:
+            print("right tail by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in right_top1_slots[:5]))
+        right_top1_inc = (pooled_summary or {}).get("right_tail_top1_slot_incidence", []) or []
+        if right_top1_inc:
+            print("right-tail top1-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in right_top1_inc[:5]))
+        right_top1_acc = (pooled_summary or {}).get("right_tail_top1_slot_accuracy", []) or []
+        if right_top1_acc:
+            print("right-tail top1-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in right_top1_acc[:5]))
         neg_top2_slots = (pooled_summary or {}).get("negative_tail_top2_slot_counts", []) or []
         if neg_top2_slots:
             print("negative tail by top2 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top2_slots[:5]))
@@ -2320,6 +2549,15 @@ def _run_multi_results_analysis(
         tail_top2_acc = (pooled_summary or {}).get("negative_tail_top2_slot_accuracy", []) or []
         if tail_top2_acc:
             print("negative-tail top2-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_top2_acc[:5]))
+        right_top2_slots = (pooled_summary or {}).get("right_tail_top2_slot_counts", []) or []
+        if right_top2_slots:
+            print("right tail by top2 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in right_top2_slots[:5]))
+        right_top2_inc = (pooled_summary or {}).get("right_tail_top2_slot_incidence", []) or []
+        if right_top2_inc:
+            print("right-tail top2-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in right_top2_inc[:5]))
+        right_top2_acc = (pooled_summary or {}).get("right_tail_top2_slot_accuracy", []) or []
+        if right_top2_acc:
+            print("right-tail top2-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in right_top2_acc[:5]))
         corr_split = (pooled_summary or {}).get("correctness_split", {}) or {}
         for split_name in ("correct", "incorrect"):
             split = corr_split.get(split_name, {}) or {}
@@ -2467,6 +2705,7 @@ def _run_analysis(
     use_full_reference: bool,
     combo_sample_limit: int,
     negative_tail_z_cutoff: float,
+    right_tail_z_cutoff: float,
 ) -> None:
     subjects_list = [s.strip() for s in str(subjects or []) if str(s).strip()] if subjects else None
     cache_files = _discover_cache_files(str(cache_dir), subjects_list, int(n_runs))
@@ -2575,6 +2814,7 @@ def _run_analysis(
             combo_sample_limit=int(combo_sample_limit),
             combo_seed=int(seed),
             negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+            right_tail_z_cutoff=float(right_tail_z_cutoff),
         )
 
         per_record_reports.append({
@@ -2811,6 +3051,30 @@ def _run_analysis(
         neg_tail_perm_acc = next((rec.get("negative_tail_perm_accuracy", []) for rec in margin_summaries if rec.get("negative_tail_perm_accuracy")), [])
         if neg_tail_perm_acc:
             print("negative-tail perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in neg_tail_perm_acc[:3]))
+        right_tail = next((rec.get("right_tail_summary", {}) for rec in margin_summaries if rec.get("right_tail_summary")), {})
+        right_labels = (right_tail.get("top_perm_labels", []) or [])[:3]
+        if right_labels:
+            labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in right_labels)
+            print(
+                "right tail z>={:.2f} count={} | top perms: {}".format(
+                    float(right_tail.get("z_cutoff", float("nan"))),
+                    int(right_tail.get("count", 0)),
+                    labels_str,
+                )
+            )
+        right_tail_acc = next((rec.get("right_tail_accuracy", {}) for rec in margin_summaries if rec.get("right_tail_accuracy")), {})
+        if right_tail_acc:
+            print(
+                "right tail acc/rstd: {:.4f}/{:.4f} ({}/{})".format(
+                    float(right_tail_acc.get("accuracy", float("nan"))),
+                    float(right_tail_acc.get("recall_std", float("nan"))),
+                    int(right_tail_acc.get("correct", 0)),
+                    int(right_tail_acc.get("count", 0)),
+                )
+            )
+        right_tail_perm_acc = next((rec.get("right_tail_perm_accuracy", []) for rec in margin_summaries if rec.get("right_tail_perm_accuracy")), [])
+        if right_tail_perm_acc:
+            print("right-tail perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in right_tail_perm_acc[:3]))
         entry_acc = next((rec.get("entry_accuracy", {}) for rec in margin_summaries if rec.get("entry_accuracy")), {})
         if entry_acc:
             print(
@@ -2852,6 +3116,18 @@ def _run_analysis(
         tail_slot_acc = next((rec.get("negative_tail_correct_slot_accuracy", []) for rec in margin_summaries if rec.get("negative_tail_correct_slot_accuracy")), [])
         if tail_slot_acc:
             print("negative-tail slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_slot_acc[:3]))
+        right_ideals = next((rec.get("right_tail_ideal_counts", []) for rec in margin_summaries if rec.get("right_tail_ideal_counts")), [])
+        if right_ideals:
+            print("right tail by ideal:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in right_ideals[:3]))
+        right_slots = next((rec.get("right_tail_correct_slot_counts", []) for rec in margin_summaries if rec.get("right_tail_correct_slot_counts")), [])
+        if right_slots:
+            print("right tail by correct slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in right_slots[:3]))
+        right_slot_inc = next((rec.get("right_tail_slot_incidence", []) for rec in margin_summaries if rec.get("right_tail_slot_incidence")), [])
+        if right_slot_inc:
+            print("right-tail slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in right_slot_inc[:3]))
+        right_slot_acc = next((rec.get("right_tail_correct_slot_accuracy", []) for rec in margin_summaries if rec.get("right_tail_correct_slot_accuracy")), [])
+        if right_slot_acc:
+            print("right-tail slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in right_slot_acc[:3]))
         neg_top1_slots = next((rec.get("negative_tail_top1_slot_counts", []) for rec in margin_summaries if rec.get("negative_tail_top1_slot_counts")), [])
         if neg_top1_slots:
             print("negative tail by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top1_slots[:3]))
@@ -2864,6 +3140,15 @@ def _run_analysis(
         tail_top1_acc = next((rec.get("negative_tail_top1_slot_accuracy", []) for rec in margin_summaries if rec.get("negative_tail_top1_slot_accuracy")), [])
         if tail_top1_acc:
             print("negative-tail top1-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_top1_acc[:3]))
+        right_top1_slots = next((rec.get("right_tail_top1_slot_counts", []) for rec in margin_summaries if rec.get("right_tail_top1_slot_counts")), [])
+        if right_top1_slots:
+            print("right tail by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in right_top1_slots[:3]))
+        right_top1_inc = next((rec.get("right_tail_top1_slot_incidence", []) for rec in margin_summaries if rec.get("right_tail_top1_slot_incidence")), [])
+        if right_top1_inc:
+            print("right-tail top1-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in right_top1_inc[:3]))
+        right_top1_acc = next((rec.get("right_tail_top1_slot_accuracy", []) for rec in margin_summaries if rec.get("right_tail_top1_slot_accuracy")), [])
+        if right_top1_acc:
+            print("right-tail top1-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in right_top1_acc[:3]))
         neg_top2_slots = next((rec.get("negative_tail_top2_slot_counts", []) for rec in margin_summaries if rec.get("negative_tail_top2_slot_counts")), [])
         if neg_top2_slots:
             print("negative tail by top2 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top2_slots[:3]))
@@ -2876,6 +3161,15 @@ def _run_analysis(
         tail_top2_acc = next((rec.get("negative_tail_top2_slot_accuracy", []) for rec in margin_summaries if rec.get("negative_tail_top2_slot_accuracy")), [])
         if tail_top2_acc:
             print("negative-tail top2-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in tail_top2_acc[:3]))
+        right_top2_slots = next((rec.get("right_tail_top2_slot_counts", []) for rec in margin_summaries if rec.get("right_tail_top2_slot_counts")), [])
+        if right_top2_slots:
+            print("right tail by top2 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in right_top2_slots[:3]))
+        right_top2_inc = next((rec.get("right_tail_top2_slot_incidence", []) for rec in margin_summaries if rec.get("right_tail_top2_slot_incidence")), [])
+        if right_top2_inc:
+            print("right-tail top2-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in right_top2_inc[:3]))
+        right_top2_acc = next((rec.get("right_tail_top2_slot_accuracy", []) for rec in margin_summaries if rec.get("right_tail_top2_slot_accuracy")), [])
+        if right_top2_acc:
+            print("right-tail top2-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in right_top2_acc[:3]))
         corr_split = next((rec.get("correctness_split", {}) for rec in margin_summaries if rec.get("correctness_split")), {})
         for split_name in ("correct", "incorrect"):
             split = (corr_split.get(split_name, {}) or {})
@@ -2928,6 +3222,7 @@ def _run_analysis(
             n_views=int(bucket.get("n_views", int(k))),
             reference_mode=str(bucket.get("reference_mode", "cyclic")),
             negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+            right_tail_z_cutoff=float(right_tail_z_cutoff),
         )
 
     margin_noise_summary_path = os.path.join(str(cache_dir), "perm_margin_noise_summary.json")
@@ -3681,6 +3976,8 @@ def main() -> None:
                     help="Max number of subset combinations sampled per T for margin-noise T-scaling.")
     ap.add_argument("--negative_tail_z_cutoff", type=float, default=-1.5,
                     help="Standardized z cutoff for summarizing adverse left-tail permutations.")
+    ap.add_argument("--right_tail_z_cutoff", type=float, default=1.5,
+                    help="Standardized z cutoff for summarizing favorable right-tail permutations.")
     ap.add_argument("--save_plots", action="store_true", help="Save PNG plots into results_dir (default: off).")
     ap.add_argument("--save_margin_samples", action="store_true",
                     help="Save sample-level cyclic margin residuals/sigma_i jsonl into results_dir.")
@@ -3711,6 +4008,7 @@ def main() -> None:
             use_full_reference=bool(args.full),
             combo_sample_limit=int(args.max_t_combinations),
             negative_tail_z_cutoff=float(args.negative_tail_z_cutoff),
+            right_tail_z_cutoff=float(args.right_tail_z_cutoff),
         )
         return
 
@@ -3742,6 +4040,7 @@ def main() -> None:
             use_full_reference=bool(args.full),
             combo_sample_limit=int(args.max_t_combinations),
             negative_tail_z_cutoff=float(args.negative_tail_z_cutoff),
+            right_tail_z_cutoff=float(args.right_tail_z_cutoff),
         )
         return
 
@@ -3819,6 +4118,7 @@ def main() -> None:
             use_full_reference=bool(args.full),
             combo_sample_limit=int(args.max_t_combinations),
             negative_tail_z_cutoff=float(args.negative_tail_z_cutoff),
+            right_tail_z_cutoff=float(args.right_tail_z_cutoff),
         )
 
 
