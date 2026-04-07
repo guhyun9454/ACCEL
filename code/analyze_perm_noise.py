@@ -1838,6 +1838,13 @@ def _summarize_margin_noise_bucket(
         right_tail_top2_slot_labels, right_tail_ideal_labels, right_tail_correct_flags
     )
     top_bin_perm_accuracy = []
+    top_bin_ideal_counts_map: Dict[str, int] = {}
+    top_bin_correct_slot_total_counts: Dict[str, int] = {}
+    top_bin_correct_slot_ideal_total_counts: Dict[str, Dict[str, int]] = {}
+    top_bin_correct_slot_correct_counts: Dict[str, int] = {}
+    top_bin_correct_slot_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
+    top_bin_top1_slot_incidence = []
+    top_bin_top2_slot_incidence = []
     top_bin_top1_counts = []
     top_bin_top1_accuracy = []
     top_bin_top2_counts = []
@@ -1859,6 +1866,17 @@ def _summarize_margin_noise_bucket(
                 std_bin_ideal_correct_counts.get(str(bin_idx), {}) if isinstance(std_bin_ideal_correct_counts.get(str(bin_idx), {}), dict) else {},
             ),
         }
+        top_bin_idxs = [i for i, z in enumerate(z_scores.tolist()) if max(0, min(int(np.digitize(float(z), std_bin_edges) - 1), len(std_bin_edges) - 2)) == bin_idx]
+        top_bin_ideal_labels = [z_ideal_labels[i] for i in top_bin_idxs if i < len(z_ideal_labels)]
+        top_bin_correct_slot_labels = [z_correct_slot_labels[i] for i in top_bin_idxs if i < len(z_correct_slot_labels)]
+        top_bin_correct_flags = [z_is_correct_flags[i] for i in top_bin_idxs if i < len(z_is_correct_flags)]
+        top_bin_ideal_counts_map = _count_labels(top_bin_ideal_labels)
+        top_bin_correct_slot_total_counts, top_bin_correct_slot_ideal_total_counts = _count_labels_by_ideal(
+            top_bin_correct_slot_labels, top_bin_ideal_labels
+        )
+        top_bin_correct_slot_correct_counts, top_bin_correct_slot_ideal_correct_counts = _count_correct_by_label_and_ideal(
+            top_bin_correct_slot_labels, top_bin_ideal_labels, top_bin_correct_flags
+        )
         top_bin_perm_accuracy = _summarize_accuracy_rstd_by_group(
             std_bin_perm_total_counts.get(str(bin_idx), {}) if isinstance(std_bin_perm_total_counts.get(str(bin_idx), {}), dict) else {},
             std_bin_perm_correct_counts.get(str(bin_idx), {}) if isinstance(std_bin_perm_correct_counts.get(str(bin_idx), {}), dict) else {},
@@ -1868,6 +1886,10 @@ def _summarize_margin_noise_bucket(
         top_bin_top1_counts = _summarize_flat_counts(
             std_bin_top1_slot_counts.get(str(bin_idx), {}) if isinstance(std_bin_top1_slot_counts.get(str(bin_idx), {}), dict) else {}
         )
+        top_bin_top1_slot_incidence = _summarize_rate_by_group(
+            std_bin_top1_slot_total_counts.get(str(bin_idx), {}) if isinstance(std_bin_top1_slot_total_counts.get(str(bin_idx), {}), dict) else {},
+            bucket.get("top1_slot_total_counts", {}) or {},
+        )
         top_bin_top1_accuracy = _summarize_accuracy_rstd_by_group(
             std_bin_top1_slot_total_counts.get(str(bin_idx), {}) if isinstance(std_bin_top1_slot_total_counts.get(str(bin_idx), {}), dict) else {},
             std_bin_top1_slot_correct_counts.get(str(bin_idx), {}) if isinstance(std_bin_top1_slot_correct_counts.get(str(bin_idx), {}), dict) else {},
@@ -1876,6 +1898,10 @@ def _summarize_margin_noise_bucket(
         )
         top_bin_top2_counts = _summarize_flat_counts(
             std_bin_top2_slot_counts.get(str(bin_idx), {}) if isinstance(std_bin_top2_slot_counts.get(str(bin_idx), {}), dict) else {}
+        )
+        top_bin_top2_slot_incidence = _summarize_rate_by_group(
+            std_bin_top2_slot_total_counts.get(str(bin_idx), {}) if isinstance(std_bin_top2_slot_total_counts.get(str(bin_idx), {}), dict) else {},
+            bucket.get("top2_slot_total_counts", {}) or {},
         )
         top_bin_top2_accuracy = _summarize_accuracy_rstd_by_group(
             std_bin_top2_slot_total_counts.get(str(bin_idx), {}) if isinstance(std_bin_top2_slot_total_counts.get(str(bin_idx), {}), dict) else {},
@@ -1954,13 +1980,27 @@ def _summarize_margin_noise_bucket(
             ),
         },
         "top_standardized_bin_accuracy": top_bin_accuracy,
+        "top_standardized_bin_ideal_counts": _summarize_flat_counts(top_bin_ideal_counts_map),
+        "top_standardized_bin_correct_slot_counts": _summarize_flat_counts(top_bin_correct_slot_total_counts),
+        "top_standardized_bin_slot_incidence": _summarize_rate_by_group(
+            top_bin_correct_slot_total_counts,
+            bucket.get("correct_slot_total_counts", {}) or {},
+        ),
+        "top_standardized_bin_correct_slot_accuracy": _summarize_accuracy_rstd_by_group(
+            top_bin_correct_slot_total_counts,
+            top_bin_correct_slot_correct_counts,
+            top_bin_correct_slot_ideal_total_counts,
+            top_bin_correct_slot_ideal_correct_counts,
+        ),
         "overall_perm_accuracy": overall_perm_accuracy,
         "negative_tail_perm_accuracy": negative_tail_perm_accuracy,
         "right_tail_perm_accuracy": right_tail_perm_accuracy,
         "top_standardized_bin_perm_accuracy": top_bin_perm_accuracy,
         "top_standardized_bin_top1_slot_counts": top_bin_top1_counts,
+        "top_standardized_bin_top1_slot_incidence": top_bin_top1_slot_incidence,
         "top_standardized_bin_top1_slot_accuracy": top_bin_top1_accuracy,
         "top_standardized_bin_top2_slot_counts": top_bin_top2_counts,
+        "top_standardized_bin_top2_slot_incidence": top_bin_top2_slot_incidence,
         "top_standardized_bin_top2_slot_accuracy": top_bin_top2_accuracy,
         "mean_sample_ref_margin": float(np.mean(sample_ref)) if sample_ref.size > 0 else float("nan"),
         "mean_sample_sigma_i": float(np.mean(sample_sigma)) if sample_sigma.size > 0 else float("nan"),
@@ -2403,15 +2443,33 @@ def _run_multi_results_analysis(
         top_bin_perm_acc = (pooled_summary or {}).get("top_standardized_bin_perm_accuracy", []) or []
         if top_bin_perm_acc:
             print("top-standardized-bin perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top_bin_perm_acc[:5]))
+        top_bin_ideals = (pooled_summary or {}).get("top_standardized_bin_ideal_counts", []) or []
+        if top_bin_ideals:
+            print("top standardized bin by ideal:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in top_bin_ideals[:5]))
+        top_bin_slots = (pooled_summary or {}).get("top_standardized_bin_correct_slot_counts", []) or []
+        if top_bin_slots:
+            print("top standardized bin by correct slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in top_bin_slots[:5]))
+        top_bin_slot_inc = (pooled_summary or {}).get("top_standardized_bin_slot_incidence", []) or []
+        if top_bin_slot_inc:
+            print("top-standardized-bin slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in top_bin_slot_inc[:5]))
+        top_bin_slot_acc = (pooled_summary or {}).get("top_standardized_bin_correct_slot_accuracy", []) or []
+        if top_bin_slot_acc:
+            print("top-standardized-bin slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top_bin_slot_acc[:5]))
         top_bin_top1 = (pooled_summary or {}).get("top_standardized_bin_top1_slot_counts", []) or []
         if top_bin_top1:
             print("top standardized bin by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in top_bin_top1[:5]))
+        top_bin_top1_inc = (pooled_summary or {}).get("top_standardized_bin_top1_slot_incidence", []) or []
+        if top_bin_top1_inc:
+            print("top-standardized-bin top1-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in top_bin_top1_inc[:5]))
         top_bin_top1_acc = (pooled_summary or {}).get("top_standardized_bin_top1_slot_accuracy", []) or []
         if top_bin_top1_acc:
             print("top-standardized-bin top1-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top_bin_top1_acc[:5]))
         top_bin_top2 = (pooled_summary or {}).get("top_standardized_bin_top2_slot_counts", []) or []
         if top_bin_top2:
             print("top standardized bin by top2 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in top_bin_top2[:5]))
+        top_bin_top2_inc = (pooled_summary or {}).get("top_standardized_bin_top2_slot_incidence", []) or []
+        if top_bin_top2_inc:
+            print("top-standardized-bin top2-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in top_bin_top2_inc[:5]))
         top_bin_top2_acc = (pooled_summary or {}).get("top_standardized_bin_top2_slot_accuracy", []) or []
         if top_bin_top2_acc:
             print("top-standardized-bin top2-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top_bin_top2_acc[:5]))
@@ -3015,15 +3073,33 @@ def _run_analysis(
         top_bin_perm_acc = next((rec.get("top_standardized_bin_perm_accuracy", []) for rec in margin_summaries if rec.get("top_standardized_bin_perm_accuracy")), [])
         if top_bin_perm_acc:
             print("top-standardized-bin perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top_bin_perm_acc[:3]))
+        top_bin_ideals = next((rec.get("top_standardized_bin_ideal_counts", []) for rec in margin_summaries if rec.get("top_standardized_bin_ideal_counts")), [])
+        if top_bin_ideals:
+            print("top standardized bin by ideal:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in top_bin_ideals[:3]))
+        top_bin_slots = next((rec.get("top_standardized_bin_correct_slot_counts", []) for rec in margin_summaries if rec.get("top_standardized_bin_correct_slot_counts")), [])
+        if top_bin_slots:
+            print("top standardized bin by correct slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in top_bin_slots[:3]))
+        top_bin_slot_inc = next((rec.get("top_standardized_bin_slot_incidence", []) for rec in margin_summaries if rec.get("top_standardized_bin_slot_incidence")), [])
+        if top_bin_slot_inc:
+            print("top-standardized-bin slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in top_bin_slot_inc[:3]))
+        top_bin_slot_acc = next((rec.get("top_standardized_bin_correct_slot_accuracy", []) for rec in margin_summaries if rec.get("top_standardized_bin_correct_slot_accuracy")), [])
+        if top_bin_slot_acc:
+            print("top-standardized-bin slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top_bin_slot_acc[:3]))
         top_bin_top1 = next((rec.get("top_standardized_bin_top1_slot_counts", []) for rec in margin_summaries if rec.get("top_standardized_bin_top1_slot_counts")), [])
         if top_bin_top1:
             print("top standardized bin by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in top_bin_top1[:3]))
+        top_bin_top1_inc = next((rec.get("top_standardized_bin_top1_slot_incidence", []) for rec in margin_summaries if rec.get("top_standardized_bin_top1_slot_incidence")), [])
+        if top_bin_top1_inc:
+            print("top-standardized-bin top1-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in top_bin_top1_inc[:3]))
         top_bin_top1_acc = next((rec.get("top_standardized_bin_top1_slot_accuracy", []) for rec in margin_summaries if rec.get("top_standardized_bin_top1_slot_accuracy")), [])
         if top_bin_top1_acc:
             print("top-standardized-bin top1-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top_bin_top1_acc[:3]))
         top_bin_top2 = next((rec.get("top_standardized_bin_top2_slot_counts", []) for rec in margin_summaries if rec.get("top_standardized_bin_top2_slot_counts")), [])
         if top_bin_top2:
             print("top standardized bin by top2 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in top_bin_top2[:3]))
+        top_bin_top2_inc = next((rec.get("top_standardized_bin_top2_slot_incidence", []) for rec in margin_summaries if rec.get("top_standardized_bin_top2_slot_incidence")), [])
+        if top_bin_top2_inc:
+            print("top-standardized-bin top2-slot incidence:", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in top_bin_top2_inc[:3]))
         top_bin_top2_acc = next((rec.get("top_standardized_bin_top2_slot_accuracy", []) for rec in margin_summaries if rec.get("top_standardized_bin_top2_slot_accuracy")), [])
         if top_bin_top2_acc:
             print("top-standardized-bin top2-slot acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top_bin_top2_acc[:3]))
