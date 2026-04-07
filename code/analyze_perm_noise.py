@@ -197,6 +197,14 @@ def _make_margin_noise_bucket(with_correctness: bool = False) -> Dict[str, objec
         "negative_tail_perm_by_top1_slot": {},
         "negative_tail_top2_slot_counts": {},
         "negative_tail_perm_by_top2_slot": {},
+        "perm_total_counts": {},
+        "perm_correct_counts": {},
+        "perm_ideal_total_counts": {},
+        "perm_ideal_correct_counts": {},
+        "negative_tail_perm_total_counts": {},
+        "negative_tail_perm_correct_counts": {},
+        "negative_tail_perm_ideal_total_counts": {},
+        "negative_tail_perm_ideal_correct_counts": {},
         "ideal_total_counts": {},
         "ideal_correct_counts": {},
         "negative_tail_ideal_correct_counts": {},
@@ -204,6 +212,10 @@ def _make_margin_noise_bucket(with_correctness: bool = False) -> Dict[str, objec
         "standardized_bin_ideal_correct_counts": {},
         "standardized_bin_total_counts": {},
         "standardized_bin_correct_counts": {},
+        "standardized_bin_perm_total_counts": {},
+        "standardized_bin_perm_correct_counts": {},
+        "standardized_bin_perm_ideal_total_counts": {},
+        "standardized_bin_perm_ideal_correct_counts": {},
         "standardized_bin_top1_slot_counts": {},
         "standardized_bin_top1_slot_total_counts": {},
         "standardized_bin_top1_slot_correct_counts": {},
@@ -573,6 +585,14 @@ def _analyze_cyclic_margin_noise(
     negative_tail_perm_by_top1_slot: Dict[str, Dict[str, int]] = {}
     negative_tail_top2_slot_counts: Dict[str, int] = {}
     negative_tail_perm_by_top2_slot: Dict[str, Dict[str, int]] = {}
+    perm_total_counts: Dict[str, int] = {}
+    perm_correct_counts: Dict[str, int] = {}
+    perm_ideal_total_counts: Dict[str, Dict[str, int]] = {}
+    perm_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
+    negative_tail_perm_total_counts: Dict[str, int] = {}
+    negative_tail_perm_correct_counts: Dict[str, int] = {}
+    negative_tail_perm_ideal_total_counts: Dict[str, Dict[str, int]] = {}
+    negative_tail_perm_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
     ideal_total_counts: Dict[str, int] = {}
     ideal_correct_counts: Dict[str, int] = {}
     negative_tail_ideal_correct_counts: Dict[str, int] = {}
@@ -580,6 +600,10 @@ def _analyze_cyclic_margin_noise(
     standardized_bin_ideal_correct_counts: Dict[str, Dict[str, int]] = {}
     standardized_bin_total_counts: Dict[str, int] = {}
     standardized_bin_correct_counts: Dict[str, int] = {}
+    standardized_bin_perm_total_counts: Dict[str, Dict[str, int]] = {}
+    standardized_bin_perm_correct_counts: Dict[str, Dict[str, int]] = {}
+    standardized_bin_perm_ideal_total_counts: Dict[str, Dict[str, Dict[str, int]]] = {}
+    standardized_bin_perm_ideal_correct_counts: Dict[str, Dict[str, Dict[str, int]]] = {}
     standardized_bin_top1_slot_counts: Dict[str, Dict[str, int]] = {}
     standardized_bin_top1_slot_total_counts: Dict[str, Dict[str, int]] = {}
     standardized_bin_top1_slot_correct_counts: Dict[str, Dict[str, int]] = {}
@@ -707,7 +731,8 @@ def _analyze_cyclic_margin_noise(
         corr_bucket["sample_ref_margins"].extend([float(ref_margin)])
         corr_bucket["sample_sigmas"].extend([float(sigma_i)])
         corr_bucket["sample_base_gaps"].extend([float(base_gap)])
-        for correct_slot_label, top1_slot_label, top2_slot_label, is_correct in zip(
+        for perm_label, correct_slot_label, top1_slot_label, top2_slot_label, is_correct in zip(
+            selected_perm_labels,
             single_view_correct_slot_labels,
             single_view_top1_slot_labels,
             single_view_top2_slot_labels,
@@ -715,17 +740,41 @@ def _analyze_cyclic_margin_noise(
         ):
             entry_total_count += 1
             ideal_total_counts[str(ideal_label)] = int(ideal_total_counts.get(str(ideal_label), 0)) + 1
+            perm_total_counts[str(perm_label)] = int(perm_total_counts.get(str(perm_label), 0)) + 1
+            perm_ideal_total_counts.setdefault(str(perm_label), {})
+            perm_ideal_total_counts[str(perm_label)][str(ideal_label)] = int(
+                perm_ideal_total_counts[str(perm_label)].get(str(ideal_label), 0)
+            ) + 1
             if is_correct:
                 entry_correct_count += 1
                 ideal_correct_counts[str(ideal_label)] = int(ideal_correct_counts.get(str(ideal_label), 0)) + 1
+                perm_correct_counts[str(perm_label)] = int(perm_correct_counts.get(str(perm_label), 0)) + 1
+                perm_ideal_correct_counts.setdefault(str(perm_label), {})
+                perm_ideal_correct_counts[str(perm_label)][str(ideal_label)] = int(
+                    perm_ideal_correct_counts[str(perm_label)].get(str(ideal_label), 0)
+                ) + 1
             corr_bucket["entry_total_count"] = int(corr_bucket.get("entry_total_count", 0)) + 1
             corr_bucket.setdefault("ideal_total_counts", {})[str(ideal_label)] = int(
                 corr_bucket.setdefault("ideal_total_counts", {}).get(str(ideal_label), 0)
+            ) + 1
+            corr_bucket.setdefault("perm_total_counts", {})[str(perm_label)] = int(
+                corr_bucket.setdefault("perm_total_counts", {}).get(str(perm_label), 0)
+            ) + 1
+            corr_bucket.setdefault("perm_ideal_total_counts", {}).setdefault(str(perm_label), {})
+            corr_bucket["perm_ideal_total_counts"][str(perm_label)][str(ideal_label)] = int(
+                corr_bucket["perm_ideal_total_counts"][str(perm_label)].get(str(ideal_label), 0)
             ) + 1
             if is_correct:
                 corr_bucket["entry_correct_count"] = int(corr_bucket.get("entry_correct_count", 0)) + 1
                 corr_bucket.setdefault("ideal_correct_counts", {})[str(ideal_label)] = int(
                     corr_bucket.setdefault("ideal_correct_counts", {}).get(str(ideal_label), 0)
+                ) + 1
+                corr_bucket.setdefault("perm_correct_counts", {})[str(perm_label)] = int(
+                    corr_bucket.setdefault("perm_correct_counts", {}).get(str(perm_label), 0)
+                ) + 1
+                corr_bucket.setdefault("perm_ideal_correct_counts", {}).setdefault(str(perm_label), {})
+                corr_bucket["perm_ideal_correct_counts"][str(perm_label)][str(ideal_label)] = int(
+                    corr_bucket["perm_ideal_correct_counts"][str(perm_label)].get(str(ideal_label), 0)
                 ) + 1
             correct_slot_total_counts[str(correct_slot_label)] = int(correct_slot_total_counts.get(str(correct_slot_label), 0)) + 1
             if is_correct:
@@ -839,6 +888,22 @@ def _analyze_cyclic_margin_noise(
                 corr_bucket["standardized_bin_ideal_total_counts"][str(bin_idx)][str(ideal_label)] = int(
                     corr_bucket["standardized_bin_ideal_total_counts"][str(bin_idx)].get(str(ideal_label), 0)
                 ) + 1
+                standardized_bin_perm_total_counts.setdefault(str(bin_idx), {})
+                standardized_bin_perm_total_counts[str(bin_idx)][str(perm_label)] = int(
+                    standardized_bin_perm_total_counts[str(bin_idx)].get(str(perm_label), 0)
+                ) + 1
+                standardized_bin_perm_ideal_total_counts.setdefault(str(bin_idx), {}).setdefault(str(perm_label), {})
+                standardized_bin_perm_ideal_total_counts[str(bin_idx)][str(perm_label)][str(ideal_label)] = int(
+                    standardized_bin_perm_ideal_total_counts[str(bin_idx)][str(perm_label)].get(str(ideal_label), 0)
+                ) + 1
+                corr_bucket.setdefault("standardized_bin_perm_total_counts", {}).setdefault(str(bin_idx), {})
+                corr_bucket["standardized_bin_perm_total_counts"][str(bin_idx)][str(perm_label)] = int(
+                    corr_bucket["standardized_bin_perm_total_counts"][str(bin_idx)].get(str(perm_label), 0)
+                ) + 1
+                corr_bucket.setdefault("standardized_bin_perm_ideal_total_counts", {}).setdefault(str(bin_idx), {}).setdefault(str(perm_label), {})
+                corr_bucket["standardized_bin_perm_ideal_total_counts"][str(bin_idx)][str(perm_label)][str(ideal_label)] = int(
+                    corr_bucket["standardized_bin_perm_ideal_total_counts"][str(bin_idx)][str(perm_label)].get(str(ideal_label), 0)
+                ) + 1
                 if is_correct:
                     corr_bucket.setdefault("standardized_bin_correct_counts", {})[str(bin_idx)] = int(
                         corr_bucket.setdefault("standardized_bin_correct_counts", {}).get(str(bin_idx), 0)
@@ -846,6 +911,22 @@ def _analyze_cyclic_margin_noise(
                     corr_bucket.setdefault("standardized_bin_ideal_correct_counts", {}).setdefault(str(bin_idx), {})
                     corr_bucket["standardized_bin_ideal_correct_counts"][str(bin_idx)][str(ideal_label)] = int(
                         corr_bucket["standardized_bin_ideal_correct_counts"][str(bin_idx)].get(str(ideal_label), 0)
+                    ) + 1
+                    standardized_bin_perm_correct_counts.setdefault(str(bin_idx), {})
+                    standardized_bin_perm_correct_counts[str(bin_idx)][str(perm_label)] = int(
+                        standardized_bin_perm_correct_counts[str(bin_idx)].get(str(perm_label), 0)
+                    ) + 1
+                    standardized_bin_perm_ideal_correct_counts.setdefault(str(bin_idx), {}).setdefault(str(perm_label), {})
+                    standardized_bin_perm_ideal_correct_counts[str(bin_idx)][str(perm_label)][str(ideal_label)] = int(
+                        standardized_bin_perm_ideal_correct_counts[str(bin_idx)][str(perm_label)].get(str(ideal_label), 0)
+                    ) + 1
+                    corr_bucket.setdefault("standardized_bin_perm_correct_counts", {}).setdefault(str(bin_idx), {})
+                    corr_bucket["standardized_bin_perm_correct_counts"][str(bin_idx)][str(perm_label)] = int(
+                        corr_bucket["standardized_bin_perm_correct_counts"][str(bin_idx)].get(str(perm_label), 0)
+                    ) + 1
+                    corr_bucket.setdefault("standardized_bin_perm_ideal_correct_counts", {}).setdefault(str(bin_idx), {}).setdefault(str(perm_label), {})
+                    corr_bucket["standardized_bin_perm_ideal_correct_counts"][str(bin_idx)][str(perm_label)][str(ideal_label)] = int(
+                        corr_bucket["standardized_bin_perm_ideal_correct_counts"][str(bin_idx)][str(perm_label)].get(str(ideal_label), 0)
                     ) + 1
                 standardized_bin_top1_slot_counts.setdefault(str(bin_idx), {})
                 standardized_bin_top1_slot_counts[str(bin_idx)][str(top1_slot_label)] = int(
@@ -936,6 +1017,35 @@ def _analyze_cyclic_margin_noise(
                     if is_correct:
                         negative_tail_ideal_correct_counts[str(ideal_label)] = int(
                             negative_tail_ideal_correct_counts.get(str(ideal_label), 0)
+                        ) + 1
+                    negative_tail_perm_total_counts[str(perm_label)] = int(
+                        negative_tail_perm_total_counts.get(str(perm_label), 0)
+                    ) + 1
+                    negative_tail_perm_ideal_total_counts.setdefault(str(perm_label), {})
+                    negative_tail_perm_ideal_total_counts[str(perm_label)][str(ideal_label)] = int(
+                        negative_tail_perm_ideal_total_counts[str(perm_label)].get(str(ideal_label), 0)
+                    ) + 1
+                    corr_bucket.setdefault("negative_tail_perm_total_counts", {})[str(perm_label)] = int(
+                        corr_bucket.setdefault("negative_tail_perm_total_counts", {}).get(str(perm_label), 0)
+                    ) + 1
+                    corr_bucket.setdefault("negative_tail_perm_ideal_total_counts", {}).setdefault(str(perm_label), {})
+                    corr_bucket["negative_tail_perm_ideal_total_counts"][str(perm_label)][str(ideal_label)] = int(
+                        corr_bucket["negative_tail_perm_ideal_total_counts"][str(perm_label)].get(str(ideal_label), 0)
+                    ) + 1
+                    if is_correct:
+                        negative_tail_perm_correct_counts[str(perm_label)] = int(
+                            negative_tail_perm_correct_counts.get(str(perm_label), 0)
+                        ) + 1
+                        negative_tail_perm_ideal_correct_counts.setdefault(str(perm_label), {})
+                        negative_tail_perm_ideal_correct_counts[str(perm_label)][str(ideal_label)] = int(
+                            negative_tail_perm_ideal_correct_counts[str(perm_label)].get(str(ideal_label), 0)
+                        ) + 1
+                        corr_bucket.setdefault("negative_tail_perm_correct_counts", {})[str(perm_label)] = int(
+                            corr_bucket.setdefault("negative_tail_perm_correct_counts", {}).get(str(perm_label), 0)
+                        ) + 1
+                        corr_bucket.setdefault("negative_tail_perm_ideal_correct_counts", {}).setdefault(str(perm_label), {})
+                        corr_bucket["negative_tail_perm_ideal_correct_counts"][str(perm_label)][str(ideal_label)] = int(
+                            corr_bucket["negative_tail_perm_ideal_correct_counts"][str(perm_label)].get(str(ideal_label), 0)
                         ) + 1
                     negative_tail_correct_slot_counts[str(correct_slot_label)] = int(
                         negative_tail_correct_slot_counts.get(str(correct_slot_label), 0)
@@ -1250,6 +1360,14 @@ def _analyze_cyclic_margin_noise(
         "negative_tail_perm_by_top1_slot": negative_tail_perm_by_top1_slot,
         "negative_tail_top2_slot_counts": negative_tail_top2_slot_counts,
         "negative_tail_perm_by_top2_slot": negative_tail_perm_by_top2_slot,
+        "perm_total_counts": perm_total_counts,
+        "perm_correct_counts": perm_correct_counts,
+        "perm_ideal_total_counts": perm_ideal_total_counts,
+        "perm_ideal_correct_counts": perm_ideal_correct_counts,
+        "negative_tail_perm_total_counts": negative_tail_perm_total_counts,
+        "negative_tail_perm_correct_counts": negative_tail_perm_correct_counts,
+        "negative_tail_perm_ideal_total_counts": negative_tail_perm_ideal_total_counts,
+        "negative_tail_perm_ideal_correct_counts": negative_tail_perm_ideal_correct_counts,
         "ideal_total_counts": ideal_total_counts,
         "ideal_correct_counts": ideal_correct_counts,
         "negative_tail_ideal_correct_counts": negative_tail_ideal_correct_counts,
@@ -1257,6 +1375,10 @@ def _analyze_cyclic_margin_noise(
         "standardized_bin_ideal_correct_counts": standardized_bin_ideal_correct_counts,
         "standardized_bin_total_counts": standardized_bin_total_counts,
         "standardized_bin_correct_counts": standardized_bin_correct_counts,
+        "standardized_bin_perm_total_counts": standardized_bin_perm_total_counts,
+        "standardized_bin_perm_correct_counts": standardized_bin_perm_correct_counts,
+        "standardized_bin_perm_ideal_total_counts": standardized_bin_perm_ideal_total_counts,
+        "standardized_bin_perm_ideal_correct_counts": standardized_bin_perm_ideal_correct_counts,
         "standardized_bin_top1_slot_counts": standardized_bin_top1_slot_counts,
         "standardized_bin_top1_slot_total_counts": standardized_bin_top1_slot_total_counts,
         "standardized_bin_top1_slot_correct_counts": standardized_bin_top1_slot_correct_counts,
@@ -1387,6 +1509,14 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
         bucket.setdefault("negative_tail_perm_by_top2_slot", {}),
         payload.get("negative_tail_perm_by_top2_slot", {}) or {},
     )
+    _merge_count_maps(bucket.setdefault("perm_total_counts", {}), payload.get("perm_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("perm_correct_counts", {}), payload.get("perm_correct_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("perm_ideal_total_counts", {}), payload.get("perm_ideal_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("perm_ideal_correct_counts", {}), payload.get("perm_ideal_correct_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("negative_tail_perm_total_counts", {}), payload.get("negative_tail_perm_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("negative_tail_perm_correct_counts", {}), payload.get("negative_tail_perm_correct_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("negative_tail_perm_ideal_total_counts", {}), payload.get("negative_tail_perm_ideal_total_counts", {}) or {})
+    _merge_count_maps(bucket.setdefault("negative_tail_perm_ideal_correct_counts", {}), payload.get("negative_tail_perm_ideal_correct_counts", {}) or {})
     _merge_count_maps(bucket.setdefault("ideal_total_counts", {}), payload.get("ideal_total_counts", {}) or {})
     _merge_count_maps(bucket.setdefault("ideal_correct_counts", {}), payload.get("ideal_correct_counts", {}) or {})
     _merge_count_maps(bucket.setdefault("negative_tail_ideal_correct_counts", {}), payload.get("negative_tail_ideal_correct_counts", {}) or {})
@@ -1399,6 +1529,22 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
     _merge_count_maps(
         bucket.setdefault("standardized_bin_correct_counts", {}),
         payload.get("standardized_bin_correct_counts", {}) or {},
+    )
+    _merge_count_maps(
+        bucket.setdefault("standardized_bin_perm_total_counts", {}),
+        payload.get("standardized_bin_perm_total_counts", {}) or {},
+    )
+    _merge_count_maps(
+        bucket.setdefault("standardized_bin_perm_correct_counts", {}),
+        payload.get("standardized_bin_perm_correct_counts", {}) or {},
+    )
+    _merge_count_maps(
+        bucket.setdefault("standardized_bin_perm_ideal_total_counts", {}),
+        payload.get("standardized_bin_perm_ideal_total_counts", {}) or {},
+    )
+    _merge_count_maps(
+        bucket.setdefault("standardized_bin_perm_ideal_correct_counts", {}),
+        payload.get("standardized_bin_perm_ideal_correct_counts", {}) or {},
     )
     _merge_count_maps(
         bucket.setdefault("standardized_bin_top1_slot_counts", {}),
@@ -1531,6 +1677,10 @@ def _summarize_margin_noise_bucket(
     std_bin_correct_counts = bucket.get("standardized_bin_correct_counts", {}) or {}
     std_bin_ideal_total_counts = bucket.get("standardized_bin_ideal_total_counts", {}) or {}
     std_bin_ideal_correct_counts = bucket.get("standardized_bin_ideal_correct_counts", {}) or {}
+    std_bin_perm_total_counts = bucket.get("standardized_bin_perm_total_counts", {}) or {}
+    std_bin_perm_correct_counts = bucket.get("standardized_bin_perm_correct_counts", {}) or {}
+    std_bin_perm_ideal_total_counts = bucket.get("standardized_bin_perm_ideal_total_counts", {}) or {}
+    std_bin_perm_ideal_correct_counts = bucket.get("standardized_bin_perm_ideal_correct_counts", {}) or {}
     std_bin_top1_slot_counts = bucket.get("standardized_bin_top1_slot_counts", {}) or {}
     std_bin_top1_slot_total_counts = bucket.get("standardized_bin_top1_slot_total_counts", {}) or {}
     std_bin_top1_slot_correct_counts = bucket.get("standardized_bin_top1_slot_correct_counts", {}) or {}
@@ -1550,6 +1700,19 @@ def _summarize_margin_noise_bucket(
         bin_label_counts=std_bin_label_counts,
     )
     top_bin_accuracy = {}
+    overall_perm_accuracy = _summarize_accuracy_rstd_by_group(
+        bucket.get("perm_total_counts", {}) or {},
+        bucket.get("perm_correct_counts", {}) or {},
+        bucket.get("perm_ideal_total_counts", {}) or {},
+        bucket.get("perm_ideal_correct_counts", {}) or {},
+    )
+    negative_tail_perm_accuracy = _summarize_accuracy_rstd_by_group(
+        bucket.get("negative_tail_perm_total_counts", {}) or {},
+        bucket.get("negative_tail_perm_correct_counts", {}) or {},
+        bucket.get("negative_tail_perm_ideal_total_counts", {}) or {},
+        bucket.get("negative_tail_perm_ideal_correct_counts", {}) or {},
+    )
+    top_bin_perm_accuracy = []
     top_bin_top1_counts = []
     top_bin_top1_accuracy = []
     top_bin_top2_counts = []
@@ -1571,6 +1734,12 @@ def _summarize_margin_noise_bucket(
                 std_bin_ideal_correct_counts.get(str(bin_idx), {}) if isinstance(std_bin_ideal_correct_counts.get(str(bin_idx), {}), dict) else {},
             ),
         }
+        top_bin_perm_accuracy = _summarize_accuracy_rstd_by_group(
+            std_bin_perm_total_counts.get(str(bin_idx), {}) if isinstance(std_bin_perm_total_counts.get(str(bin_idx), {}), dict) else {},
+            std_bin_perm_correct_counts.get(str(bin_idx), {}) if isinstance(std_bin_perm_correct_counts.get(str(bin_idx), {}), dict) else {},
+            std_bin_perm_ideal_total_counts.get(str(bin_idx), {}) if isinstance(std_bin_perm_ideal_total_counts.get(str(bin_idx), {}), dict) else {},
+            std_bin_perm_ideal_correct_counts.get(str(bin_idx), {}) if isinstance(std_bin_perm_ideal_correct_counts.get(str(bin_idx), {}), dict) else {},
+        )
         top_bin_top1_counts = _summarize_flat_counts(
             std_bin_top1_slot_counts.get(str(bin_idx), {}) if isinstance(std_bin_top1_slot_counts.get(str(bin_idx), {}), dict) else {}
         )
@@ -1646,6 +1815,9 @@ def _summarize_margin_noise_bucket(
             ),
         },
         "top_standardized_bin_accuracy": top_bin_accuracy,
+        "overall_perm_accuracy": overall_perm_accuracy,
+        "negative_tail_perm_accuracy": negative_tail_perm_accuracy,
+        "top_standardized_bin_perm_accuracy": top_bin_perm_accuracy,
         "top_standardized_bin_top1_slot_counts": top_bin_top1_counts,
         "top_standardized_bin_top1_slot_accuracy": top_bin_top1_accuracy,
         "top_standardized_bin_top2_slot_counts": top_bin_top2_counts,
@@ -2044,6 +2216,9 @@ def _run_multi_results_analysis(
                     int(top_bin_acc.get("count", 0)),
                 )
             )
+        top_bin_perm_acc = (pooled_summary or {}).get("top_standardized_bin_perm_accuracy", []) or []
+        if top_bin_perm_acc:
+            print("top-standardized-bin perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top_bin_perm_acc[:5]))
         top_bin_top1 = (pooled_summary or {}).get("top_standardized_bin_top1_slot_counts", []) or []
         if top_bin_top1:
             print("top standardized bin by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in top_bin_top1[:5]))
@@ -2077,6 +2252,9 @@ def _run_multi_results_analysis(
                     int(neg_tail_acc.get("count", 0)),
                 )
             )
+        neg_tail_perm_acc = (pooled_summary or {}).get("negative_tail_perm_accuracy", []) or []
+        if neg_tail_perm_acc:
+            print("negative-tail perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in neg_tail_perm_acc[:5]))
         entry_acc = (pooled_summary or {}).get("entry_accuracy", {}) or {}
         if entry_acc:
             print(
@@ -2087,6 +2265,9 @@ def _run_multi_results_analysis(
                     int(entry_acc.get("count", 0)),
                 )
             )
+        overall_perm_acc = (pooled_summary or {}).get("overall_perm_accuracy", []) or []
+        if overall_perm_acc:
+            print("overall perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in overall_perm_acc[:5]))
         neg_bins = (neg_tail.get("top_bins", []) or [])
         if neg_bins:
             top_bin = neg_bins[0]
@@ -2591,6 +2772,9 @@ def _run_analysis(
                     int(top_bin_acc.get("count", 0)),
                 )
             )
+        top_bin_perm_acc = next((rec.get("top_standardized_bin_perm_accuracy", []) for rec in margin_summaries if rec.get("top_standardized_bin_perm_accuracy")), [])
+        if top_bin_perm_acc:
+            print("top-standardized-bin perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in top_bin_perm_acc[:3]))
         top_bin_top1 = next((rec.get("top_standardized_bin_top1_slot_counts", []) for rec in margin_summaries if rec.get("top_standardized_bin_top1_slot_counts")), [])
         if top_bin_top1:
             print("top standardized bin by top1 slot:", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in top_bin_top1[:3]))
@@ -2624,6 +2808,9 @@ def _run_analysis(
                     int(neg_tail_acc.get("count", 0)),
                 )
             )
+        neg_tail_perm_acc = next((rec.get("negative_tail_perm_accuracy", []) for rec in margin_summaries if rec.get("negative_tail_perm_accuracy")), [])
+        if neg_tail_perm_acc:
+            print("negative-tail perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in neg_tail_perm_acc[:3]))
         entry_acc = next((rec.get("entry_accuracy", {}) for rec in margin_summaries if rec.get("entry_accuracy")), {})
         if entry_acc:
             print(
@@ -2634,6 +2821,9 @@ def _run_analysis(
                     int(entry_acc.get("count", 0)),
                 )
             )
+        overall_perm_acc = next((rec.get("overall_perm_accuracy", []) for rec in margin_summaries if rec.get("overall_perm_accuracy")), [])
+        if overall_perm_acc:
+            print("overall perm acc/rstd:", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in overall_perm_acc[:3]))
         neg_bins = (neg_tail.get("top_bins", []) or [])
         if neg_bins:
             top_bin = neg_bins[0]
