@@ -864,6 +864,7 @@ def _analyze_cyclic_margin_noise(
         sample_ref_margins.append(ref_margin)
         sample_sigmas.append(sigma_i)
         sample_base_gaps.append(base_gap)
+        corr_bucket = correctness_buckets["correct" if reference_correct else "incorrect"]
         corr_bucket.setdefault("residual_perm_labels", []).extend(pooled_payload_perm_labels)
         corr_bucket.setdefault("residual_ideal_labels", []).extend(pooled_payload_ideal_labels)
         corr_bucket.setdefault("residual_correct_slot_labels", []).extend(pooled_payload_correct_slot_labels)
@@ -882,7 +883,6 @@ def _analyze_cyclic_margin_noise(
         else:
             z_vals = []
 
-        corr_bucket = correctness_buckets["correct" if reference_correct else "incorrect"]
         corr_bucket["residuals"].extend([float(x) for x in residuals.tolist()])
         corr_bucket["sample_ref_margins"].extend([float(ref_margin)])
         corr_bucket["sample_sigmas"].extend([float(sigma_i)])
