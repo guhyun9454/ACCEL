@@ -2686,7 +2686,7 @@ def _save_raw_param_sweep_plot(
     laplace_scale: float,
     cauchy_loc: float,
     cauchy_scale: float,
-    scale_multipliers: Sequence[float] = (0.7, 1.0, 1.5),
+    scale_multipliers: Sequence[float] = (0.5, 1.0, 1.5),
 ) -> Optional[str]:
     arr = np.asarray(values, dtype=np.float64).ravel()
     arr = arr[np.isfinite(arr)]
