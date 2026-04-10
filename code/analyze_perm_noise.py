@@ -2006,6 +2006,8 @@ def _summarize_margin_noise_bucket(
     t1_resid = np.asarray(t_residuals.get(1, []), dtype=np.float64)
     t1_std = float(np.std(t1_resid)) if t1_resid.size > 0 else float("nan")
     fit_raw = _gaussian_fit_report(residuals)
+    fit_raw_laplace = _laplace_fit_report(residuals)
+    fit_raw_cauchy = _cauchy_fit_report(residuals)
     raw_mu = float(fit_raw.get("mean", float("nan")))
     raw_sigma = float(fit_raw.get("std", float("nan")))
     raw_bin_edges: List[float] = []
@@ -2226,6 +2228,8 @@ def _summarize_margin_noise_bucket(
         "n_standardized_residuals": int(z_scores.size),
         "n_samples": int(sample_sigma.size),
         "pooled_residual_fit": fit_raw,
+        "pooled_residual_laplace_fit": fit_raw_laplace,
+        "pooled_residual_cauchy_fit": fit_raw_cauchy,
         "standardized_residual_fit": _gaussian_fit_report(z_scores),
         "raw_top_bin_summary": raw_top_bin,
         "raw_top_bin_subset": raw_top_bin_subset,
