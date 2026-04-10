@@ -165,6 +165,97 @@ def _gaussian_fit_report(values: Sequence[float], bins: int = 60) -> Dict[str, f
     return out
 
 
+def _laplace_fit_report(values: Sequence[float], bins: int = 60) -> Dict[str, float]:
+    arr = np.asarray(values, dtype=np.float64).ravel()
+    arr = arr[np.isfinite(arr)]
+    out: Dict[str, float] = {
+        "n": int(arr.size),
+        "loc": float("nan"),
+        "scale": float("nan"),
+        "ks_to_fit": float("nan"),
+        "kl_hist_to_fit": float("nan"),
+    }
+    if arr.size == 0:
+        return out
+
+    loc = float(np.median(arr))
+    scale = float(np.mean(np.abs(arr - loc)))
+    out["loc"] = loc
+    out["scale"] = scale
+    if not np.isfinite(scale) or scale <= 1e-12 or arr.size < 2:
+        return out
+
+    def _cdf(x: float) -> float:
+        if x < loc:
+            return 0.5 * math.exp((x - loc) / scale)
+        return 1.0 - 0.5 * math.exp(-(x - loc) / scale)
+
+    xs = np.sort(arr)
+    fit_cdf = np.asarray([_cdf(float(v)) for v in xs], dtype=np.float64)
+    n = xs.size
+    ecdf_hi = np.arange(1, n + 1, dtype=np.float64) / float(n)
+    ecdf_lo = np.arange(0, n, dtype=np.float64) / float(n)
+    out["ks_to_fit"] = max(float(np.max(np.abs(ecdf_hi - fit_cdf))), float(np.max(np.abs(fit_cdf - ecdf_lo))))
+
+    hist_counts, edges = np.histogram(arr, bins=max(10, int(bins)))
+    total = int(np.sum(hist_counts))
+    if total > 0:
+        p = hist_counts.astype(np.float64) / float(total)
+        q = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            q.append(max(1e-12, float(_cdf(float(hi)) - _cdf(float(lo)))))
+        q = np.asarray(q, dtype=np.float64)
+        q = q / float(np.sum(q))
+        mask = p > 0.0
+        out["kl_hist_to_fit"] = float(np.sum(p[mask] * np.log(p[mask] / q[mask])))
+    return out
+
+
+def _cauchy_fit_report(values: Sequence[float], bins: int = 60) -> Dict[str, float]:
+    arr = np.asarray(values, dtype=np.float64).ravel()
+    arr = arr[np.isfinite(arr)]
+    out: Dict[str, float] = {
+        "n": int(arr.size),
+        "loc": float("nan"),
+        "scale": float("nan"),
+        "ks_to_fit": float("nan"),
+        "kl_hist_to_fit": float("nan"),
+    }
+    if arr.size == 0:
+        return out
+
+    loc = float(np.median(arr))
+    q25, q75 = np.percentile(arr, [25.0, 75.0])
+    scale = float(max(1e-12, 0.5 * (q75 - q25)))
+    out["loc"] = loc
+    out["scale"] = scale
+    if not np.isfinite(scale) or scale <= 1e-12 or arr.size < 2:
+        return out
+
+    def _cdf(x: float) -> float:
+        return 0.5 + math.atan((x - loc) / scale) / math.pi
+
+    xs = np.sort(arr)
+    fit_cdf = np.asarray([_cdf(float(v)) for v in xs], dtype=np.float64)
+    n = xs.size
+    ecdf_hi = np.arange(1, n + 1, dtype=np.float64) / float(n)
+    ecdf_lo = np.arange(0, n, dtype=np.float64) / float(n)
+    out["ks_to_fit"] = max(float(np.max(np.abs(ecdf_hi - fit_cdf))), float(np.max(np.abs(fit_cdf - ecdf_lo))))
+
+    hist_counts, edges = np.histogram(arr, bins=max(10, int(bins)))
+    total = int(np.sum(hist_counts))
+    if total > 0:
+        p = hist_counts.astype(np.float64) / float(total)
+        q = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            q.append(max(1e-12, float(_cdf(float(hi)) - _cdf(float(lo)))))
+        q = np.asarray(q, dtype=np.float64)
+        q = q / float(np.sum(q))
+        mask = p > 0.0
+        out["kl_hist_to_fit"] = float(np.sum(p[mask] * np.log(p[mask] / q[mask])))
+    return out
+
+
 def _merge_count_maps(dst: Dict[str, object], src: Dict[str, object]) -> None:
     for key, val in (src or {}).items():
         key_s = str(key)
@@ -1444,6 +1535,8 @@ def _analyze_cyclic_margin_noise(
         "corr_ref_margin_sigma": _safe_corr(sample_ref_arr, sample_sigma_arr),
         "corr_base_gap_sigma": _safe_corr(sample_base_gap_arr, sample_sigma_arr),
         "pooled_residual_fit": _gaussian_fit_report(pooled_resid_arr),
+        "pooled_residual_laplace_fit": _laplace_fit_report(pooled_resid_arr),
+        "pooled_residual_cauchy_fit": _cauchy_fit_report(pooled_resid_arr),
         "standardized_residual_fit": _gaussian_fit_report(pooled_z_arr),
         "peak_bin_summary": _summarize_peak_bins(
             bin_edges=std_bin_edges.tolist(),
@@ -2595,6 +2688,9 @@ def _run_multi_results_analysis(
         }
 
         pooled_fit = pooled_summary.get("standardized_residual_fit", {}) or {}
+        raw_fit = pooled_summary.get("pooled_residual_fit", {}) or {}
+        raw_laplace_fit = pooled_summary.get("pooled_residual_laplace_fit", {}) or {}
+        raw_cauchy_fit = pooled_summary.get("pooled_residual_cauchy_fit", {}) or {}
         print(f"--- k={int(k)} ---")
         print(
             "models={}, pooled KS={:.4f}, pooled KL={:.4f}, pooled skew={:.4f}, pooled kurtosis={:.4f}".format(
@@ -2612,6 +2708,16 @@ def _run_multi_results_analysis(
                 float(macro_average.get("skew", float("nan"))),
                 float(macro_average.get("excess_kurtosis", float("nan"))),
                 float(macro_average.get("mean_sigma_i", float("nan"))),
+            )
+        )
+        print(
+            "raw pooled fits: Gaussian KS={:.4f}, KL={:.4f} | Laplace KS={:.4f}, KL={:.4f} | Cauchy KS={:.4f}, KL={:.4f}".format(
+                float(raw_fit.get("ks_to_fit", float("nan"))),
+                float(raw_fit.get("kl_hist_to_fit", float("nan"))),
+                float(raw_laplace_fit.get("ks_to_fit", float("nan"))),
+                float(raw_laplace_fit.get("kl_hist_to_fit", float("nan"))),
+                float(raw_cauchy_fit.get("ks_to_fit", float("nan"))),
+                float(raw_cauchy_fit.get("kl_hist_to_fit", float("nan"))),
             )
         )
         peak_info = (pooled_summary or {}).get("peak_bin_summary", []) or []
@@ -3301,6 +3407,14 @@ def _run_analysis(
                 _mean_nested(["pooled_residual_fit", "std"]),
                 _mean_nested(["pooled_residual_fit", "ks_to_fit"]),
                 _mean_nested(["pooled_residual_fit", "kl_hist_to_fit"]),
+            )
+        )
+        print(
+            "raw alt fits: Laplace KS={:.4f}, KL={:.4f} | Cauchy KS={:.4f}, KL={:.4f}".format(
+                _mean_nested(["pooled_residual_laplace_fit", "ks_to_fit"]),
+                _mean_nested(["pooled_residual_laplace_fit", "kl_hist_to_fit"]),
+                _mean_nested(["pooled_residual_cauchy_fit", "ks_to_fit"]),
+                _mean_nested(["pooled_residual_cauchy_fit", "kl_hist_to_fit"]),
             )
         )
         print(
