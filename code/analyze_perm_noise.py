@@ -270,6 +270,60 @@ def _cauchy_pdf(xs: np.ndarray, loc: float, scale: float) -> np.ndarray:
     return 1.0 / (math.pi * scale * (1.0 + ((xs_arr - loc) / scale) ** 2))
 
 
+def _summarize_fit_reports_by_group(
+    values: Sequence[float],
+    labels: Sequence[object],
+    top_n: int = 8,
+) -> List[dict]:
+    arr = np.asarray(values, dtype=np.float64).ravel()
+    lab_list = [str(x) for x in labels]
+    n = min(int(arr.size), len(lab_list))
+    if n <= 0:
+        return []
+    arr = arr[:n]
+    lab_list = lab_list[:n]
+    grouped: Dict[str, List[float]] = {}
+    for val, label in zip(arr.tolist(), lab_list):
+        if not np.isfinite(float(val)):
+            continue
+        grouped.setdefault(str(label), []).append(float(val))
+    items: List[dict] = []
+    for label, vals in grouped.items():
+        vals_arr = np.asarray(vals, dtype=np.float64)
+        if vals_arr.size <= 0:
+            continue
+        items.append({
+            "label": str(label),
+            "count": int(vals_arr.size),
+            "gaussian_fit": _gaussian_fit_report(vals_arr),
+            "laplace_fit": _laplace_fit_report(vals_arr),
+            "cauchy_fit": _cauchy_fit_report(vals_arr),
+        })
+    items.sort(key=lambda x: (-int(x.get("count", 0)), str(x.get("label", ""))))
+    return items[: int(top_n)]
+
+
+def _format_group_fit_reports(items: Sequence[dict], top_n: int = 8) -> str:
+    parts: List[str] = []
+    for item in list(items or [])[: int(top_n)]:
+        label = str(item.get("label", ""))
+        g = item.get("gaussian_fit", {}) or {}
+        l = item.get("laplace_fit", {}) or {}
+        c = item.get("cauchy_fit", {}) or {}
+        parts.append(
+            "{}: G({:.3f}/{:.3f}) L({:.3f}/{:.3f}) C({:.3f}/{:.3f})".format(
+                label,
+                float(g.get("ks_to_fit", float("nan"))),
+                float(g.get("kl_hist_to_fit", float("nan"))),
+                float(l.get("ks_to_fit", float("nan"))),
+                float(l.get("kl_hist_to_fit", float("nan"))),
+                float(c.get("ks_to_fit", float("nan"))),
+                float(c.get("kl_hist_to_fit", float("nan"))),
+            )
+        )
+    return ", ".join(parts)
+
+
 def _merge_count_maps(dst: Dict[str, object], src: Dict[str, object]) -> None:
     for key, val in (src or {}).items():
         key_s = str(key)
@@ -2244,6 +2298,10 @@ def _summarize_margin_noise_bucket(
         "pooled_residual_fit": fit_raw,
         "pooled_residual_laplace_fit": fit_raw_laplace,
         "pooled_residual_cauchy_fit": fit_raw_cauchy,
+        "raw_correct_slot_fits": _summarize_fit_reports_by_group(
+            bucket.get("residuals", []) or [],
+            bucket.get("residual_correct_slot_labels", []) or [],
+        ),
         "standardized_residual_fit": _gaussian_fit_report(z_scores),
         "raw_top_bin_summary": raw_top_bin,
         "raw_top_bin_subset": raw_top_bin_subset,
@@ -2430,6 +2488,103 @@ def _summarize_margin_noise_bucket(
     }
 
 
+def _save_raw_fit_by_label_plot(
+    *,
+    plt,
+    values: Sequence[float],
+    labels: Sequence[object],
+    out_path: str,
+    title: str,
+) -> Optional[str]:
+    arr = np.asarray(values, dtype=np.float64).ravel()
+    lab_list = [str(x) for x in labels]
+    n = min(int(arr.size), len(lab_list))
+    if n <= 0:
+        return None
+    arr = arr[:n]
+    lab_list = lab_list[:n]
+    grouped: Dict[str, np.ndarray] = {}
+    label_arr = np.asarray(lab_list, dtype=object)
+    for label in sorted(set(lab_list)):
+        vals = arr[label_arr == label]
+        vals = vals[np.isfinite(vals)]
+        if vals.size > 0:
+            grouped[str(label)] = vals
+    if not grouped:
+        return None
+
+    labels_sorted = sorted(grouped.keys())
+    n_panels = len(labels_sorted)
+    ncols = min(3, max(1, n_panels))
+    nrows = int(math.ceil(float(n_panels) / float(ncols)))
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(4.8 * ncols, 3.8 * nrows), dpi=180)
+    axes_arr = np.atleast_1d(axes).ravel()
+
+    for ax, label in zip(axes_arr, labels_sorted):
+        vals = grouped[label]
+        fit_g = _gaussian_fit_report(vals)
+        fit_l = _laplace_fit_report(vals)
+        fit_c = _cauchy_fit_report(vals)
+        ax.hist(vals, bins=40, density=True, alpha=0.68, color="#6baed6", label=f"{label} residuals")
+        x_min = float(np.min(vals))
+        x_max = float(np.max(vals))
+        if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+            xs = np.linspace(x_min, x_max, 400)
+            mu = float(fit_g.get("mean", float("nan")))
+            sigma = float(fit_g.get("std", float("nan")))
+            if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12:
+                pdf_g = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
+                ax.plot(
+                    xs,
+                    pdf_g,
+                    color="#d62728",
+                    lw=1.8,
+                    label="G ({:.3f}/{:.3f})".format(
+                        float(fit_g.get("ks_to_fit", float("nan"))),
+                        float(fit_g.get("kl_hist_to_fit", float("nan"))),
+                    ),
+                )
+            pdf_l = _laplace_pdf(xs, float(fit_l.get("loc", float("nan"))), float(fit_l.get("scale", float("nan"))))
+            if np.all(np.isfinite(pdf_l)):
+                ax.plot(
+                    xs,
+                    pdf_l,
+                    color="#2ca02c",
+                    lw=1.6,
+                    ls="--",
+                    label="L ({:.3f}/{:.3f})".format(
+                        float(fit_l.get("ks_to_fit", float("nan"))),
+                        float(fit_l.get("kl_hist_to_fit", float("nan"))),
+                    ),
+                )
+            pdf_c = _cauchy_pdf(xs, float(fit_c.get("loc", float("nan"))), float(fit_c.get("scale", float("nan"))))
+            if np.all(np.isfinite(pdf_c)):
+                ax.plot(
+                    xs,
+                    pdf_c,
+                    color="#9467bd",
+                    lw=1.6,
+                    ls=":",
+                    label="C ({:.3f}/{:.3f})".format(
+                        float(fit_c.get("ks_to_fit", float("nan"))),
+                        float(fit_c.get("kl_hist_to_fit", float("nan"))),
+                    ),
+                )
+        ax.set_title(f"slot={label}, n={int(vals.size)}", fontsize=10)
+        ax.set_xlabel("raw residual")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=7)
+
+    for ax in axes_arr[len(labels_sorted):]:
+        ax.axis("off")
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    fig.savefig(out_path)
+    plt.close(fig)
+    return out_path
+
+
 def _save_multi_model_margin_plots(
     *,
     combined_by_k: Dict[int, Dict[str, object]],
@@ -2516,6 +2671,16 @@ def _save_multi_model_margin_plots(
             fig.savefig(p)
             plt.close(fig)
             saved.append(p)
+            p_slot = os.path.join(out_dir, f"multi_model_margin_noise_raw_hist_by_correct_slot_k{k}.png")
+            saved_slot = _save_raw_fit_by_label_plot(
+                plt=plt,
+                values=raw_residuals,
+                labels=rec.get("pooled_bucket", {}).get("residual_correct_slot_labels", []) or [],
+                out_path=p_slot,
+                title=f"Multi-model pooled {ref_mode} raw residuals by correct slot (k={k})",
+            )
+            if saved_slot:
+                saved.append(saved_slot)
 
         if z_scores.size > 0:
             fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
@@ -2775,6 +2940,9 @@ def _run_multi_results_analysis(
                 float(raw_cauchy_fit.get("kl_hist_to_fit", float("nan"))),
             )
         )
+        raw_slot_fits = (pooled_summary or {}).get("raw_correct_slot_fits", []) or []
+        if raw_slot_fits:
+            print("raw correct-slot fits:", _format_group_fit_reports(raw_slot_fits, top_n=8))
         peak_info = (pooled_summary or {}).get("peak_bin_summary", []) or []
         if peak_info:
             top_bin = peak_info[0]
@@ -3472,6 +3640,9 @@ def _run_analysis(
                 _mean_nested(["pooled_residual_cauchy_fit", "kl_hist_to_fit"]),
             )
         )
+        raw_slot_fits = next((rec.get("raw_correct_slot_fits", []) for rec in margin_summaries if rec.get("raw_correct_slot_fits")), [])
+        if raw_slot_fits:
+            print("raw correct-slot fits:", _format_group_fit_reports(raw_slot_fits, top_n=8))
         print(
             "standardized fit: mean={:.4f}, std={:.4f}, ks={:.4f}, kl={:.4f}".format(
                 _mean_nested(["standardized_residual_fit", "mean"]),
@@ -4252,6 +4423,16 @@ def _save_noise_plots(
                     fig.savefig(p)
                     plt.close(fig)
                     saved.append(p)
+                    p_slot = os.path.join(out_dir, f"perm_margin_noise_raw_hist_by_correct_slot_k{k}.png")
+                    saved_slot = _save_raw_fit_by_label_plot(
+                        plt=plt,
+                        values=raw_residuals,
+                        labels=bucket.get("residual_correct_slot_labels", []) or [],
+                        out_path=p_slot,
+                        title=f"{mode_label} raw residuals by correct slot (k={k})",
+                    )
+                    if saved_slot:
+                        saved.append(saved_slot)
 
                 if z_scores.size > 0:
                     fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
