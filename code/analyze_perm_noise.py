@@ -270,6 +270,64 @@ def _cauchy_pdf(xs: np.ndarray, loc: float, scale: float) -> np.ndarray:
     return 1.0 / (math.pi * scale * (1.0 + ((xs_arr - loc) / scale) ** 2))
 
 
+def _fit_report_from_cdf(values: Sequence[float], cdf_fn, bins: int = 60) -> Dict[str, float]:
+    arr = np.asarray(values, dtype=np.float64).ravel()
+    arr = arr[np.isfinite(arr)]
+    out: Dict[str, float] = {
+        "n": int(arr.size),
+        "ks_to_fit": float("nan"),
+        "kl_hist_to_fit": float("nan"),
+    }
+    if arr.size < 2:
+        return out
+
+    xs = np.sort(arr)
+    fit_cdf = np.asarray([float(cdf_fn(float(v))) for v in xs], dtype=np.float64)
+    n = xs.size
+    ecdf_hi = np.arange(1, n + 1, dtype=np.float64) / float(n)
+    ecdf_lo = np.arange(0, n, dtype=np.float64) / float(n)
+    out["ks_to_fit"] = max(float(np.max(np.abs(ecdf_hi - fit_cdf))), float(np.max(np.abs(fit_cdf - ecdf_lo))))
+
+    hist_counts, edges = np.histogram(arr, bins=max(10, int(bins)))
+    total = int(np.sum(hist_counts))
+    if total > 0:
+        p = hist_counts.astype(np.float64) / float(total)
+        q = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            q.append(max(1e-12, float(cdf_fn(float(hi)) - cdf_fn(float(lo)))))
+        q = np.asarray(q, dtype=np.float64)
+        q = q / float(np.sum(q))
+        mask = p > 0.0
+        out["kl_hist_to_fit"] = float(np.sum(p[mask] * np.log(p[mask] / q[mask])))
+    return out
+
+
+def _laplace_fit_report_fixed(values: Sequence[float], loc: float, scale: float, bins: int = 60) -> Dict[str, float]:
+    def _cdf(x: float) -> float:
+        if x < loc:
+            return 0.5 * math.exp((x - loc) / scale)
+        return 1.0 - 0.5 * math.exp(-(x - loc) / scale)
+
+    out = {
+        "loc": float(loc),
+        "scale": float(scale),
+    }
+    out.update(_fit_report_from_cdf(values, _cdf, bins=bins))
+    return out
+
+
+def _cauchy_fit_report_fixed(values: Sequence[float], loc: float, scale: float, bins: int = 60) -> Dict[str, float]:
+    def _cdf(x: float) -> float:
+        return 0.5 + math.atan((x - loc) / scale) / math.pi
+
+    out = {
+        "loc": float(loc),
+        "scale": float(scale),
+    }
+    out.update(_fit_report_from_cdf(values, _cdf, bins=bins))
+    return out
+
+
 def _summarize_fit_reports_by_group(
     values: Sequence[float],
     labels: Sequence[object],
@@ -319,6 +377,31 @@ def _format_group_fit_reports(items: Sequence[dict], top_n: int = 8) -> str:
                 float(l.get("kl_hist_to_fit", float("nan"))),
                 float(c.get("ks_to_fit", float("nan"))),
                 float(c.get("kl_hist_to_fit", float("nan"))),
+            )
+        )
+    return ", ".join(parts)
+
+
+def _format_scale_sweep_fit_reports(
+    values: Sequence[float],
+    *,
+    laplace_loc: float,
+    laplace_scale: float,
+    cauchy_loc: float,
+    cauchy_scale: float,
+    multipliers: Sequence[float] = (0.5, 1.0, 1.5),
+) -> str:
+    parts: List[str] = []
+    for mult in multipliers:
+        l_fit = _laplace_fit_report_fixed(values, float(laplace_loc), float(laplace_scale) * float(mult))
+        c_fit = _cauchy_fit_report_fixed(values, float(cauchy_loc), float(cauchy_scale) * float(mult))
+        parts.append(
+            "x{:.1f}: L({:.3f}/{:.3f}) C({:.3f}/{:.3f})".format(
+                float(mult),
+                float(l_fit.get("ks_to_fit", float("nan"))),
+                float(l_fit.get("kl_hist_to_fit", float("nan"))),
+                float(c_fit.get("ks_to_fit", float("nan"))),
+                float(c_fit.get("kl_hist_to_fit", float("nan"))),
             )
         )
     return ", ".join(parts)
@@ -3336,6 +3419,19 @@ def _run_multi_results_analysis(
                     int(neg.get("count", 0)),
                 )
             )
+        raw_values_for_sweep = rec.get("pooled_bucket", {}).get("residuals", []) or []
+        if raw_values_for_sweep:
+            print(
+                "raw scale sweep (KS/KL): {}".format(
+                    _format_scale_sweep_fit_reports(
+                        raw_values_for_sweep,
+                        laplace_loc=float(raw_laplace_fit.get("loc", float("nan"))),
+                        laplace_scale=float(raw_laplace_fit.get("scale", float("nan"))),
+                        cauchy_loc=float(raw_cauchy_fit.get("loc", float("nan"))),
+                        cauchy_scale=float(raw_cauchy_fit.get("scale", float("nan"))),
+                    )
+                )
+            )
         print("")
 
     out_dir = str(aggregate_out_dir).strip() or str(valid_dirs[0])
@@ -4051,6 +4147,21 @@ def _run_analysis(
                     float(split.get("mean_sample_sigma_i", float("nan"))),
                     float(fit.get("skew", float("nan"))),
                     int(neg.get("count", 0)),
+                )
+            )
+        raw_values_for_sweep = (margin_noise_by_k.get(int(k), {}) or {}).get("residuals", []) if int(k) in margin_noise_by_k else []
+        if raw_values_for_sweep:
+            fit_l = _laplace_fit_report(raw_values_for_sweep)
+            fit_c = _cauchy_fit_report(raw_values_for_sweep)
+            print(
+                "raw scale sweep (KS/KL): {}".format(
+                    _format_scale_sweep_fit_reports(
+                        raw_values_for_sweep,
+                        laplace_loc=float(fit_l.get("loc", float("nan"))),
+                        laplace_scale=float(fit_l.get("scale", float("nan"))),
+                        cauchy_loc=float(fit_c.get("loc", float("nan"))),
+                        cauchy_scale=float(fit_c.get("scale", float("nan"))),
+                    )
                 )
             )
         first_t_summary = next((rec.get("t_view_summary", []) for rec in margin_summaries if rec.get("t_view_summary")), [])
