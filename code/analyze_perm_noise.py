@@ -2593,6 +2593,70 @@ def _save_raw_fit_by_label_plot(
     return out_path
 
 
+def _save_raw_param_sweep_plot(
+    *,
+    plt,
+    values: Sequence[float],
+    out_path: str,
+    title: str,
+    laplace_loc: float,
+    laplace_scale: float,
+    cauchy_loc: float,
+    cauchy_scale: float,
+    scale_multipliers: Sequence[float] = (0.7, 1.0, 1.5),
+) -> Optional[str]:
+    arr = np.asarray(values, dtype=np.float64).ravel()
+    arr = arr[np.isfinite(arr)]
+    if arr.size <= 1:
+        return None
+    x_min = float(np.min(arr))
+    x_max = float(np.max(arr))
+    if not (np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min):
+        return None
+
+    fig = plt.figure(figsize=(8.4, 5.2), dpi=180)
+    ax = fig.add_subplot(1, 1, 1)
+    ax.hist(arr, bins=60, density=True, alpha=0.68, color="#6baed6", label="Raw residuals")
+    xs = np.linspace(x_min, x_max, 500)
+
+    laplace_colors = ["#2ca02c", "#1b9e77", "#66a61e"]
+    cauchy_colors = ["#9467bd", "#8c564b", "#e377c2"]
+    for idx, mult in enumerate(scale_multipliers):
+        scale = float(laplace_scale) * float(mult)
+        pdf = _laplace_pdf(xs, float(laplace_loc), float(scale))
+        if np.all(np.isfinite(pdf)):
+            ax.plot(
+                xs,
+                pdf,
+                color=laplace_colors[idx % len(laplace_colors)],
+                lw=1.6,
+                ls="--",
+                label=f"Laplace x{float(mult):.1f}",
+            )
+    for idx, mult in enumerate(scale_multipliers):
+        scale = float(cauchy_scale) * float(mult)
+        pdf = _cauchy_pdf(xs, float(cauchy_loc), float(scale))
+        if np.all(np.isfinite(pdf)):
+            ax.plot(
+                xs,
+                pdf,
+                color=cauchy_colors[idx % len(cauchy_colors)],
+                lw=1.6,
+                ls=":",
+                label=f"Cauchy x{float(mult):.1f}",
+            )
+
+    ax.set_title(title)
+    ax.set_xlabel("raw residual")
+    ax.set_ylabel("Density")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    return out_path
+
+
 def _save_multi_model_margin_plots(
     *,
     combined_by_k: Dict[int, Dict[str, object]],
@@ -2709,6 +2773,19 @@ def _save_multi_model_margin_plots(
             )
             if saved_top2:
                 saved.append(saved_top2)
+            p_sweep = os.path.join(out_dir, f"multi_model_margin_noise_raw_param_sweep_k{k}.png")
+            saved_sweep = _save_raw_param_sweep_plot(
+                plt=plt,
+                values=raw_residuals,
+                out_path=p_sweep,
+                title=f"Multi-model pooled {ref_mode} raw residual parameter sweep (k={k})",
+                laplace_loc=float(fit_laplace.get("loc", float("nan"))),
+                laplace_scale=float(fit_laplace.get("scale", float("nan"))),
+                cauchy_loc=float(fit_cauchy.get("loc", float("nan"))),
+                cauchy_scale=float(fit_cauchy.get("scale", float("nan"))),
+            )
+            if saved_sweep:
+                saved.append(saved_sweep)
 
         if z_scores.size > 0:
             fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
@@ -4493,6 +4570,19 @@ def _save_noise_plots(
                     )
                     if saved_top2:
                         saved.append(saved_top2)
+                    p_sweep = os.path.join(out_dir, f"perm_margin_noise_raw_param_sweep_k{k}.png")
+                    saved_sweep = _save_raw_param_sweep_plot(
+                        plt=plt,
+                        values=raw_residuals,
+                        out_path=p_sweep,
+                        title=f"{mode_label} raw residual parameter sweep (k={k})",
+                        laplace_loc=float(fit_laplace.get("loc", float("nan"))),
+                        laplace_scale=float(fit_laplace.get("scale", float("nan"))),
+                        cauchy_loc=float(fit_cauchy.get("loc", float("nan"))),
+                        cauchy_scale=float(fit_cauchy.get("scale", float("nan"))),
+                    )
+                    if saved_sweep:
+                        saved.append(saved_sweep)
 
                 if z_scores.size > 0:
                     fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
