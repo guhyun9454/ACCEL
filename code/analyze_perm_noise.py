@@ -256,6 +256,20 @@ def _cauchy_fit_report(values: Sequence[float], bins: int = 60) -> Dict[str, flo
     return out
 
 
+def _laplace_pdf(xs: np.ndarray, loc: float, scale: float) -> np.ndarray:
+    xs_arr = np.asarray(xs, dtype=np.float64)
+    if not np.isfinite(loc) or not np.isfinite(scale) or scale <= 1e-12:
+        return np.full_like(xs_arr, np.nan, dtype=np.float64)
+    return 0.5 * np.exp(-np.abs(xs_arr - loc) / scale) / scale
+
+
+def _cauchy_pdf(xs: np.ndarray, loc: float, scale: float) -> np.ndarray:
+    xs_arr = np.asarray(xs, dtype=np.float64)
+    if not np.isfinite(loc) or not np.isfinite(scale) or scale <= 1e-12:
+        return np.full_like(xs_arr, np.nan, dtype=np.float64)
+    return 1.0 / (math.pi * scale * (1.0 + ((xs_arr - loc) / scale) ** 2))
+
+
 def _merge_count_maps(dst: Dict[str, object], src: Dict[str, object]) -> None:
     for key, val in (src or {}).items():
         key_s = str(key)
@@ -2443,18 +2457,55 @@ def _save_multi_model_margin_plots(
             ax = fig.add_subplot(1, 1, 1)
             ax.hist(raw_residuals, bins=60, density=True, alpha=0.68, color="#6baed6", label="All models pooled residual")
             fit_raw = pooled.get("pooled_residual_fit", {}) or {}
+            fit_laplace = pooled.get("pooled_residual_laplace_fit", {}) or {}
+            fit_cauchy = pooled.get("pooled_residual_cauchy_fit", {}) or {}
             mu = float(fit_raw.get("mean", float("nan")))
             sigma = float(fit_raw.get("std", float("nan")))
             x_min = float(np.min(raw_residuals))
             x_max = float(np.max(raw_residuals))
-            if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12 and np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+            if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
                 xs = np.linspace(x_min, x_max, 400)
-                pdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
-                ax.plot(xs, pdf, color="#d62728", lw=2.0, label="Gaussian fit")
+                if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12:
+                    pdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
+                    ax.plot(
+                        xs,
+                        pdf,
+                        color="#d62728",
+                        lw=2.0,
+                        label="Gaussian (KS={:.3f}, KL={:.3f})".format(
+                            float(fit_raw.get("ks_to_fit", float("nan"))),
+                            float(fit_raw.get("kl_hist_to_fit", float("nan"))),
+                        ),
+                    )
+                laplace_pdf = _laplace_pdf(xs, float(fit_laplace.get("loc", float("nan"))), float(fit_laplace.get("scale", float("nan"))))
+                if np.all(np.isfinite(laplace_pdf)):
+                    ax.plot(
+                        xs,
+                        laplace_pdf,
+                        color="#2ca02c",
+                        lw=1.8,
+                        ls="--",
+                        label="Laplace (KS={:.3f}, KL={:.3f})".format(
+                            float(fit_laplace.get("ks_to_fit", float("nan"))),
+                            float(fit_laplace.get("kl_hist_to_fit", float("nan"))),
+                        ),
+                    )
+                cauchy_pdf = _cauchy_pdf(xs, float(fit_cauchy.get("loc", float("nan"))), float(fit_cauchy.get("scale", float("nan"))))
+                if np.all(np.isfinite(cauchy_pdf)):
+                    ax.plot(
+                        xs,
+                        cauchy_pdf,
+                        color="#9467bd",
+                        lw=1.8,
+                        ls=":",
+                        label="Cauchy (KS={:.3f}, KL={:.3f})".format(
+                            float(fit_cauchy.get("ks_to_fit", float("nan"))),
+                            float(fit_cauchy.get("kl_hist_to_fit", float("nan"))),
+                        ),
+                    )
             ax.set_title(
                 f"Multi-model pooled {ref_mode} residuals (raw) (k={k})\n"
-                f"models={len(per_model)}, KS={float(fit_raw.get('ks_to_fit', float('nan'))):.3f}, "
-                f"KL={float(fit_raw.get('kl_hist_to_fit', float('nan'))):.3f}"
+                f"models={len(per_model)}, compare Gaussian / Laplace / Cauchy"
             )
             ax.set_xlabel("residual = margin - ref_margin")
             ax.set_ylabel("Density")
@@ -4142,17 +4193,55 @@ def _save_noise_plots(
                     ax = fig.add_subplot(1, 1, 1)
                     ax.hist(raw_residuals, bins=50, density=True, alpha=0.68, color="#6baed6", label="Raw residuals")
                     fit_raw = _gaussian_fit_report(raw_residuals)
+                    fit_laplace = _laplace_fit_report(raw_residuals)
+                    fit_cauchy = _cauchy_fit_report(raw_residuals)
                     mu = float(fit_raw.get("mean", float("nan")))
                     sigma = float(fit_raw.get("std", float("nan")))
                     x_min = float(np.min(raw_residuals))
                     x_max = float(np.max(raw_residuals))
-                    if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12 and np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+                    if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
                         xs = np.linspace(x_min, x_max, 400)
-                        pdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
-                        ax.plot(xs, pdf, color="#d62728", lw=2.0, label="Gaussian fit")
+                        if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12:
+                            pdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
+                            ax.plot(
+                                xs,
+                                pdf,
+                                color="#d62728",
+                                lw=2.0,
+                                label="Gaussian (KS={:.3f}, KL={:.3f})".format(
+                                    float(fit_raw.get("ks_to_fit", float("nan"))),
+                                    float(fit_raw.get("kl_hist_to_fit", float("nan"))),
+                                ),
+                            )
+                        laplace_pdf = _laplace_pdf(xs, float(fit_laplace.get("loc", float("nan"))), float(fit_laplace.get("scale", float("nan"))))
+                        if np.all(np.isfinite(laplace_pdf)):
+                            ax.plot(
+                                xs,
+                                laplace_pdf,
+                                color="#2ca02c",
+                                lw=1.8,
+                                ls="--",
+                                label="Laplace (KS={:.3f}, KL={:.3f})".format(
+                                    float(fit_laplace.get("ks_to_fit", float("nan"))),
+                                    float(fit_laplace.get("kl_hist_to_fit", float("nan"))),
+                                ),
+                            )
+                        cauchy_pdf = _cauchy_pdf(xs, float(fit_cauchy.get("loc", float("nan"))), float(fit_cauchy.get("scale", float("nan"))))
+                        if np.all(np.isfinite(cauchy_pdf)):
+                            ax.plot(
+                                xs,
+                                cauchy_pdf,
+                                color="#9467bd",
+                                lw=1.8,
+                                ls=":",
+                                label="Cauchy (KS={:.3f}, KL={:.3f})".format(
+                                    float(fit_cauchy.get("ks_to_fit", float("nan"))),
+                                    float(fit_cauchy.get("kl_hist_to_fit", float("nan"))),
+                                ),
+                            )
                     ax.set_title(
                         f"{mode_label} margin residuals (raw) (k={k})\n"
-                        f"mean={fit_raw['mean']:.3f}, std={fit_raw['std']:.3f}, KS={fit_raw['ks_to_fit']:.3f}, KL={fit_raw['kl_hist_to_fit']:.3f}"
+                        f"mean={fit_raw['mean']:.3f}, std={fit_raw['std']:.3f}, compare Gaussian / Laplace / Cauchy"
                     )
                     ax.set_xlabel("residual = margin - ref_margin")
                     ax.set_ylabel("Density")
