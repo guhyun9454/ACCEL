@@ -2302,6 +2302,14 @@ def _summarize_margin_noise_bucket(
             bucket.get("residuals", []) or [],
             bucket.get("residual_correct_slot_labels", []) or [],
         ),
+        "raw_top1_slot_fits": _summarize_fit_reports_by_group(
+            bucket.get("residuals", []) or [],
+            bucket.get("residual_top1_slot_labels", []) or [],
+        ),
+        "raw_top2_slot_fits": _summarize_fit_reports_by_group(
+            bucket.get("residuals", []) or [],
+            bucket.get("residual_top2_slot_labels", []) or [],
+        ),
         "standardized_residual_fit": _gaussian_fit_report(z_scores),
         "raw_top_bin_summary": raw_top_bin,
         "raw_top_bin_subset": raw_top_bin_subset,
@@ -2681,6 +2689,26 @@ def _save_multi_model_margin_plots(
             )
             if saved_slot:
                 saved.append(saved_slot)
+            p_top1 = os.path.join(out_dir, f"multi_model_margin_noise_raw_hist_by_top1_slot_k{k}.png")
+            saved_top1 = _save_raw_fit_by_label_plot(
+                plt=plt,
+                values=raw_residuals,
+                labels=rec.get("pooled_bucket", {}).get("residual_top1_slot_labels", []) or [],
+                out_path=p_top1,
+                title=f"Multi-model pooled {ref_mode} raw residuals by top1 slot (k={k})",
+            )
+            if saved_top1:
+                saved.append(saved_top1)
+            p_top2 = os.path.join(out_dir, f"multi_model_margin_noise_raw_hist_by_top2_slot_k{k}.png")
+            saved_top2 = _save_raw_fit_by_label_plot(
+                plt=plt,
+                values=raw_residuals,
+                labels=rec.get("pooled_bucket", {}).get("residual_top2_slot_labels", []) or [],
+                out_path=p_top2,
+                title=f"Multi-model pooled {ref_mode} raw residuals by top2 slot (k={k})",
+            )
+            if saved_top2:
+                saved.append(saved_top2)
 
         if z_scores.size > 0:
             fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
@@ -2943,6 +2971,12 @@ def _run_multi_results_analysis(
         raw_slot_fits = (pooled_summary or {}).get("raw_correct_slot_fits", []) or []
         if raw_slot_fits:
             print("raw correct-slot fits:", _format_group_fit_reports(raw_slot_fits, top_n=8))
+        raw_top1_fits = (pooled_summary or {}).get("raw_top1_slot_fits", []) or []
+        if raw_top1_fits:
+            print("raw top1-slot fits:", _format_group_fit_reports(raw_top1_fits, top_n=8))
+        raw_top2_fits = (pooled_summary or {}).get("raw_top2_slot_fits", []) or []
+        if raw_top2_fits:
+            print("raw top2-slot fits:", _format_group_fit_reports(raw_top2_fits, top_n=8))
         peak_info = (pooled_summary or {}).get("peak_bin_summary", []) or []
         if peak_info:
             top_bin = peak_info[0]
@@ -3643,6 +3677,12 @@ def _run_analysis(
         raw_slot_fits = next((rec.get("raw_correct_slot_fits", []) for rec in margin_summaries if rec.get("raw_correct_slot_fits")), [])
         if raw_slot_fits:
             print("raw correct-slot fits:", _format_group_fit_reports(raw_slot_fits, top_n=8))
+        raw_top1_fits = next((rec.get("raw_top1_slot_fits", []) for rec in margin_summaries if rec.get("raw_top1_slot_fits")), [])
+        if raw_top1_fits:
+            print("raw top1-slot fits:", _format_group_fit_reports(raw_top1_fits, top_n=8))
+        raw_top2_fits = next((rec.get("raw_top2_slot_fits", []) for rec in margin_summaries if rec.get("raw_top2_slot_fits")), [])
+        if raw_top2_fits:
+            print("raw top2-slot fits:", _format_group_fit_reports(raw_top2_fits, top_n=8))
         print(
             "standardized fit: mean={:.4f}, std={:.4f}, ks={:.4f}, kl={:.4f}".format(
                 _mean_nested(["standardized_residual_fit", "mean"]),
@@ -4433,6 +4473,26 @@ def _save_noise_plots(
                     )
                     if saved_slot:
                         saved.append(saved_slot)
+                    p_top1 = os.path.join(out_dir, f"perm_margin_noise_raw_hist_by_top1_slot_k{k}.png")
+                    saved_top1 = _save_raw_fit_by_label_plot(
+                        plt=plt,
+                        values=raw_residuals,
+                        labels=bucket.get("residual_top1_slot_labels", []) or [],
+                        out_path=p_top1,
+                        title=f"{mode_label} raw residuals by top1 slot (k={k})",
+                    )
+                    if saved_top1:
+                        saved.append(saved_top1)
+                    p_top2 = os.path.join(out_dir, f"perm_margin_noise_raw_hist_by_top2_slot_k{k}.png")
+                    saved_top2 = _save_raw_fit_by_label_plot(
+                        plt=plt,
+                        values=raw_residuals,
+                        labels=bucket.get("residual_top2_slot_labels", []) or [],
+                        out_path=p_top2,
+                        title=f"{mode_label} raw residuals by top2 slot (k={k})",
+                    )
+                    if saved_top2:
+                        saved.append(saved_top2)
 
                 if z_scores.size > 0:
                     fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
