@@ -20,6 +20,7 @@ We compute:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -29,9 +30,10 @@ import zlib
 from dataclasses import dataclass
 from itertools import combinations, permutations
 from statistics import NormalDist
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from debias_utils import simple as debias_simple
 
 def _try_import_matplotlib():
     try:
@@ -113,6 +115,139 @@ def _safe_corr(x: Sequence[float], y: Sequence[float]) -> float:
     if float(np.std(xa)) <= 1e-12 or float(np.std(ya)) <= 1e-12:
         return float("nan")
     return float(np.corrcoef(xa, ya)[0, 1])
+
+
+def _pride_correct_row(row: np.ndarray, prior: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    r = np.asarray(row, dtype=np.float64)
+    pr = np.asarray(prior, dtype=np.float64)
+    adj = r / (pr + eps)
+    adj = adj / (adj.sum() + eps)
+    return adj
+
+
+def _stable_u32_seed(s: str, base_seed: int = 0) -> int:
+    return (int(zlib.crc32(s.encode("utf-8"))) + int(base_seed)) & 0xFFFFFFFF
+
+
+def _estimate_pride_prior_random_prefix_mean(
+    per_sample_probs: List[np.ndarray],
+    cyclic_indices: List[int],
+    k: int,
+    prefix_ratio: float,
+    seed: int,
+    eps: float = 1e-12,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    n = len(per_sample_probs)
+    if n <= 0:
+        prior = np.ones((k,), dtype=np.float64) / float(k)
+        return prior, {"N": 0, "m": 0, "used": 0, "ratio": float(prefix_ratio), "seed": int(seed), "prefix_ids": []}
+
+    ratio = float(max(0.0, min(1.0, prefix_ratio)))
+    m = int(max(1, int(round(n * ratio))))
+    rng = np.random.default_rng(int(seed))
+    prefix_ids = [int(x) for x in rng.choice(np.arange(n, dtype=np.int64), size=m, replace=False).tolist()]
+
+    priors = []
+    used = 0
+    for idx in prefix_ids:
+        ps = np.asarray(per_sample_probs[idx], dtype=np.float64)
+        observed = np.asarray([ps[j] for j in cyclic_indices], dtype=np.float64)
+        try:
+            _, _, prior_i = debias_simple(observed)
+        except Exception:
+            continue
+        prior_i = np.asarray(prior_i, dtype=np.float64)
+        prior_i = prior_i / (prior_i.sum() + eps)
+        priors.append(prior_i)
+        used += 1
+
+    if len(priors) == 0:
+        prior = np.ones((k,), dtype=np.float64) / float(k)
+    else:
+        prior = np.mean(np.asarray(priors, dtype=np.float64), axis=0)
+        prior = np.asarray(prior, dtype=np.float64)
+        prior = prior / (prior.sum() + eps)
+    meta = {
+        "N": int(n),
+        "m": int(m),
+        "used": int(used),
+        "ratio": float(ratio),
+        "seed": int(seed),
+        "prefix_ids": prefix_ids,
+    }
+    return prior, meta
+
+
+def _apply_offline_pride_to_results(
+    *,
+    results: List[dict],
+    perm_list: List[Tuple[int, ...]],
+    option_ids: List[str],
+    pride_prefix_percent: float,
+    pride_seed: int,
+) -> Tuple[List[dict], Dict[str, object]]:
+    k = len(option_ids)
+    cyc_perms = _rotations(k)
+    cyc_idxs = [perm_list.index(p) for p in cyc_perms if p in perm_list]
+    if len(cyc_idxs) != k:
+        return list(results), {
+            "enabled": False,
+            "reason": "missing_cyclic_permutations",
+            "prior": [float(1.0 / float(k)) for _ in range(k)],
+        }
+
+    per_sample_probs: List[np.ndarray] = []
+    valid_result_indices: List[int] = []
+    for idx, r in enumerate(results):
+        d = r.get("data", {}) or {}
+        probs_seq = d.get("probs", None)
+        if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
+            continue
+        ps = np.asarray(probs_seq, dtype=np.float64)
+        if ps.ndim != 2 or ps.shape[1] != k:
+            continue
+        per_sample_probs.append(ps)
+        valid_result_indices.append(int(idx))
+
+    if not per_sample_probs:
+        return list(results), {
+            "enabled": False,
+            "reason": "no_valid_probs",
+            "prior": [float(1.0 / float(k)) for _ in range(k)],
+        }
+
+    seed = _stable_u32_seed(f"offline_pride:{k}:{len(valid_result_indices)}", int(pride_seed))
+    prior, meta = _estimate_pride_prior_random_prefix_mean(
+        per_sample_probs=per_sample_probs,
+        cyclic_indices=cyc_idxs,
+        k=int(k),
+        prefix_ratio=float(pride_prefix_percent) / 100.0,
+        seed=int(seed),
+    )
+
+    corrected_results = list(results)
+    valid_iter = iter(per_sample_probs)
+    valid_set = set(valid_result_indices)
+    for idx, r in enumerate(results):
+        if idx not in valid_set:
+            corrected_results[idx] = r
+            continue
+        ps = next(valid_iter)
+        corrected = np.asarray([_pride_correct_row(ps[j], prior) for j in range(ps.shape[0])], dtype=np.float64)
+        r2 = dict(r)
+        d2 = dict((r.get("data", {}) or {}))
+        d2["probs"] = corrected.tolist()
+        r2["data"] = d2
+        corrected_results[idx] = r2
+
+    return corrected_results, {
+        "enabled": True,
+        "prior": [float(x) for x in np.asarray(prior, dtype=np.float64).tolist()],
+        "meta": meta,
+        "prefix_percent": float(pride_prefix_percent),
+        "seed": int(seed),
+        "n_valid_samples": int(len(valid_result_indices)),
+    }
 
 
 def _gaussian_fit_report(values: Sequence[float], bins: int = 60) -> Dict[str, float]:
@@ -405,6 +540,115 @@ def _format_scale_sweep_fit_reports(
             )
         )
     return ", ".join(parts)
+
+
+def _compare_group_metric_lists(
+    raw_items: Sequence[dict],
+    pride_items: Sequence[dict],
+    *,
+    value_key: str,
+    top_n: int = 8,
+) -> List[dict]:
+    raw_map = {str(x.get("label")): x for x in (raw_items or [])}
+    pride_map = {str(x.get("label")): x for x in (pride_items or [])}
+    labels = sorted(set(raw_map.keys()) | set(pride_map.keys()))
+    out: List[dict] = []
+    for label in labels:
+        raw_val = float((raw_map.get(label, {}) or {}).get(value_key, float("nan")))
+        pride_val = float((pride_map.get(label, {}) or {}).get(value_key, float("nan")))
+        delta = float(pride_val - raw_val) if np.isfinite(raw_val) and np.isfinite(pride_val) else float("nan")
+        out.append({
+            "label": str(label),
+            "raw": raw_val,
+            "pride": pride_val,
+            "delta": delta,
+        })
+    out.sort(key=lambda x: str(x.get("label", "")))
+    return out[: int(top_n)]
+
+
+def _format_group_comparisons(items: Sequence[dict], top_n: int = 8) -> str:
+    return ", ".join(
+        "{}:{:.3f}->{:.3f} ({:+.3f})".format(
+            str(x.get("label")),
+            float(x.get("raw", float("nan"))),
+            float(x.get("pride", float("nan"))),
+            float(x.get("delta", float("nan"))),
+        )
+        for x in list(items or [])[: int(top_n)]
+    )
+
+
+def _build_pride_comparison(raw_summary: Dict[str, object], pride_summary: Dict[str, object]) -> Dict[str, object]:
+    def _scalar(raw_key: str, pride_key: Optional[str] = None) -> Dict[str, float]:
+        pride_key = pride_key or raw_key
+        raw_val = float(raw_summary.get(raw_key, float("nan")))
+        pride_val = float(pride_summary.get(pride_key, float("nan")))
+        delta = float(pride_val - raw_val) if np.isfinite(raw_val) and np.isfinite(pride_val) else float("nan")
+        return {"raw": raw_val, "pride": pride_val, "delta": delta}
+
+    raw_neg = (raw_summary.get("negative_tail_accuracy", {}) or {})
+    pride_neg = (pride_summary.get("negative_tail_accuracy", {}) or {})
+    raw_right = (raw_summary.get("right_tail_accuracy", {}) or {})
+    pride_right = (pride_summary.get("right_tail_accuracy", {}) or {})
+    raw_nz = int(raw_summary.get("n_standardized_residuals", 0))
+    pride_nz = int(pride_summary.get("n_standardized_residuals", 0))
+    neg_raw_rate = float(int(raw_neg.get("count", 0)) / raw_nz) if raw_nz > 0 else float("nan")
+    neg_pride_rate = float(int(pride_neg.get("count", 0)) / pride_nz) if pride_nz > 0 else float("nan")
+    right_raw_rate = float(int(raw_right.get("count", 0)) / raw_nz) if raw_nz > 0 else float("nan")
+    right_pride_rate = float(int(pride_right.get("count", 0)) / pride_nz) if pride_nz > 0 else float("nan")
+    raw_std = float(((raw_summary.get("pooled_residual_fit", {}) or {}).get("std", float("nan"))))
+    pride_std = float(((pride_summary.get("pooled_residual_fit", {}) or {}).get("std", float("nan"))))
+    return {
+        "mean_sample_ref_margin": _scalar("mean_sample_ref_margin"),
+        "mean_sample_sigma_i": _scalar("mean_sample_sigma_i"),
+        "mean_base_gap": _scalar("mean_base_gap"),
+        "raw_residual_std": {
+            "raw": raw_std,
+            "pride": pride_std,
+            "delta": float(pride_std - raw_std) if np.isfinite(raw_std) and np.isfinite(pride_std) else float("nan"),
+        },
+        "negative_tail_rate": {
+            "raw": neg_raw_rate,
+            "pride": neg_pride_rate,
+            "delta": float(neg_pride_rate - neg_raw_rate) if np.isfinite(neg_raw_rate) and np.isfinite(neg_pride_rate) else float("nan"),
+        },
+        "right_tail_rate": {
+            "raw": right_raw_rate,
+            "pride": right_pride_rate,
+            "delta": float(right_pride_rate - right_raw_rate) if np.isfinite(right_raw_rate) and np.isfinite(right_pride_rate) else float("nan"),
+        },
+        "correct_slot_accuracy": _compare_group_metric_lists(
+            raw_summary.get("correct_slot_accuracy", []) or [],
+            pride_summary.get("correct_slot_accuracy", []) or [],
+            value_key="accuracy",
+        ),
+        "negative_tail_slot_incidence": _compare_group_metric_lists(
+            raw_summary.get("negative_tail_slot_incidence", []) or [],
+            pride_summary.get("negative_tail_slot_incidence", []) or [],
+            value_key="rate",
+        ),
+        "top1_slot_accuracy": _compare_group_metric_lists(
+            raw_summary.get("top1_slot_accuracy", []) or [],
+            pride_summary.get("top1_slot_accuracy", []) or [],
+            value_key="accuracy",
+        ),
+        "negative_tail_top1_slot_incidence": _compare_group_metric_lists(
+            raw_summary.get("negative_tail_top1_slot_incidence", []) or [],
+            pride_summary.get("negative_tail_top1_slot_incidence", []) or [],
+            value_key="rate",
+        ),
+        "top2_slot_accuracy": _compare_group_metric_lists(
+            raw_summary.get("top2_slot_accuracy", []) or [],
+            pride_summary.get("top2_slot_accuracy", []) or [],
+            value_key="accuracy",
+        ),
+        "negative_tail_top2_slot_incidence": _compare_group_metric_lists(
+            raw_summary.get("negative_tail_top2_slot_incidence", []) or [],
+            pride_summary.get("negative_tail_top2_slot_incidence", []) or [],
+            value_key="rate",
+        ),
+    }
 
 
 def _merge_count_maps(dst: Dict[str, object], src: Dict[str, object]) -> None:
@@ -2966,6 +3210,9 @@ def _run_multi_results_analysis(
     combo_sample_limit: int,
     negative_tail_z_cutoff: float,
     right_tail_z_cutoff: float,
+    apply_pride_offline: bool,
+    pride_prefix_percent: float,
+    pride_seed: int,
 ) -> None:
     valid_dirs = [str(x) for x in results_dirs if str(x).strip()]
     if not valid_dirs:
@@ -2979,6 +3226,7 @@ def _run_multi_results_analysis(
             continue
         model_tag = _guess_model_tag_from_results_dir(results_dir)
         model_buckets: Dict[int, Dict[str, object]] = {}
+        model_pride_buckets: Dict[int, Dict[str, object]] = {}
         model_n_views: Dict[int, int] = {}
 
         for ci in cache_files:
@@ -3020,6 +3268,35 @@ def _run_multi_results_analysis(
             _merge_margin_noise_payload_into_bucket(bucket, payload)
             model_n_views[int(k)] = int(summary.get("n_views", k))
 
+            if bool(apply_pride_offline):
+                pride_results, pride_info = _apply_offline_pride_to_results(
+                    results=results,
+                    perm_list=perm_list,
+                    option_ids=option_ids,
+                    pride_prefix_percent=float(pride_prefix_percent),
+                    pride_seed=int(pride_seed),
+                )
+                pride_summary, _, pride_payload = _analyze_cyclic_margin_noise(
+                    results=pride_results,
+                    perm_list=perm_list,
+                    option_ids=option_ids,
+                    subject=ci.subject,
+                    run_idx=int(ci.run_idx),
+                    use_full_reference=bool(use_full_reference),
+                    combo_sample_limit=int(combo_sample_limit),
+                    negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                    right_tail_z_cutoff=float(right_tail_z_cutoff),
+                )
+                pride_bucket = model_pride_buckets.setdefault(
+                    int(k),
+                    {
+                        "reference_mode": str(pride_summary.get("reference_mode", "cyclic")),
+                        "pride_info": pride_info,
+                        **_make_margin_noise_bucket(with_correctness=True),
+                    },
+                )
+                _merge_margin_noise_payload_into_bucket(pride_bucket, pride_payload)
+
         for k, bucket in model_buckets.items():
             n_views = int(model_n_views.get(int(k), int(k)))
             model_summary = _summarize_margin_noise_bucket(
@@ -3037,6 +3314,10 @@ def _run_multi_results_analysis(
                     "pooled_bucket": {
                         **_make_margin_noise_bucket(with_correctness=True),
                     },
+                    "per_model_pride": [],
+                    "pooled_bucket_pride": {
+                        **_make_margin_noise_bucket(with_correctness=True),
+                    },
                     "n_views": n_views,
                 },
             )
@@ -3046,6 +3327,22 @@ def _run_multi_results_analysis(
                 "summary": model_summary,
             })
             _merge_margin_noise_payload_into_bucket(combined["pooled_bucket"], bucket)
+            pride_bucket = model_pride_buckets.get(int(k))
+            if pride_bucket:
+                pride_model_summary = _summarize_margin_noise_bucket(
+                    pride_bucket,
+                    n_views=n_views,
+                    reference_mode=str(pride_bucket.get("reference_mode", "cyclic")),
+                    negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                    right_tail_z_cutoff=float(right_tail_z_cutoff),
+                )
+                combined["per_model_pride"].append({
+                    "model_tag": str(model_tag),
+                    "results_dir": str(results_dir),
+                    "summary": pride_model_summary,
+                    "pride_info": pride_bucket.get("pride_info", {}) or {},
+                })
+                _merge_margin_noise_payload_into_bucket(combined["pooled_bucket_pride"], pride_bucket)
 
     if not combined_by_k:
         raise SystemExit("No valid multi-model records found.")
@@ -3064,6 +3361,20 @@ def _run_multi_results_analysis(
         )
         rec["pooled_summary"] = pooled_summary
         per_model = rec.get("per_model", []) or []
+        pride_bucket = rec.get("pooled_bucket_pride", {}) or {}
+        pooled_summary_pride = (
+            _summarize_margin_noise_bucket(
+                pride_bucket,
+                n_views=int(rec.get("n_views", int(k))),
+                reference_mode=str(rec.get("reference_mode", "cyclic")),
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
+            )
+            if bool(apply_pride_offline) and isinstance(pride_bucket, dict) and (pride_bucket.get("residuals", []) or [])
+            else {}
+        )
+        rec["pooled_summary_pride"] = pooled_summary_pride
+        per_model_pride = rec.get("per_model_pride", []) or []
 
         def _macro_metric(path: Sequence[str]) -> float:
             vals = []
@@ -3092,7 +3403,10 @@ def _run_multi_results_analysis(
             "reference_mode": str((pooled_summary or {}).get("reference_mode", "cyclic")),
             "macro_average": macro_average,
             "pooled_summary": pooled_summary,
+            "pooled_summary_pride": pooled_summary_pride,
+            "pride_comparison": _build_pride_comparison(pooled_summary, pooled_summary_pride) if pooled_summary_pride else {},
             "per_model": per_model,
+            "per_model_pride": per_model_pride,
         }
 
         pooled_fit = pooled_summary.get("standardized_residual_fit", {}) or {}
@@ -3137,6 +3451,26 @@ def _run_multi_results_analysis(
         raw_top2_fits = (pooled_summary or {}).get("raw_top2_slot_fits", []) or []
         if raw_top2_fits:
             print("raw top2-slot fits:", _format_group_fit_reports(raw_top2_fits, top_n=8))
+        if pooled_summary_pride:
+            pride_cmp = _build_pride_comparison(pooled_summary, pooled_summary_pride)
+            pride_sigma = (pride_cmp.get("mean_sample_sigma_i", {}) or {})
+            pride_ref = (pride_cmp.get("mean_sample_ref_margin", {}) or {})
+            pride_neg = (pride_cmp.get("negative_tail_rate", {}) or {})
+            print(
+                "offline PriDe: ref_margin={:.4f}->{:.4f} ({:+.4f}), sigma_i={:.4f}->{:.4f} ({:+.4f}), neg_tail_rate={:.4f}->{:.4f} ({:+.4f})".format(
+                    float(pride_ref.get("raw", float("nan"))),
+                    float(pride_ref.get("pride", float("nan"))),
+                    float(pride_ref.get("delta", float("nan"))),
+                    float(pride_sigma.get("raw", float("nan"))),
+                    float(pride_sigma.get("pride", float("nan"))),
+                    float(pride_sigma.get("delta", float("nan"))),
+                    float(pride_neg.get("raw", float("nan"))),
+                    float(pride_neg.get("pride", float("nan"))),
+                    float(pride_neg.get("delta", float("nan"))),
+                )
+            )
+            print("offline PriDe slot-acc delta:", _format_group_comparisons(pride_cmp.get("correct_slot_accuracy", []) or [], top_n=8))
+            print("offline PriDe neg-tail slot-inc delta:", _format_group_comparisons(pride_cmp.get("negative_tail_slot_incidence", []) or [], top_n=8))
         peak_info = (pooled_summary or {}).get("peak_bin_summary", []) or []
         if peak_info:
             top_bin = peak_info[0]
@@ -3564,6 +3898,9 @@ def _run_analysis(
     combo_sample_limit: int,
     negative_tail_z_cutoff: float,
     right_tail_z_cutoff: float,
+    apply_pride_offline: bool,
+    pride_prefix_percent: float,
+    pride_seed: int,
 ) -> None:
     subjects_list = [s.strip() for s in str(subjects or []) if str(s).strip()] if subjects else None
     cache_files = _discover_cache_files(str(cache_dir), subjects_list, int(n_runs))
@@ -3577,6 +3914,7 @@ def _run_analysis(
     recall_by_k: Dict[int, Dict[str, List[str]]] = {}
     # For margin-noise / Gaussianity analysis
     margin_noise_by_k: Dict[int, Dict[str, object]] = {}
+    margin_noise_pride_by_k: Dict[int, Dict[str, object]] = {}
     margin_noise_sample_records: List[dict] = []
 
     for ci in cache_files:
@@ -3674,6 +4012,29 @@ def _run_analysis(
             negative_tail_z_cutoff=float(negative_tail_z_cutoff),
             right_tail_z_cutoff=float(right_tail_z_cutoff),
         )
+        pride_margin_noise_summary: Dict[str, object] = {}
+        pride_pooled_noise_payload: Dict[str, object] = {}
+        pride_info: Dict[str, object] = {}
+        if bool(apply_pride_offline):
+            pride_results, pride_info = _apply_offline_pride_to_results(
+                results=results,
+                perm_list=perm_list,
+                option_ids=option_ids,
+                pride_prefix_percent=float(pride_prefix_percent),
+                pride_seed=int(pride_seed),
+            )
+            pride_margin_noise_summary, _, pride_pooled_noise_payload = _analyze_cyclic_margin_noise(
+                results=pride_results,
+                perm_list=perm_list,
+                option_ids=option_ids,
+                subject=ci.subject,
+                run_idx=int(ci.run_idx),
+                use_full_reference=bool(use_full_reference),
+                combo_sample_limit=int(combo_sample_limit),
+                combo_seed=int(seed),
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
+            )
 
         per_record_reports.append({
             "subject": ci.subject,
@@ -3692,6 +4053,8 @@ def _run_analysis(
             "ens_acc_cyclic_perms": float(ens_cyc_acc),
             "subset_curve": subset_curve,
             "cyclic_margin_noise": margin_noise_summary,
+            "cyclic_margin_noise_pride": pride_margin_noise_summary,
+            "pride_info": pride_info,
         })
 
         bucket = margin_noise_by_k.setdefault(
@@ -3703,6 +4066,17 @@ def _run_analysis(
             },
         )
         _merge_margin_noise_payload_into_bucket(bucket, pooled_noise_payload)
+        if pride_pooled_noise_payload:
+            pride_bucket = margin_noise_pride_by_k.setdefault(
+                int(k),
+                {
+                    "reference_mode": str(pride_margin_noise_summary.get("reference_mode", "cyclic")),
+                    "n_views": int(pride_margin_noise_summary.get("n_views", k)),
+                    "pride_info": pride_info,
+                    **_make_margin_noise_bucket(with_correctness=True),
+                },
+            )
+            _merge_margin_noise_payload_into_bucket(pride_bucket, pride_pooled_noise_payload)
         if save_margin_samples and sample_noise_records:
             margin_noise_sample_records.extend(sample_noise_records)
 
@@ -4149,6 +4523,44 @@ def _run_analysis(
                     int(neg.get("count", 0)),
                 )
             )
+        pride_bucket_for_k = margin_noise_pride_by_k.get(int(k))
+        if pride_bucket_for_k:
+            pride_summary_for_k = _summarize_margin_noise_bucket(
+                pride_bucket_for_k,
+                n_views=int(pride_bucket_for_k.get("n_views", int(k))),
+                reference_mode=str(pride_bucket_for_k.get("reference_mode", "cyclic")),
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
+            )
+            raw_summary_for_k = _summarize_margin_noise_bucket(
+                margin_noise_by_k.get(int(k), {}),
+                n_views=int((margin_noise_by_k.get(int(k), {}) or {}).get("n_views", int(k))),
+                reference_mode=str((margin_noise_by_k.get(int(k), {}) or {}).get("reference_mode", "cyclic")),
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
+            )
+            pride_cmp = _build_pride_comparison(
+                raw_summary_for_k,
+                pride_summary_for_k,
+            )
+            pride_sigma = (pride_cmp.get("mean_sample_sigma_i", {}) or {})
+            pride_ref = (pride_cmp.get("mean_sample_ref_margin", {}) or {})
+            pride_neg = (pride_cmp.get("negative_tail_rate", {}) or {})
+            print(
+                "offline PriDe: ref_margin={:.4f}->{:.4f} ({:+.4f}), sigma_i={:.4f}->{:.4f} ({:+.4f}), neg_tail_rate={:.4f}->{:.4f} ({:+.4f})".format(
+                    float(pride_ref.get("raw", float("nan"))),
+                    float(pride_ref.get("pride", float("nan"))),
+                    float(pride_ref.get("delta", float("nan"))),
+                    float(pride_sigma.get("raw", float("nan"))),
+                    float(pride_sigma.get("pride", float("nan"))),
+                    float(pride_sigma.get("delta", float("nan"))),
+                    float(pride_neg.get("raw", float("nan"))),
+                    float(pride_neg.get("pride", float("nan"))),
+                    float(pride_neg.get("delta", float("nan"))),
+                )
+            )
+            print("offline PriDe slot-acc delta:", _format_group_comparisons(pride_cmp.get("correct_slot_accuracy", []) or [], top_n=8))
+            print("offline PriDe neg-tail slot-inc delta:", _format_group_comparisons(pride_cmp.get("negative_tail_slot_incidence", []) or [], top_n=8))
         raw_values_for_sweep = (margin_noise_by_k.get(int(k), {}) or {}).get("residuals", []) if int(k) in margin_noise_by_k else []
         if raw_values_for_sweep:
             fit_l = _laplace_fit_report(raw_values_for_sweep)
@@ -4193,6 +4605,8 @@ def _run_analysis(
     print(f"Saved: {out_path}")
 
     margin_noise_summary_by_k: Dict[str, object] = {}
+    pride_margin_noise_summary_by_k: Dict[str, object] = {}
+    pride_comparison_by_k: Dict[str, object] = {}
     for k in sorted(margin_noise_by_k.keys()):
         bucket = margin_noise_by_k[int(k)]
         margin_noise_summary_by_k[str(int(k))] = _summarize_margin_noise_bucket(
@@ -4202,10 +4616,32 @@ def _run_analysis(
             negative_tail_z_cutoff=float(negative_tail_z_cutoff),
             right_tail_z_cutoff=float(right_tail_z_cutoff),
         )
+        if int(k) in margin_noise_pride_by_k:
+            pride_bucket = margin_noise_pride_by_k[int(k)]
+            pride_margin_noise_summary_by_k[str(int(k))] = _summarize_margin_noise_bucket(
+                pride_bucket,
+                n_views=int(pride_bucket.get("n_views", int(k))),
+                reference_mode=str(pride_bucket.get("reference_mode", "cyclic")),
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
+            )
+            pride_comparison_by_k[str(int(k))] = _build_pride_comparison(
+                margin_noise_summary_by_k[str(int(k))],
+                pride_margin_noise_summary_by_k[str(int(k))],
+            )
 
     margin_noise_summary_path = os.path.join(str(cache_dir), "perm_margin_noise_summary.json")
     with open(margin_noise_summary_path, "w", encoding="utf-8") as f:
-        json.dump(margin_noise_summary_by_k, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "raw": margin_noise_summary_by_k,
+                "pride": pride_margin_noise_summary_by_k,
+                "comparison_raw_vs_pride": pride_comparison_by_k,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
     print(f"Saved: {margin_noise_summary_path}")
 
     if save_margin_samples and margin_noise_sample_records:
@@ -5037,6 +5473,12 @@ def main() -> None:
                     help="Standardized z cutoff for summarizing adverse left-tail permutations.")
     ap.add_argument("--right_tail_z_cutoff", type=float, default=1.5,
                     help="Standardized z cutoff for summarizing favorable right-tail permutations.")
+    ap.add_argument("--apply_pride_offline", action="store_true",
+                    help="Apply PriDe correction offline to cached permutation probs and compare raw vs PriDe summaries.")
+    ap.add_argument("--pride_prefix_percent", type=float, default=100.0,
+                    help="Prefix percent used to estimate PriDe prior offline from cached samples.")
+    ap.add_argument("--pride_seed", type=int, default=0,
+                    help="Seed for offline PriDe prefix sampling.")
     ap.add_argument("--save_plots", action="store_true", help="Save PNG plots into results_dir (default: off).")
     ap.add_argument("--save_margin_samples", action="store_true",
                     help="Save sample-level cyclic margin residuals/sigma_i jsonl into results_dir.")
@@ -5068,6 +5510,9 @@ def main() -> None:
             combo_sample_limit=int(args.max_t_combinations),
             negative_tail_z_cutoff=float(args.negative_tail_z_cutoff),
             right_tail_z_cutoff=float(args.right_tail_z_cutoff),
+            apply_pride_offline=bool(args.apply_pride_offline),
+            pride_prefix_percent=float(args.pride_prefix_percent),
+            pride_seed=int(args.pride_seed),
         )
         return
 
@@ -5100,6 +5545,9 @@ def main() -> None:
             combo_sample_limit=int(args.max_t_combinations),
             negative_tail_z_cutoff=float(args.negative_tail_z_cutoff),
             right_tail_z_cutoff=float(args.right_tail_z_cutoff),
+            apply_pride_offline=bool(args.apply_pride_offline),
+            pride_prefix_percent=float(args.pride_prefix_percent),
+            pride_seed=int(args.pride_seed),
         )
         return
 
@@ -5178,6 +5626,9 @@ def main() -> None:
             combo_sample_limit=int(args.max_t_combinations),
             negative_tail_z_cutoff=float(args.negative_tail_z_cutoff),
             right_tail_z_cutoff=float(args.right_tail_z_cutoff),
+            apply_pride_offline=bool(args.apply_pride_offline),
+            pride_prefix_percent=float(args.pride_prefix_percent),
+            pride_seed=int(args.pride_seed),
         )
 
 
