@@ -1,3 +1,4 @@
+import math
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -158,6 +159,248 @@ def _run_online_th1_quantile_th2_from_th1_rule_with_preds(
 
     th2_perc = (np.sum(mc < float(final_th2_val)) / float(len(mc))) * 100.0 if len(mc) > 0 else 0.0
     return total_cost / float(N), corrects / float(N), float(th2_perc), preds
+
+
+def _solve_theory_th2_from_th1_and_bbar(th1_val: float, bbar_val: float) -> float:
+    """
+    Solve for th2 in:
+      th1 = 2 th2 + bbar * log(1 + (th1 - th2) / bbar)
+
+    using a monotone bisection on th2 in [0, th1].
+    """
+    th1 = float(th1_val)
+    bbar = float(bbar_val)
+    if (not np.isfinite(th1)) or th1 <= 1e-12:
+        return 0.0
+    if (not np.isfinite(bbar)) or bbar <= 1e-12:
+        return 0.0
+
+    lo = 0.0
+    hi = th1
+
+    def _f(th2: float) -> float:
+        delta = max(th1 - float(th2), 0.0)
+        return (2.0 * float(th2)) + (bbar * math.log1p(delta / bbar)) - th1
+
+    f_lo = _f(lo)
+    f_hi = _f(hi)
+    if f_lo >= 0.0:
+        return 0.0
+    if f_hi <= 0.0:
+        return float(th1)
+
+    for _ in range(48):
+        mid = 0.5 * (lo + hi)
+        f_mid = _f(mid)
+        if f_mid <= 0.0:
+            lo = mid
+        else:
+            hi = mid
+    return float(max(0.0, min(th1, 0.5 * (lo + hi))))
+
+
+def _run_online_theory_policy_with_preds(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    theory_b_scale: np.ndarray,
+    base_pred_idx: List[int],
+    cyclic_pred_idx: List[int],
+    probe2_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, float, List[int]]:
+    """
+    Online policy using the theory-derived th1-th2 relation with a per-sample
+    effective two-view Laplace scale estimate `theory_b_scale`.
+    Returns: (cost, acc, estimated_th2_percent_over_all_samples, preds)
+    """
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), float("nan"), []
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+    bc = np.asarray(theory_b_scale, dtype=np.float64)
+    q1 = float(th1_percent) / 100.0
+
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    past_dc: List[float] = []
+    th2_vals: List[float] = []
+
+    for i in range(N):
+        gap_i = float(dc[i])
+        mgap_i = float(mc[i])
+
+        if i < int(offline_prefix_n):
+            pred_i = int(base_pred_idx[i])
+            preds.append(pred_i)
+            total_cost += 1.0
+            corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+            past_dc.append(gap_i)
+            th2_vals.append(0.0)
+            continue
+
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q1)) if len(past_dc) > 0 else 0.0
+        th2_val = _solve_theory_th2_from_th1_and_bbar(th1_val, float(bc[i]))
+        th2_vals.append(th2_val)
+
+        if gap_i >= th1_val:
+            c_step = 1.0
+            pred_i = int(base_pred_idx[i])
+        else:
+            if mgap_i < th2_val:
+                c_step = float(k)
+                pred_i = int(cyclic_pred_idx[i])
+            else:
+                c_step = 2.0
+                pred_i = int(probe2_pred_idx[i])
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            c_step = max(float(c_step), float(k))
+            pred_i = int(cyclic_pred_idx[i])
+
+        preds.append(pred_i)
+        total_cost += float(c_step)
+        corrects += 1 if (pred_i == int(labels_idx[i])) else 0
+        past_dc.append(gap_i)
+
+    th2_arr = np.asarray(th2_vals, dtype=np.float64)
+    th2_perc = (np.sum(mc < th2_arr) / float(len(mc))) * 100.0 if len(mc) > 0 and len(th2_arr) == len(mc) else float("nan")
+    return total_cost / float(N), corrects / float(N), float(th2_perc), preds
+
+
+def _run_online_theory_policy(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    theory_b_scale: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, float]:
+    N = len(base_correct)
+    if N == 0:
+        return 0.0, 0.0, 0.0
+
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+    bc = np.asarray(theory_b_scale, dtype=np.float64)
+    q = float(th1_percent) / 100.0
+
+    total_cost = 0.0
+    corrects = 0
+    past_dc: List[float] = []
+    th2_vals: List[float] = []
+
+    for i in range(N):
+        gap_i = float(dc[i])
+
+        if i < int(offline_prefix_n):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            past_dc.append(gap_i)
+            th2_vals.append(0.0)
+            continue
+
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        th2_val = _solve_theory_th2_from_th1_and_bbar(th1_val, float(bc[i]))
+        th2_vals.append(th2_val)
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+        elif gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+        else:
+            if float(mc[i]) < th2_val:
+                total_cost += float(k)
+                corrects += 1 if cyclic_correct[i] else 0
+            else:
+                total_cost += 2.0
+                corrects += 1 if bool(probe2_correct[i]) else 0
+
+        past_dc.append(gap_i)
+
+    th2_arr = np.asarray(th2_vals, dtype=np.float64)
+    th2_perc = (np.sum(mc < th2_arr) / float(len(mc))) * 100.0 if len(mc) > 0 and len(th2_arr) == len(mc) else float("nan")
+    return total_cost / float(N), corrects / float(N), float(th2_perc)
+
+
+def _run_online_theory_policy_with_stats(
+    default_conf: np.ndarray,
+    mean_conf: np.ndarray,
+    theory_b_scale: np.ndarray,
+    base_correct: List[bool],
+    cyclic_correct: List[bool],
+    probe2_correct: np.ndarray,
+    k: int,
+    th1_percent: float,
+    offline_prefix_n: int = 0,
+    forced_cyclic_ids: Optional[set] = None,
+) -> Tuple[float, float, float, Dict[str, int]]:
+    N = len(base_correct)
+    if N == 0:
+        return 0.0, 0.0, 0.0, {"n_base": 0, "n_probe2": 0, "n_cyclic": 0}
+
+    dc = np.asarray(default_conf, dtype=np.float64)
+    mc = np.asarray(mean_conf, dtype=np.float64)
+    bc = np.asarray(theory_b_scale, dtype=np.float64)
+    q = float(th1_percent) / 100.0
+
+    total_cost = 0.0
+    corrects = 0
+    n_base = 0
+    n_probe2 = 0
+    n_cyclic = 0
+    past_dc: List[float] = []
+    th2_vals: List[float] = []
+
+    for i in range(N):
+        gap_i = float(dc[i])
+
+        if i < int(offline_prefix_n):
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+            past_dc.append(gap_i)
+            th2_vals.append(0.0)
+            continue
+
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        th2_val = _solve_theory_th2_from_th1_and_bbar(th1_val, float(bc[i]))
+        th2_vals.append(th2_val)
+
+        if forced_cyclic_ids is not None and int(i) in forced_cyclic_ids:
+            total_cost += float(k)
+            corrects += 1 if cyclic_correct[i] else 0
+            n_cyclic += 1
+        elif gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if base_correct[i] else 0
+            n_base += 1
+        else:
+            if float(mc[i]) < th2_val:
+                total_cost += float(k)
+                corrects += 1 if cyclic_correct[i] else 0
+                n_cyclic += 1
+            else:
+                total_cost += 2.0
+                corrects += 1 if bool(probe2_correct[i]) else 0
+                n_probe2 += 1
+
+        past_dc.append(gap_i)
+
+    th2_arr = np.asarray(th2_vals, dtype=np.float64)
+    th2_perc = (np.sum(mc < th2_arr) / float(len(mc))) * 100.0 if len(mc) > 0 and len(th2_arr) == len(mc) else float("nan")
+    return total_cost / float(N), corrects / float(N), float(th2_perc), {"n_base": int(n_base), "n_probe2": int(n_probe2), "n_cyclic": int(n_cyclic)}
 
 
 def _run_online_switch_cyclic_with_preds(

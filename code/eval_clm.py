@@ -40,6 +40,9 @@ from eval_clm_online import (
     _run_online_sqrt_policy_lowconf_update,
     _run_online_sqrt_policy_with_preds,
     _run_online_sqrt_policy_with_stats,
+    _run_online_theory_policy,
+    _run_online_theory_policy_with_preds,
+    _run_online_theory_policy_with_stats,
     _run_online_top1_last_slot_policy,
     _run_online_top1_last_slot_policy_with_preds,
     _run_online_top1_last_slot_policy_with_stats,
@@ -82,6 +85,7 @@ logger = logging.getLogger(__name__)
 
 PRIMARY_OURS_LABEL = "th1/sqrt2"
 LEGACY_OURS_LABEL = "th1/2"
+THEORY_OURS_LABEL = "th1/theory"
 TOP1LAST_OURS_LABEL = "top1_lastslot"
 
 
@@ -480,9 +484,9 @@ def _plot_baseline_points_scatter(
     #                marker='X', s=150, color='black', label='Full', zorder=10)
 
     # 2. Policy Points (REAL-WORLD online; single point)
-    policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_top1_lastslot", "ours_avggap"]
-    markers = ['s', '^', 'v', 'P', 'o']
-    colors = ['orange', 'brown', 'green', 'teal', 'blue']
+    policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_theory", "ours_top1_lastslot", "ours_avggap"]
+    markers = ['s', '^', 'v', 'X', 'P', 'o']
+    colors = ['orange', 'brown', 'green', 'gray', 'teal', 'blue']
     
     for key, m, c in zip(policies, markers, colors):
         if key in curve_obj:
@@ -549,9 +553,9 @@ def _plot_baseline_vs_pride_points_scatter(
                 zorder=10,
             )
 
-        policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_top1_lastslot", "ours_avggap"]
-        markers = ['s', '^', 'v', 'P', 'o']
-        colors = ['orange', 'brown', 'green', 'teal', 'blue']
+        policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_theory", "ours_top1_lastslot", "ours_avggap"]
+        markers = ['s', '^', 'v', 'X', 'P', 'o']
+        colors = ['orange', 'brown', 'green', 'gray', 'teal', 'blue']
         for key, m, c in zip(policies, markers, colors):
             if key not in obj:
                 continue
@@ -1568,6 +1572,7 @@ def _compute_curves_for_one_percentile(
     full_correct_list: List[bool],
     default_conf: np.ndarray,
     mean_conf: np.ndarray,
+    theory_b_scale: np.ndarray,
     flip_trigger: np.ndarray,
     probe2_correct: np.ndarray,
     top1_lastslot_mean_conf: np.ndarray,
@@ -1701,6 +1706,18 @@ def _compute_curves_for_one_percentile(
         offline_prefix_n=0,
         forced_cyclic_ids=forced_cyclic_ids,
     )
+    _, _, _, theory_stats = _run_online_theory_policy_with_stats(
+        default_conf=default_conf,
+        mean_conf=mean_conf,
+        theory_b_scale=theory_b_scale,
+        base_correct=base_correct_list,
+        cyclic_correct=cyclic_correct_list,
+        probe2_correct=probe2_correct,
+        k=k,
+        th1_percent=perc_value,
+        offline_prefix_n=0,
+        forced_cyclic_ids=forced_cyclic_ids,
+    )
     _, _, lastslot_stats = _run_online_top1_last_slot_policy_with_stats(
         default_conf=default_conf,
         mean_conf=top1_lastslot_mean_conf,
@@ -1708,6 +1725,18 @@ def _compute_curves_for_one_percentile(
         base_correct=base_correct_list,
         lastslot_correct=top1_lastslot_correct,
         cyclic_correct=cyclic_correct_list,
+        k=k,
+        th1_percent=perc_value,
+        offline_prefix_n=0,
+        forced_cyclic_ids=forced_cyclic_ids,
+    )
+    c_theory, a_theory, _ = _run_online_theory_policy(
+        default_conf=default_conf,
+        mean_conf=mean_conf,
+        theory_b_scale=theory_b_scale,
+        base_correct=base_correct_list,
+        cyclic_correct=cyclic_correct_list,
+        probe2_correct=probe2_correct,
         k=k,
         th1_percent=perc_value,
         offline_prefix_n=0,
@@ -1793,6 +1822,7 @@ def _compute_curves_for_one_percentile(
         **{key: {"costs": [cyclic_random_costs[key]], "accuracies": [cyclic_random_accs[key]]} for key in cyclic_random_costs},
         "switch_cyclic": {"costs": [float(switch_cyclic_cost)], "accuracies": [float(switch_cyclic_acc)], "stats": dict(sc_stats)},
         "ours_top2flip": {"costs": [float(c_top2)], "accuracies": [float(a_top2)], "stats": dict(top2_stats)},
+        "ours_theory": {"costs": [float(c_theory)], "accuracies": [float(a_theory)], "stats": dict(theory_stats)},
         "ours_top1_lastslot": {"costs": [float(c_lastslot)], "accuracies": [float(a_lastslot)], "stats": dict(lastslot_stats)},
         "ours_avggap": {"costs": [float(c_avg)], "accuracies": [float(a_avg)]},
         "ours_avggap_stats": dict(avg_stats),
@@ -1806,6 +1836,9 @@ def _compute_curves_for_one_percentile(
             _, _, preds_top2 = _run_online_top2flip_policy_with_preds(
                 default_conf, flip_trigger, base_pred_idx, cyclic_pred_idx, probe2_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids
             )
+            _, _, _, preds_theory = _run_online_theory_policy_with_preds(
+                default_conf, mean_conf, theory_b_scale, base_pred_idx, cyclic_pred_idx, probe2_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids
+            )
             _, _, preds_lastslot = _run_online_top1_last_slot_policy_with_preds(
                 default_conf, top1_lastslot_mean_conf, top1_lastslot_probe_needed, base_pred_idx, top1_lastslot_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids, cyclic_pred_idx
             )
@@ -1814,6 +1847,7 @@ def _compute_curves_for_one_percentile(
             )
             curve_obj["switch_cyclic_recall_std"] = float(_recall_std(labels_idx, preds_sc, k))
             curve_obj["ours_top2flip_recall_std"] = float(_recall_std(labels_idx, preds_top2, k))
+            curve_obj["ours_theory_recall_std"] = float(_recall_std(labels_idx, preds_theory, k))
             curve_obj["ours_top1_lastslot_recall_std"] = float(_recall_std(labels_idx, preds_lastslot, k))
             curve_obj["ours_avggap_recall_std"] = float(_recall_std(labels_idx, preds_avg, k))
             # Default: prefix->cyclic, postfix->base (debias_pride.py와 동일)
@@ -2439,6 +2473,7 @@ def main():
                         arr_top1_lastslot_correct = np.asarray(top1_lastslot_correct_list, dtype=bool)
                         cyclic_gap_mean = np.asarray(cyclic_gap_mean_list, dtype=np.float64)
                         cyclic_gap_std = np.asarray(cyclic_gap_std_list, dtype=np.float64)
+                        theory_b_scale = cyclic_gap_std / 2.0
                         sigma_analysis_baseline_records.append(
                             _build_sigma_analysis_record(
                                 subject=subject,
@@ -2518,7 +2553,7 @@ def main():
                                     subject=subject, tag="baseline", k=k, perm_list=perm_list,
                                     base_correct_list=base_correct_list, cyclic_correct_list=cyclic_correct_list,
                                     full_correct_list=full_correct_list if full_enabled else [],
-                                    default_conf=default_conf, mean_conf=mean_conf, flip_trigger=arr_flip_trigger,
+                                    default_conf=default_conf, mean_conf=mean_conf, theory_b_scale=theory_b_scale, flip_trigger=arr_flip_trigger,
                                     probe2_correct=arr_probe2_correct,
                                     top1_lastslot_mean_conf=arr_top1_lastslot_mean_conf,
                                     top1_lastslot_probe_needed=arr_top1_lastslot_probe_needed,
@@ -2547,6 +2582,20 @@ def main():
                                         except Exception:
                                             pass
                                         return out
+                                    def _get_static_pt_theory(th1_p):
+                                        c, a, _, st = _run_online_theory_policy_with_stats(
+                                            default_conf, mean_conf, theory_b_scale, base_correct_list,
+                                            cyclic_correct_list, arr_probe2_correct, k, th1_p, 0, None)
+                                        out = {'cost': c, 'acc': a, 'label': THEORY_OURS_LABEL, 'marker': 'X', 'color': 'gray'}
+                                        try:
+                                            _, _, _, preds = _run_online_theory_policy_with_preds(
+                                                default_conf, mean_conf, theory_b_scale, base_pred_idx_list,
+                                                cyclic_pred_idx_list, probe2_pred_idx_list, labels_idx_for_curves, k, th1_p, 0, None)
+                                            out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
+                                            out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
+                                        except Exception:
+                                            pass
+                                        return out
                                     def _get_static_pt_top1last(th1_p):
                                         c, a, st = _run_online_top1_last_slot_policy_with_stats(
                                             default_conf, arr_top1_lastslot_mean_conf, arr_top1_lastslot_probe_needed, base_correct_list,
@@ -2564,6 +2613,7 @@ def main():
                                     if "heuristic_points" not in cobj:
                                         cobj["heuristic_points"] = [
                                             _get_static_pt(perc, _rule_th1_half, LEGACY_OURS_LABEL, "*"),
+                                            _get_static_pt_theory(perc),
                                             _get_static_pt(perc, _rule_th1_sqrt2, PRIMARY_OURS_LABEL, "v"),
                                             _get_static_pt_top1last(perc),
                                         ]
@@ -2704,6 +2754,7 @@ def main():
                                 arr_top1_lastslot_correct_pr = np.asarray(top1_lastslot_correct_list_pr, dtype=bool)
                                 cyclic_gap_mean_pr = np.asarray(cyclic_gap_mean_list_pr, dtype=np.float64)
                                 cyclic_gap_std_pr = np.asarray(cyclic_gap_std_list_pr, dtype=np.float64)
+                                theory_b_scale_pr = cyclic_gap_std_pr / 2.0
                                 sigma_analysis_pride_by_alpha.setdefault(float(pride_alpha), []).append(
                                     _build_sigma_analysis_record(
                                         subject=subject,
@@ -2720,6 +2771,7 @@ def main():
                                 cyclic_for_dp = cyclic_correct_list if pride_alpha >= 100 else cyclic_correct_list_pr
                                 base_pred_dp = base_pred_idx_list if pride_alpha >= 100 else base_pred_idx_list_pr
                                 cyclic_pred_dp = cyclic_pred_idx_list if pride_alpha >= 100 else cyclic_pred_idx_list_pr
+                                theory_b_scale_dp = theory_b_scale if pride_alpha >= 100 else theory_b_scale_pr
                                 top1_lastslot_mean_conf_dp = arr_top1_lastslot_mean_conf if pride_alpha >= 100 else arr_top1_lastslot_mean_conf_pr
                                 top1_lastslot_correct_dp = arr_top1_lastslot_correct if pride_alpha >= 100 else arr_top1_lastslot_correct_pr
                                 top1_lastslot_probe_needed_dp = arr_top1_lastslot_probe_needed if pride_alpha >= 100 else arr_top1_lastslot_probe_needed_pr
@@ -2729,7 +2781,7 @@ def main():
                                     subject=subject, tag="pride_mix", k=k, perm_list=perm_list,
                                     base_correct_list=base_for_dp, cyclic_correct_list=cyclic_for_dp,
                                     full_correct_list=full_correct_list_pr if full_enabled else [],
-                                    default_conf=default_conf_pr, mean_conf=mean_conf_pr,
+                                    default_conf=default_conf_pr, mean_conf=mean_conf_pr, theory_b_scale=theory_b_scale_dp,
                                     flip_trigger=arr_flip_trigger_pr, probe2_correct=arr_probe2_correct_pr,
                                     top1_lastslot_mean_conf=top1_lastslot_mean_conf_dp,
                                     top1_lastslot_probe_needed=top1_lastslot_probe_needed_dp,
@@ -2775,6 +2827,20 @@ def main():
                                         except Exception:
                                             pass
                                         return out
+                                    def _get_static_pt_theory_pride(th1_p):
+                                        c, a, _, st = _run_online_theory_policy_with_stats(
+                                            default_conf_pr, mean_conf_pr, theory_b_scale_dp, bc_use,
+                                            cc_use, arr_probe2_correct_pr, k, th1_p, 0, prefix_ids_set)
+                                        out = {'cost': c, 'acc': a, 'label': THEORY_OURS_LABEL, 'th1_p': th1_p, 'marker': 'X', 'color': 'gray'}
+                                        try:
+                                            _, _, _, preds = _run_online_theory_policy_with_preds(
+                                                default_conf_pr, mean_conf_pr, theory_b_scale_dp, bp_use,
+                                                cp_use, probe2_pred_idx_list_pr, labels_idx_for_curves, k, th1_p, 0, prefix_ids_set)
+                                            out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
+                                            out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
+                                        except Exception:
+                                            pass
+                                        return out
                                     def _get_static_pt_top1last_pride(th1_p):
                                         c, a, st = _run_online_top1_last_slot_policy_with_stats(
                                             default_conf_pr, top1_lastslot_mean_conf_dp, top1_lastslot_probe_needed_dp, bc_use,
@@ -2790,10 +2856,11 @@ def main():
                                             pass
                                         return out
                                     pts_th12 = [_get_static_pt_pride(float(th1), _rule_th1_half, LEGACY_OURS_LABEL, "*") for th1 in ours_th1_list]
+                                    pts_theory = [_get_static_pt_theory_pride(float(th1)) for th1 in ours_th1_list]
                                     pts_var = [_get_static_pt_pride(float(th1), _rule_th1_sqrt2, PRIMARY_OURS_LABEL, "v") for th1 in ours_th1_list]
                                     pts_sqrt = [_get_static_pt_online_sqrt(float(th1)) for th1 in ours_th1_list]
                                     pts_top1last = [_get_static_pt_top1last_pride(float(th1)) for th1 in ours_th1_list]
-                                    cobj_pr["heuristic_points"] = pts_th12 + pts_var + pts_sqrt + pts_top1last
+                                    cobj_pr["heuristic_points"] = pts_th12 + pts_theory + pts_var + pts_sqrt + pts_top1last
                                     by_pride_alpha[pride_alpha].append(cobj_pr)
 
                                 for ours_th1 in ours_th1_list:
@@ -3222,7 +3289,7 @@ def main():
                 a_str = f"{float(alpha):g}"
                 logger.info(f"default_pride_α{a_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
 
-            # 2. ours + pride (per alpha): legacy th1/2, primary variance sqrt2, and online sqrt
+            # 2. ours + pride (per alpha): legacy th1/2, theory-matched, primary variance sqrt2, and online sqrt
             logger.info("---- ours + pride (th1/2 legacy) ----")
             for alpha in pride_alphas:
                 cobjs = derived_records_pride_by_alpha[alpha]
@@ -3231,6 +3298,14 @@ def main():
                     a_str = f"{float(alpha):g}"
                     p_str = f"{float(p):g}"
                     logger.info(f"ours_pride_th12_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+            logger.info("---- ours + pride (Theory-matched th2) ----")
+            for alpha in pride_alphas:
+                cobjs = derived_records_pride_by_alpha[alpha]
+                for p in pride_fracs:
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, THEORY_OURS_LABEL)
+                    a_str = f"{float(alpha):g}"
+                    p_str = f"{float(p):g}"
+                    logger.info(f"ours_pride_theory_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
             logger.info(f"---- ours + pride ({PRIMARY_OURS_LABEL}) ----")
             for alpha in pride_alphas:
                 cobjs = derived_records_pride_by_alpha[alpha]
@@ -3264,6 +3339,13 @@ def main():
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], PRIMARY_OURS_LABEL)
                     p_str = f"{float(p):g}"
                     logger.info(f"ours_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+
+            logger.info("---- ours (Theory-matched th2) ----")
+            for p in pride_fracs:
+                if float(p) in derived_records_by_p:
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], THEORY_OURS_LABEL)
+                    p_str = f"{float(p):g}"
+                    logger.info(f"ours_theory_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             logger.info("---- ours (Top1->last-slot targeted) ----")
             for p in pride_fracs:
