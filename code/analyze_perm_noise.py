@@ -3255,6 +3255,192 @@ def _save_raw_param_sweep_plot(
     return out_path
 
 
+def _save_margin_bucket_plots(
+    *,
+    plt,
+    bucket: Dict[str, object],
+    summary: Dict[str, object],
+    out_dir: str,
+    k: int,
+    mode_label: str,
+    file_tag: str,
+    n_models: Optional[int] = None,
+) -> List[str]:
+    saved: List[str] = []
+    raw_residuals = np.asarray(bucket.get("residuals", []), dtype=np.float64)
+    z_scores = np.asarray(bucket.get("z_scores", []), dtype=np.float64)
+    sample_ref = np.asarray(bucket.get("sample_ref_margins", []), dtype=np.float64)
+    sample_sigma = np.asarray(bucket.get("sample_sigmas", []), dtype=np.float64)
+    t_residuals = bucket.get("t_residuals", {}) or {}
+
+    if raw_residuals.size > 0:
+        fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
+        ax = fig.add_subplot(1, 1, 1)
+        hist_label = "All models pooled residual" if n_models is not None else "Raw residuals"
+        ax.hist(raw_residuals, bins=60 if n_models is not None else 50, density=True, alpha=0.68, color="#6baed6", label=hist_label)
+        fit_raw = summary.get("pooled_residual_fit", {}) or {}
+        fit_laplace = summary.get("pooled_residual_laplace_fit", {}) or {}
+        fit_cauchy = summary.get("pooled_residual_cauchy_fit", {}) or {}
+        mu = float(fit_raw.get("mean", float("nan")))
+        sigma = float(fit_raw.get("std", float("nan")))
+        x_min = float(np.min(raw_residuals))
+        x_max = float(np.max(raw_residuals))
+        if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+            xs = np.linspace(x_min, x_max, 400)
+            if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12:
+                pdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
+                ax.plot(xs, pdf, color="#d62728", lw=2.0, label="Gaussian (KS={:.3f}, KL={:.3f})".format(float(fit_raw.get("ks_to_fit", float("nan"))), float(fit_raw.get("kl_hist_to_fit", float("nan")))))
+            laplace_pdf = _laplace_pdf(xs, float(fit_laplace.get("loc", float("nan"))), float(fit_laplace.get("scale", float("nan"))))
+            if np.all(np.isfinite(laplace_pdf)):
+                ax.plot(xs, laplace_pdf, color="#2ca02c", lw=1.8, ls="--", label="Laplace (KS={:.3f}, KL={:.3f})".format(float(fit_laplace.get("ks_to_fit", float("nan"))), float(fit_laplace.get("kl_hist_to_fit", float("nan")))))
+            cauchy_pdf = _cauchy_pdf(xs, float(fit_cauchy.get("loc", float("nan"))), float(fit_cauchy.get("scale", float("nan"))))
+            if np.all(np.isfinite(cauchy_pdf)):
+                ax.plot(xs, cauchy_pdf, color="#9467bd", lw=1.8, ls=":", label="Cauchy (KS={:.3f}, KL={:.3f})".format(float(fit_cauchy.get("ks_to_fit", float("nan"))), float(fit_cauchy.get("kl_hist_to_fit", float("nan")))))
+        title_head = f"Multi-model pooled {mode_label}" if n_models is not None else mode_label
+        title_tail = f"models={n_models}, compare Gaussian / Laplace / Cauchy" if n_models is not None else f"mean={mu:.3f}, std={sigma:.3f}, compare Gaussian / Laplace / Cauchy"
+        ax.set_title(f"{title_head} margin residuals (raw) (k={k})\n{title_tail}")
+        ax.set_xlabel("residual = margin - ref_margin")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        p = os.path.join(out_dir, f"{file_tag}_raw_hist_k{k}.png")
+        fig.savefig(p)
+        plt.close(fig)
+        saved.append(p)
+
+        for labels, slot_name in (
+            (bucket.get("residual_correct_slot_labels", []) or [], "correct_slot"),
+            (bucket.get("residual_top1_slot_labels", []) or [], "top1_slot"),
+            (bucket.get("residual_top2_slot_labels", []) or [], "top2_slot"),
+        ):
+            p_slot = os.path.join(out_dir, f"{file_tag}_raw_hist_by_{slot_name}_k{k}.png")
+            saved_slot = _save_raw_fit_by_label_plot(
+                plt=plt,
+                values=raw_residuals,
+                labels=labels,
+                out_path=p_slot,
+                title=f"{title_head} raw residuals by {slot_name.replace('_', ' ')} (k={k})",
+            )
+            if saved_slot:
+                saved.append(saved_slot)
+        p_sweep = os.path.join(out_dir, f"{file_tag}_raw_param_sweep_k{k}.png")
+        saved_sweep = _save_raw_param_sweep_plot(
+            plt=plt,
+            values=raw_residuals,
+            out_path=p_sweep,
+            title=f"{title_head} raw residual parameter sweep (k={k})",
+            laplace_loc=float(fit_laplace.get("loc", float("nan"))),
+            laplace_scale=float(fit_laplace.get("scale", float("nan"))),
+            cauchy_loc=float(fit_cauchy.get("loc", float("nan"))),
+            cauchy_scale=float(fit_cauchy.get("scale", float("nan"))),
+        )
+        if saved_sweep:
+            saved.append(saved_sweep)
+
+    if z_scores.size > 0:
+        fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
+        ax = fig.add_subplot(1, 1, 1)
+        z_label = "All models pooled z" if n_models is not None else "Standardized residuals"
+        ax.hist(z_scores, bins=60 if n_models is not None else 50, density=True, alpha=0.68, color="#1f77b4", label=z_label)
+        x_min = float(np.min(z_scores))
+        x_max = float(np.max(z_scores))
+        if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+            xs = np.linspace(max(-4.0, x_min), min(4.0, x_max), 300)
+            normal_pdf = np.exp(-0.5 * xs * xs) / math.sqrt(2.0 * math.pi)
+            ax.plot(xs, normal_pdf, color="#d62728", lw=2.0, label="N(0,1)")
+        fit = summary.get("standardized_residual_fit", {}) or {}
+        title_head = f"Multi-model pooled {mode_label}" if n_models is not None else mode_label
+        title_tail = (
+            f"models={n_models}, KS={float(fit.get('ks_to_fit', float('nan'))):.3f}, KL={float(fit.get('kl_hist_to_fit', float('nan'))):.3f}"
+            if n_models is not None
+            else f"mean={float(fit.get('mean', float('nan'))):.3f}, std={float(fit.get('std', float('nan'))):.3f}, KS={float(fit.get('ks_to_fit', float('nan'))):.3f}, KL={float(fit.get('kl_hist_to_fit', float('nan'))):.3f}"
+        )
+        ax.set_title(f"{title_head} margin residuals (standardized) (k={k})\n{title_tail}")
+        ax.set_xlabel("z = residual / sigma_i")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        p = os.path.join(out_dir, f"{file_tag}_hist_k{k}.png")
+        fig.savefig(p)
+        plt.close(fig)
+        saved.append(p)
+
+        if n_models is None:
+            fig = plt.figure(figsize=(5.6, 5.6), dpi=180)
+            ax = fig.add_subplot(1, 1, 1)
+            zs = np.sort(z_scores)
+            if zs.size > 4000:
+                idx = np.linspace(0, zs.size - 1, 4000).astype(np.int64)
+                zs = zs[idx]
+            probs = (np.arange(1, zs.size + 1, dtype=np.float64) - 0.5) / float(zs.size)
+            nd0 = NormalDist()
+            q_theory = np.asarray([nd0.inv_cdf(float(pv)) for pv in probs], dtype=np.float64)
+            ax.scatter(q_theory, zs, s=8, alpha=0.30, color="#1f77b4")
+            lo = float(min(np.min(q_theory), np.min(zs)))
+            hi = float(max(np.max(q_theory), np.max(zs)))
+            ax.plot([lo, hi], [lo, hi], color="#d62728", lw=1.8, ls="--")
+            ax.set_title(f"QQ plot vs N(0,1) ({mode_label}, k={k})")
+            ax.set_xlabel("Theoretical quantiles")
+            ax.set_ylabel("Empirical quantiles")
+            ax.grid(True, alpha=0.25)
+            fig.tight_layout()
+            p = os.path.join(out_dir, f"{file_tag}_qq_k{k}.png")
+            fig.savefig(p)
+            plt.close(fig)
+            saved.append(p)
+
+    if sample_ref.size > 0 and sample_sigma.size > 0 and sample_ref.size == sample_sigma.size:
+        fig = plt.figure(figsize=(6.8, 5.2), dpi=180)
+        ax = fig.add_subplot(1, 1, 1)
+        ax.scatter(sample_ref, sample_sigma, s=12, alpha=0.22, color="#2ca02c")
+        corr = _safe_corr(sample_ref, sample_sigma)
+        ax.set_title(f"Sample sigma vs reference margin ({mode_label}, k={k})\nCorr={corr:.3f}")
+        ax.set_xlabel("Reference margin")
+        ax.set_ylabel("sigma_i")
+        ax.grid(True, alpha=0.25)
+        fig.tight_layout()
+        p = os.path.join(out_dir, f"{file_tag}_sigma_vs_margin_k{k}.png")
+        fig.savefig(p)
+        plt.close(fig)
+        saved.append(p)
+
+    if t_residuals:
+        ts = sorted(int(t) for t in t_residuals.keys())
+        emp_std = []
+        for t in ts:
+            arr = np.asarray(t_residuals.get(t, []), dtype=np.float64)
+            emp_std.append(float(np.std(arr)) if arr.size > 0 else float("nan"))
+        if emp_std:
+            base_std = emp_std[0] if np.isfinite(emp_std[0]) else float("nan")
+            target = [float(base_std / math.sqrt(float(t))) if np.isfinite(base_std) else float("nan") for t in ts]
+            n_views = max(ts) if ts else 0
+            finite_target = [
+                float(base_std * math.sqrt(float(max(0, n_views - int(t))) / float(max(1, int(t)) * max(1, n_views - 1))))
+                if np.isfinite(base_std) and n_views > 1 else float("nan")
+                for t in ts
+            ]
+            fig = plt.figure(figsize=(6.8, 4.8), dpi=180)
+            ax = fig.add_subplot(1, 1, 1)
+            ax.plot(ts, emp_std, "-o", color="#1f77b4", lw=2.0, ms=5, label="Empirical residual std")
+            ax.plot(ts, target, "--s", color="#d62728", lw=1.6, ms=4, label="std(T=1) / sqrt(T)")
+            if n_views > 1:
+                ax.plot(ts, finite_target, ":^", color="#2ca02c", lw=1.6, ms=4, label="Finite-view target")
+            ax.set_title(f"View-count scaling of {mode_label} residual std (k={k})")
+            ax.set_xlabel("T = #views averaged")
+            ax.set_ylabel("Residual std")
+            ax.grid(True, alpha=0.25)
+            ax.legend(fontsize=8)
+            fig.tight_layout()
+            p = os.path.join(out_dir, f"{file_tag}_t_scaling_k{k}.png")
+            fig.savefig(p)
+            plt.close(fig)
+            saved.append(p)
+
+    return saved
+
+
 def _save_multi_model_margin_plots(
     *,
     combined_by_k: Dict[int, Dict[str, object]],
@@ -3273,143 +3459,40 @@ def _save_multi_model_margin_plots(
         per_model = rec.get("per_model", []) or []
         ref_mode = str((pooled or {}).get("reference_mode", rec.get("reference_mode", "cyclic")))
         mode_label = "Full-permutation" if ref_mode == "full" else "Cyclic"
-        raw_residuals = np.asarray(rec.get("pooled_bucket", {}).get("residuals", []), dtype=np.float64)
-        z_scores = np.asarray(rec.get("pooled_bucket", {}).get("z_scores", []), dtype=np.float64)
-        t_residuals = rec.get("pooled_bucket", {}).get("t_residuals", {}) or {}
-
-        if raw_residuals.size > 0:
-            fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
-            ax = fig.add_subplot(1, 1, 1)
-            ax.hist(raw_residuals, bins=60, density=True, alpha=0.68, color="#6baed6", label="All models pooled residual")
-            fit_raw = pooled.get("pooled_residual_fit", {}) or {}
-            fit_laplace = pooled.get("pooled_residual_laplace_fit", {}) or {}
-            fit_cauchy = pooled.get("pooled_residual_cauchy_fit", {}) or {}
-            mu = float(fit_raw.get("mean", float("nan")))
-            sigma = float(fit_raw.get("std", float("nan")))
-            x_min = float(np.min(raw_residuals))
-            x_max = float(np.max(raw_residuals))
-            if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
-                xs = np.linspace(x_min, x_max, 400)
-                if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12:
-                    pdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
-                    ax.plot(
-                        xs,
-                        pdf,
-                        color="#d62728",
-                        lw=2.0,
-                        label="Gaussian (KS={:.3f}, KL={:.3f})".format(
-                            float(fit_raw.get("ks_to_fit", float("nan"))),
-                            float(fit_raw.get("kl_hist_to_fit", float("nan"))),
-                        ),
-                    )
-                laplace_pdf = _laplace_pdf(xs, float(fit_laplace.get("loc", float("nan"))), float(fit_laplace.get("scale", float("nan"))))
-                if np.all(np.isfinite(laplace_pdf)):
-                    ax.plot(
-                        xs,
-                        laplace_pdf,
-                        color="#2ca02c",
-                        lw=1.8,
-                        ls="--",
-                        label="Laplace (KS={:.3f}, KL={:.3f})".format(
-                            float(fit_laplace.get("ks_to_fit", float("nan"))),
-                            float(fit_laplace.get("kl_hist_to_fit", float("nan"))),
-                        ),
-                    )
-                cauchy_pdf = _cauchy_pdf(xs, float(fit_cauchy.get("loc", float("nan"))), float(fit_cauchy.get("scale", float("nan"))))
-                if np.all(np.isfinite(cauchy_pdf)):
-                    ax.plot(
-                        xs,
-                        cauchy_pdf,
-                        color="#9467bd",
-                        lw=1.8,
-                        ls=":",
-                        label="Cauchy (KS={:.3f}, KL={:.3f})".format(
-                            float(fit_cauchy.get("ks_to_fit", float("nan"))),
-                            float(fit_cauchy.get("kl_hist_to_fit", float("nan"))),
-                        ),
-                    )
-            ax.set_title(
-                f"Multi-model pooled {ref_mode} residuals (raw) (k={k})\n"
-                f"models={len(per_model)}, compare Gaussian / Laplace / Cauchy"
-            )
-            ax.set_xlabel("residual = margin - ref_margin")
-            ax.set_ylabel("Density")
-            ax.grid(True, alpha=0.25)
-            ax.legend(fontsize=8)
-            fig.tight_layout()
-            p = os.path.join(out_dir, f"multi_model_margin_noise_raw_hist_k{k}.png")
-            fig.savefig(p)
-            plt.close(fig)
-            saved.append(p)
-            p_slot = os.path.join(out_dir, f"multi_model_margin_noise_raw_hist_by_correct_slot_k{k}.png")
-            saved_slot = _save_raw_fit_by_label_plot(
+        saved.extend(_save_margin_bucket_plots(
+            plt=plt,
+            bucket=rec.get("pooled_bucket", {}) or {},
+            summary=pooled,
+            out_dir=out_dir,
+            k=int(k),
+            mode_label=mode_label,
+            file_tag="multi_model_margin_noise",
+            n_models=len(per_model),
+        ))
+        pooled_pride = rec.get("pooled_summary_pride", {}) or {}
+        if pooled_pride:
+            saved.extend(_save_margin_bucket_plots(
                 plt=plt,
-                values=raw_residuals,
-                labels=rec.get("pooled_bucket", {}).get("residual_correct_slot_labels", []) or [],
-                out_path=p_slot,
-                title=f"Multi-model pooled {ref_mode} raw residuals by correct slot (k={k})",
-            )
-            if saved_slot:
-                saved.append(saved_slot)
-            p_top1 = os.path.join(out_dir, f"multi_model_margin_noise_raw_hist_by_top1_slot_k{k}.png")
-            saved_top1 = _save_raw_fit_by_label_plot(
+                bucket=rec.get("pooled_bucket_pride", {}) or {},
+                summary=pooled_pride,
+                out_dir=out_dir,
+                k=int(k),
+                mode_label=f"{mode_label} PriDe",
+                file_tag="multi_model_margin_noise_pride",
+                n_models=len(per_model),
+            ))
+        pooled_pride_fixed_ref = rec.get("pooled_summary_pride_fixed_ref", {}) or {}
+        if pooled_pride_fixed_ref:
+            saved.extend(_save_margin_bucket_plots(
                 plt=plt,
-                values=raw_residuals,
-                labels=rec.get("pooled_bucket", {}).get("residual_top1_slot_labels", []) or [],
-                out_path=p_top1,
-                title=f"Multi-model pooled {ref_mode} raw residuals by top1 slot (k={k})",
-            )
-            if saved_top1:
-                saved.append(saved_top1)
-            p_top2 = os.path.join(out_dir, f"multi_model_margin_noise_raw_hist_by_top2_slot_k{k}.png")
-            saved_top2 = _save_raw_fit_by_label_plot(
-                plt=plt,
-                values=raw_residuals,
-                labels=rec.get("pooled_bucket", {}).get("residual_top2_slot_labels", []) or [],
-                out_path=p_top2,
-                title=f"Multi-model pooled {ref_mode} raw residuals by top2 slot (k={k})",
-            )
-            if saved_top2:
-                saved.append(saved_top2)
-            p_sweep = os.path.join(out_dir, f"multi_model_margin_noise_raw_param_sweep_k{k}.png")
-            saved_sweep = _save_raw_param_sweep_plot(
-                plt=plt,
-                values=raw_residuals,
-                out_path=p_sweep,
-                title=f"Multi-model pooled {ref_mode} raw residual parameter sweep (k={k})",
-                laplace_loc=float(fit_laplace.get("loc", float("nan"))),
-                laplace_scale=float(fit_laplace.get("scale", float("nan"))),
-                cauchy_loc=float(fit_cauchy.get("loc", float("nan"))),
-                cauchy_scale=float(fit_cauchy.get("scale", float("nan"))),
-            )
-            if saved_sweep:
-                saved.append(saved_sweep)
-
-        if z_scores.size > 0:
-            fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
-            ax = fig.add_subplot(1, 1, 1)
-            ax.hist(z_scores, bins=60, density=True, alpha=0.68, color="#1f77b4", label="All models pooled z")
-            x_min = float(np.min(z_scores))
-            x_max = float(np.max(z_scores))
-            if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
-                xs = np.linspace(max(-4.0, x_min), min(4.0, x_max), 300)
-                normal_pdf = np.exp(-0.5 * xs * xs) / math.sqrt(2.0 * math.pi)
-                ax.plot(xs, normal_pdf, color="#d62728", lw=2.0, label="N(0,1)")
-            fit = pooled.get("standardized_residual_fit", {}) or {}
-            ax.set_title(
-                f"Multi-model pooled {ref_mode} residuals (standardized) (k={k})\n"
-                f"models={len(per_model)}, KS={float(fit.get('ks_to_fit', float('nan'))):.3f}, "
-                f"KL={float(fit.get('kl_hist_to_fit', float('nan'))):.3f}"
-            )
-            ax.set_xlabel("z = residual / sigma_i")
-            ax.set_ylabel("Density")
-            ax.grid(True, alpha=0.25)
-            ax.legend(fontsize=8)
-            fig.tight_layout()
-            p = os.path.join(out_dir, f"multi_model_margin_noise_hist_k{k}.png")
-            fig.savefig(p)
-            plt.close(fig)
-            saved.append(p)
+                bucket=rec.get("pooled_bucket_pride_fixed_ref", {}) or {},
+                summary=pooled_pride_fixed_ref,
+                out_dir=out_dir,
+                k=int(k),
+                mode_label=f"{mode_label} PriDe fixed-ref",
+                file_tag="multi_model_margin_noise_pride_fixed_ref",
+                n_models=len(per_model),
+            ))
 
         if per_model:
             labels = [str(x.get("model_tag", "model")) for x in per_model]
@@ -5125,6 +5208,8 @@ def _run_analysis(
             recall_by_k=recall_by_k,
             task_name=task_name,
             margin_noise_by_k=margin_noise_by_k,
+            margin_noise_pride_by_k=margin_noise_pride_by_k,
+            margin_noise_pride_fixedref_by_k=margin_noise_pride_fixedref_by_k,
         )
 
     if wandb_enabled:
@@ -5149,6 +5234,8 @@ def _save_noise_plots(
     recall_by_k: Optional[Dict[int, Dict[str, List[str]]]] = None,
     task_name: Optional[str] = None,
     margin_noise_by_k: Optional[Dict[int, Dict[str, object]]] = None,
+    margin_noise_pride_by_k: Optional[Dict[int, Dict[str, object]]] = None,
+    margin_noise_pride_fixedref_by_k: Optional[Dict[int, Dict[str, object]]] = None,
 ) -> List[str]:
     """
     Save a small set of PNG plots into out_dir.
@@ -5482,215 +5569,52 @@ def _save_noise_plots(
                 margin_bucket = margin_noise_by_k[int(k)]
                 ref_mode = str(margin_bucket.get("reference_mode", "cyclic"))
                 mode_label = "Full-permutation" if ref_mode == "full" else "Cyclic"
-                raw_residuals = np.asarray(margin_bucket.get("residuals", []), dtype=np.float64)
-                z_scores = np.asarray(margin_bucket.get("z_scores", []), dtype=np.float64)
-                sample_ref = np.asarray(margin_bucket.get("sample_ref_margins", []), dtype=np.float64)
-                sample_sigma = np.asarray(margin_bucket.get("sample_sigmas", []), dtype=np.float64)
-                t_residuals = margin_bucket.get("t_residuals", {}) or {}
-
-                if raw_residuals.size > 0:
-                    fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
-                    ax = fig.add_subplot(1, 1, 1)
-                    ax.hist(raw_residuals, bins=50, density=True, alpha=0.68, color="#6baed6", label="Raw residuals")
-                    fit_raw = _gaussian_fit_report(raw_residuals)
-                    fit_laplace = _laplace_fit_report(raw_residuals)
-                    fit_cauchy = _cauchy_fit_report(raw_residuals)
-                    mu = float(fit_raw.get("mean", float("nan")))
-                    sigma = float(fit_raw.get("std", float("nan")))
-                    x_min = float(np.min(raw_residuals))
-                    x_max = float(np.max(raw_residuals))
-                    if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
-                        xs = np.linspace(x_min, x_max, 400)
-                        if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12:
-                            pdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
-                            ax.plot(
-                                xs,
-                                pdf,
-                                color="#d62728",
-                                lw=2.0,
-                                label="Gaussian (KS={:.3f}, KL={:.3f})".format(
-                                    float(fit_raw.get("ks_to_fit", float("nan"))),
-                                    float(fit_raw.get("kl_hist_to_fit", float("nan"))),
-                                ),
-                            )
-                        laplace_pdf = _laplace_pdf(xs, float(fit_laplace.get("loc", float("nan"))), float(fit_laplace.get("scale", float("nan"))))
-                        if np.all(np.isfinite(laplace_pdf)):
-                            ax.plot(
-                                xs,
-                                laplace_pdf,
-                                color="#2ca02c",
-                                lw=1.8,
-                                ls="--",
-                                label="Laplace (KS={:.3f}, KL={:.3f})".format(
-                                    float(fit_laplace.get("ks_to_fit", float("nan"))),
-                                    float(fit_laplace.get("kl_hist_to_fit", float("nan"))),
-                                ),
-                            )
-                        cauchy_pdf = _cauchy_pdf(xs, float(fit_cauchy.get("loc", float("nan"))), float(fit_cauchy.get("scale", float("nan"))))
-                        if np.all(np.isfinite(cauchy_pdf)):
-                            ax.plot(
-                                xs,
-                                cauchy_pdf,
-                                color="#9467bd",
-                                lw=1.8,
-                                ls=":",
-                                label="Cauchy (KS={:.3f}, KL={:.3f})".format(
-                                    float(fit_cauchy.get("ks_to_fit", float("nan"))),
-                                    float(fit_cauchy.get("kl_hist_to_fit", float("nan"))),
-                                ),
-                            )
-                    ax.set_title(
-                        f"{mode_label} margin residuals (raw) (k={k})\n"
-                        f"mean={fit_raw['mean']:.3f}, std={fit_raw['std']:.3f}, compare Gaussian / Laplace / Cauchy"
+                raw_summary = _summarize_margin_noise_bucket(
+                    margin_bucket,
+                    n_views=int(margin_bucket.get("n_views", int(k))),
+                    reference_mode=str(margin_bucket.get("reference_mode", "cyclic")),
+                )
+                saved.extend(_save_margin_bucket_plots(
+                    plt=plt,
+                    bucket=margin_bucket,
+                    summary=raw_summary,
+                    out_dir=out_dir,
+                    k=int(k),
+                    mode_label=mode_label,
+                    file_tag="perm_margin_noise",
+                ))
+                if margin_noise_pride_by_k and int(k) in margin_noise_pride_by_k:
+                    pride_bucket = margin_noise_pride_by_k[int(k)]
+                    pride_summary = _summarize_margin_noise_bucket(
+                        pride_bucket,
+                        n_views=int(pride_bucket.get("n_views", int(k))),
+                        reference_mode=str(pride_bucket.get("reference_mode", "cyclic")),
                     )
-                    ax.set_xlabel("residual = margin - ref_margin")
-                    ax.set_ylabel("Density")
-                    ax.grid(True, alpha=0.25)
-                    ax.legend(fontsize=8)
-                    fig.tight_layout()
-                    p = os.path.join(out_dir, f"perm_margin_noise_raw_hist_k{k}.png")
-                    fig.savefig(p)
-                    plt.close(fig)
-                    saved.append(p)
-                    p_slot = os.path.join(out_dir, f"perm_margin_noise_raw_hist_by_correct_slot_k{k}.png")
-                    saved_slot = _save_raw_fit_by_label_plot(
+                    saved.extend(_save_margin_bucket_plots(
                         plt=plt,
-                        values=raw_residuals,
-                        labels=bucket.get("residual_correct_slot_labels", []) or [],
-                        out_path=p_slot,
-                        title=f"{mode_label} raw residuals by correct slot (k={k})",
+                        bucket=pride_bucket,
+                        summary=pride_summary,
+                        out_dir=out_dir,
+                        k=int(k),
+                        mode_label=f"{mode_label} PriDe",
+                        file_tag="perm_margin_noise_pride",
+                    ))
+                if margin_noise_pride_fixedref_by_k and int(k) in margin_noise_pride_fixedref_by_k:
+                    pride_fixedref_bucket = margin_noise_pride_fixedref_by_k[int(k)]
+                    pride_fixedref_summary = _summarize_margin_noise_bucket(
+                        pride_fixedref_bucket,
+                        n_views=int(pride_fixedref_bucket.get("n_views", int(k))),
+                        reference_mode=str(pride_fixedref_bucket.get("reference_mode", "cyclic")),
                     )
-                    if saved_slot:
-                        saved.append(saved_slot)
-                    p_top1 = os.path.join(out_dir, f"perm_margin_noise_raw_hist_by_top1_slot_k{k}.png")
-                    saved_top1 = _save_raw_fit_by_label_plot(
+                    saved.extend(_save_margin_bucket_plots(
                         plt=plt,
-                        values=raw_residuals,
-                        labels=bucket.get("residual_top1_slot_labels", []) or [],
-                        out_path=p_top1,
-                        title=f"{mode_label} raw residuals by top1 slot (k={k})",
-                    )
-                    if saved_top1:
-                        saved.append(saved_top1)
-                    p_top2 = os.path.join(out_dir, f"perm_margin_noise_raw_hist_by_top2_slot_k{k}.png")
-                    saved_top2 = _save_raw_fit_by_label_plot(
-                        plt=plt,
-                        values=raw_residuals,
-                        labels=bucket.get("residual_top2_slot_labels", []) or [],
-                        out_path=p_top2,
-                        title=f"{mode_label} raw residuals by top2 slot (k={k})",
-                    )
-                    if saved_top2:
-                        saved.append(saved_top2)
-                    p_sweep = os.path.join(out_dir, f"perm_margin_noise_raw_param_sweep_k{k}.png")
-                    saved_sweep = _save_raw_param_sweep_plot(
-                        plt=plt,
-                        values=raw_residuals,
-                        out_path=p_sweep,
-                        title=f"{mode_label} raw residual parameter sweep (k={k})",
-                        laplace_loc=float(fit_laplace.get("loc", float("nan"))),
-                        laplace_scale=float(fit_laplace.get("scale", float("nan"))),
-                        cauchy_loc=float(fit_cauchy.get("loc", float("nan"))),
-                        cauchy_scale=float(fit_cauchy.get("scale", float("nan"))),
-                    )
-                    if saved_sweep:
-                        saved.append(saved_sweep)
-
-                if z_scores.size > 0:
-                    fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
-                    ax = fig.add_subplot(1, 1, 1)
-                    ax.hist(z_scores, bins=50, density=True, alpha=0.68, color="#1f77b4", label="Standardized residuals")
-                    x_min = float(np.min(z_scores))
-                    x_max = float(np.max(z_scores))
-                    if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
-                        xs = np.linspace(max(-4.0, x_min), min(4.0, x_max), 300)
-                        normal_pdf = np.exp(-0.5 * xs * xs) / math.sqrt(2.0 * math.pi)
-                        ax.plot(xs, normal_pdf, color="#d62728", lw=2.0, label="N(0,1)")
-                    fit = _gaussian_fit_report(z_scores)
-                    ax.set_title(
-                        f"{mode_label} margin residuals (standardized) (k={k})\n"
-                        f"mean={fit['mean']:.3f}, std={fit['std']:.3f}, KS={fit['ks_to_fit']:.3f}, KL={fit['kl_hist_to_fit']:.3f}"
-                    )
-                    ax.set_xlabel("z = residual / sigma_i")
-                    ax.set_ylabel("Density")
-                    ax.grid(True, alpha=0.25)
-                    ax.legend(fontsize=8)
-                    fig.tight_layout()
-                    p = os.path.join(out_dir, f"perm_margin_noise_hist_k{k}.png")
-                    fig.savefig(p)
-                    plt.close(fig)
-                    saved.append(p)
-
-                    fig = plt.figure(figsize=(5.6, 5.6), dpi=180)
-                    ax = fig.add_subplot(1, 1, 1)
-                    zs = np.sort(z_scores)
-                    if zs.size > 4000:
-                        idx = np.linspace(0, zs.size - 1, 4000).astype(np.int64)
-                        zs = zs[idx]
-                    probs = (np.arange(1, zs.size + 1, dtype=np.float64) - 0.5) / float(zs.size)
-                    nd0 = NormalDist()
-                    q_theory = np.asarray([nd0.inv_cdf(float(pv)) for pv in probs], dtype=np.float64)
-                    ax.scatter(q_theory, zs, s=8, alpha=0.30, color="#1f77b4")
-                    lo = float(min(np.min(q_theory), np.min(zs)))
-                    hi = float(max(np.max(q_theory), np.max(zs)))
-                    ax.plot([lo, hi], [lo, hi], color="#d62728", lw=1.8, ls="--")
-                    ax.set_title(f"QQ plot vs N(0,1) (k={k})")
-                    ax.set_xlabel("Theoretical quantiles")
-                    ax.set_ylabel("Empirical quantiles")
-                    ax.grid(True, alpha=0.25)
-                    fig.tight_layout()
-                    p = os.path.join(out_dir, f"perm_margin_noise_qq_k{k}.png")
-                    fig.savefig(p)
-                    plt.close(fig)
-                    saved.append(p)
-
-                if sample_ref.size > 0 and sample_sigma.size > 0 and sample_ref.size == sample_sigma.size:
-                    fig = plt.figure(figsize=(6.8, 5.2), dpi=180)
-                    ax = fig.add_subplot(1, 1, 1)
-                    ax.scatter(sample_ref, sample_sigma, s=12, alpha=0.22, color="#2ca02c")
-                    corr = _safe_corr(sample_ref, sample_sigma)
-                    ax.set_title(f"Sample sigma vs {ref_mode} reference margin (k={k})\nCorr={corr:.3f}")
-                    ax.set_xlabel("Cyclic reference margin")
-                    ax.set_ylabel("sigma_i")
-                    ax.grid(True, alpha=0.25)
-                    fig.tight_layout()
-                    p = os.path.join(out_dir, f"perm_margin_sigma_vs_margin_k{k}.png")
-                    fig.savefig(p)
-                    plt.close(fig)
-                    saved.append(p)
-
-                if t_residuals:
-                    ts = sorted(int(t) for t in t_residuals.keys())
-                    emp_std = []
-                    for t in ts:
-                        arr = np.asarray(t_residuals.get(t, []), dtype=np.float64)
-                        emp_std.append(float(np.std(arr)) if arr.size > 0 else float("nan"))
-                    if emp_std:
-                        base_std = emp_std[0] if np.isfinite(emp_std[0]) else float("nan")
-                        target = [float(base_std / math.sqrt(float(t))) if np.isfinite(base_std) else float("nan") for t in ts]
-                        n_views = max(ts) if ts else 0
-                        finite_target = [
-                            float(base_std * math.sqrt(float(max(0, n_views - int(t))) / float(max(1, int(t)) * max(1, n_views - 1))))
-                            if np.isfinite(base_std) and n_views > 1
-                            else float("nan")
-                            for t in ts
-                        ]
-                        fig = plt.figure(figsize=(6.8, 4.8), dpi=180)
-                        ax = fig.add_subplot(1, 1, 1)
-                        ax.plot(ts, emp_std, "-o", color="#1f77b4", lw=2.0, ms=5, label="Empirical residual std")
-                        ax.plot(ts, target, "--s", color="#d62728", lw=1.6, ms=4, label="std(T=1) / sqrt(T)")
-                        if n_views > 1:
-                            ax.plot(ts, finite_target, ":^", color="#2ca02c", lw=1.6, ms=4, label="Finite-view target")
-                        ax.set_title(f"View-count scaling of {ref_mode} residual std (k={k})")
-                        ax.set_xlabel("T = #views averaged")
-                        ax.set_ylabel("Residual std")
-                        ax.grid(True, alpha=0.25)
-                        ax.legend(fontsize=8)
-                        fig.tight_layout()
-                        p = os.path.join(out_dir, f"perm_margin_t_scaling_k{k}.png")
-                        fig.savefig(p)
-                        plt.close(fig)
-                        saved.append(p)
+                        bucket=pride_fixedref_bucket,
+                        summary=pride_fixedref_summary,
+                        out_dir=out_dir,
+                        k=int(k),
+                        mode_label=f"{mode_label} PriDe fixed-ref",
+                        file_tag="perm_margin_noise_pride_fixed_ref",
+                    ))
             except Exception:
                 pass
 
