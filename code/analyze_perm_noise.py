@@ -3459,6 +3459,7 @@ def _save_multi_model_margin_plots(
         per_model = rec.get("per_model", []) or []
         ref_mode = str((pooled or {}).get("reference_mode", rec.get("reference_mode", "cyclic")))
         mode_label = "Full-permutation" if ref_mode == "full" else "Cyclic"
+        t_residuals = rec.get("pooled_bucket", {}).get("t_residuals", {}) or {}
         saved.extend(_save_margin_bucket_plots(
             plt=plt,
             bucket=rec.get("pooled_bucket", {}) or {},
