@@ -651,6 +651,266 @@ def _build_pride_comparison(raw_summary: Dict[str, object], pride_summary: Dict[
     }
 
 
+def _print_margin_summary_details(
+    *,
+    title: str,
+    summary: Dict[str, object],
+    negative_tail_z_cutoff: float,
+    right_tail_z_cutoff: float,
+) -> None:
+    if not isinstance(summary, dict) or not summary:
+        return
+
+    fit = summary.get("standardized_residual_fit", {}) or {}
+    print(f"=== {title} ===")
+    print(
+        "pooled KS={:.4f}, KL={:.4f}, skew={:.4f}, kurtosis={:.4f}, mean_sigma_i={:.4f}".format(
+            float(fit.get("ks_to_fit", float("nan"))),
+            float(fit.get("kl_hist_to_fit", float("nan"))),
+            float(fit.get("skew", float("nan"))),
+            float(fit.get("excess_kurtosis", float("nan"))),
+            float(summary.get("mean_sample_sigma_i", float("nan"))),
+        )
+    )
+    raw_fit = summary.get("pooled_residual_fit", {}) or {}
+    raw_laplace_fit = summary.get("pooled_residual_laplace_fit", {}) or {}
+    raw_cauchy_fit = summary.get("pooled_residual_cauchy_fit", {}) or {}
+    print(
+        "raw pooled fits: Gaussian KS={:.4f}, KL={:.4f} | Laplace KS={:.4f}, KL={:.4f} | Cauchy KS={:.4f}, KL={:.4f}".format(
+            float(raw_fit.get("ks_to_fit", float("nan"))),
+            float(raw_fit.get("kl_hist_to_fit", float("nan"))),
+            float(raw_laplace_fit.get("ks_to_fit", float("nan"))),
+            float(raw_laplace_fit.get("kl_hist_to_fit", float("nan"))),
+            float(raw_cauchy_fit.get("ks_to_fit", float("nan"))),
+            float(raw_cauchy_fit.get("kl_hist_to_fit", float("nan"))),
+        )
+    )
+    for fits_key, fits_title in (
+        ("raw_correct_slot_fits", "raw correct-slot fits"),
+        ("raw_top1_slot_fits", "raw top1-slot fits"),
+        ("raw_top2_slot_fits", "raw top2-slot fits"),
+    ):
+        vals = summary.get(fits_key, []) or []
+        if vals:
+            print(f"{fits_title}:", _format_group_fit_reports(vals, top_n=8))
+
+    peak_info = (summary.get("peak_bin_summary", []) or [])
+    if peak_info:
+        top_bin = peak_info[0]
+        top_labels = top_bin.get("top_perm_labels", [])[:5]
+        labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in top_labels) if top_labels else ""
+        print(
+            "top standardized bin [{:.2f}, {:.2f}] count={} | top perms: {}".format(
+                float(top_bin.get("range_left", float("nan"))),
+                float(top_bin.get("range_right", float("nan"))),
+                int(top_bin.get("count", 0)),
+                labels_str,
+            )
+        )
+    top_bin_acc = (summary.get("top_standardized_bin_accuracy", {}) or {})
+    if top_bin_acc:
+        print(
+            "top standardized bin acc/rstd: {:.4f}/{:.4f} ({}/{})".format(
+                float(top_bin_acc.get("accuracy", float("nan"))),
+                float(top_bin_acc.get("recall_std", float("nan"))),
+                int(top_bin_acc.get("correct", 0)),
+                int(top_bin_acc.get("count", 0)),
+            )
+        )
+    for key, title2 in (
+        ("top_standardized_bin_perm_accuracy", "top-standardized-bin perm acc/rstd"),
+        ("top_standardized_bin_ideal_counts", "top standardized bin by ideal"),
+        ("top_standardized_bin_correct_slot_counts", "top standardized bin by correct slot"),
+        ("top_standardized_bin_slot_incidence", "top-standardized-bin slot incidence"),
+        ("top_standardized_bin_correct_slot_accuracy", "top-standardized-bin slot acc/rstd"),
+        ("top_standardized_bin_top1_slot_counts", "top standardized bin by top1 slot"),
+        ("top_standardized_bin_top1_slot_incidence", "top-standardized-bin top1-slot incidence"),
+        ("top_standardized_bin_top1_slot_accuracy", "top-standardized-bin top1-slot acc/rstd"),
+        ("top_standardized_bin_top2_slot_counts", "top standardized bin by top2 slot"),
+        ("top_standardized_bin_top2_slot_incidence", "top-standardized-bin top2-slot incidence"),
+        ("top_standardized_bin_top2_slot_accuracy", "top-standardized-bin top2-slot acc/rstd"),
+    ):
+        vals = summary.get(key, []) or []
+        if not vals:
+            continue
+        if "acc/rstd" in title2:
+            print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in vals[:5]))
+        elif "incidence" in title2:
+            print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in vals[:5]))
+        else:
+            print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in vals[:5]))
+
+    neg_tail = (summary.get("negative_tail_summary", {}) or {})
+    neg_top_labels = neg_tail.get("top_perm_labels", [])[:5]
+    if neg_tail:
+        labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in neg_top_labels) if neg_top_labels else ""
+        print(f"negative tail z<={float(negative_tail_z_cutoff):.2f} count={int(neg_tail.get('count', 0))} | top perms: {labels_str}")
+    neg_acc = (summary.get("negative_tail_accuracy", {}) or {})
+    if neg_acc:
+        print("negative tail acc/rstd: {:.4f}/{:.4f} ({}/{})".format(float(neg_acc.get("accuracy", float("nan"))), float(neg_acc.get("recall_std", float("nan"))), int(neg_acc.get("correct", 0)), int(neg_acc.get("count", 0))))
+    overall_acc = (summary.get("entry_accuracy", {}) or {})
+    if overall_acc:
+        print("overall view acc/rstd: {:.4f}/{:.4f} ({}/{})".format(float(overall_acc.get("accuracy", float("nan"))), float(overall_acc.get("recall_std", float("nan"))), int(overall_acc.get("correct", 0)), int(overall_acc.get("count", 0))))
+    for key, title2 in (
+        ("negative_tail_perm_accuracy", "negative-tail perm acc/rstd"),
+        ("right_tail_perm_accuracy", "right-tail perm acc/rstd"),
+        ("overall_perm_accuracy", "overall perm acc/rstd"),
+    ):
+        vals = summary.get(key, []) or []
+        if vals:
+            print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in vals[:5]))
+    top_neg_bins = (summary.get("negative_tail_summary", {}) or {}).get("top_bins", []) or []
+    if top_neg_bins:
+        top_neg_bin = top_neg_bins[0]
+        labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in (top_neg_bin.get('top_perm_labels', []) or [])[:5])
+        print("top negative bin [{:.2f}, {:.2f}] count={} | top perms: {}".format(float(top_neg_bin.get("range_left", float("nan"))), float(top_neg_bin.get("range_right", float("nan"))), int(top_neg_bin.get("count", 0)), labels_str))
+    for key, title2 in (
+        ("negative_tail_ideal_counts", "negative tail by ideal"),
+        ("negative_tail_correct_slot_counts", "negative tail by correct slot"),
+        ("negative_tail_slot_incidence", "negative-tail slot incidence"),
+        ("correct_slot_accuracy", "correct slot acc/rstd"),
+        ("negative_tail_correct_slot_accuracy", "negative-tail slot acc/rstd"),
+        ("right_tail_ideal_counts", "right tail by ideal"),
+        ("right_tail_correct_slot_counts", "right tail by correct slot"),
+        ("right_tail_slot_incidence", "right-tail slot incidence"),
+        ("right_tail_correct_slot_accuracy", "right-tail slot acc/rstd"),
+        ("negative_tail_top1_slot_counts", "negative tail by top1 slot"),
+        ("negative_tail_top1_slot_incidence", "negative-tail top1-slot incidence"),
+        ("top1_slot_accuracy", "top1-slot acc/rstd"),
+        ("negative_tail_top1_slot_accuracy", "negative-tail top1-slot acc/rstd"),
+        ("right_tail_top1_slot_counts", "right tail by top1 slot"),
+        ("right_tail_top1_slot_incidence", "right-tail top1-slot incidence"),
+        ("right_tail_top1_slot_accuracy", "right-tail top1-slot acc/rstd"),
+        ("negative_tail_top2_slot_counts", "negative tail by top2 slot"),
+        ("negative_tail_top2_slot_incidence", "negative-tail top2-slot incidence"),
+        ("top2_slot_accuracy", "top2-slot acc/rstd"),
+        ("negative_tail_top2_slot_accuracy", "negative-tail top2-slot acc/rstd"),
+        ("right_tail_top2_slot_counts", "right tail by top2 slot"),
+        ("right_tail_top2_slot_incidence", "right-tail top2-slot incidence"),
+        ("right_tail_top2_slot_accuracy", "right-tail top2-slot acc/rstd"),
+    ):
+        vals = summary.get(key, []) or []
+        if not vals:
+            continue
+        if "acc/rstd" in title2:
+            print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in vals[:5]))
+        elif "incidence" in title2:
+            print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in vals[:5]))
+        else:
+            print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in vals[:5]))
+
+    right_tail = (summary.get("right_tail_accuracy", {}) or {})
+    if right_tail:
+        print(
+            "right tail z>={:.2f} count={} | acc/rstd={:.4f}/{:.4f} ({}/{})".format(
+                float(right_tail_z_cutoff),
+                int(right_tail.get("count", 0)),
+                float(right_tail.get("accuracy", float("nan"))),
+                float(right_tail.get("recall_std", float("nan"))),
+                int(right_tail.get("correct", 0)),
+                int(right_tail.get("count", 0)),
+            )
+        )
+
+    raw_top_bin = summary.get("raw_top_bin_summary", {}) or {}
+    if raw_top_bin:
+        labels_str = ", ".join(f"{x.get('perm_label')}:{x.get('fraction', float('nan')):.2f}" for x in (raw_top_bin.get("top_perm_labels", []) or [])[:5])
+        print("raw top bin [{:.4f}, {:.4f}] count={} | top perms: {}".format(float(raw_top_bin.get("range_left", float("nan"))), float(raw_top_bin.get("range_right", float("nan"))), int(raw_top_bin.get("count", 0)), labels_str))
+    raw_top_subset = summary.get("raw_top_bin_subset", {}) or {}
+    if raw_top_subset:
+        print("raw top bin acc/rstd: {:.4f}/{:.4f} ({}/{})".format(float(raw_top_subset.get("accuracy", float("nan"))), float(raw_top_subset.get("recall_std", float("nan"))), int(raw_top_subset.get("correct", 0)), int(raw_top_subset.get("count", 0))))
+        for key, title2 in (
+            ("perm_accuracy", "raw-top-bin perm acc/rstd"),
+            ("ideal_counts", "raw top bin by ideal"),
+            ("correct_slot_counts", "raw top bin by correct slot"),
+            ("slot_incidence", "raw-top-bin slot incidence"),
+            ("correct_slot_accuracy", "raw-top-bin slot acc/rstd"),
+            ("top1_slot_counts", "raw top bin by top1 slot"),
+            ("top1_slot_incidence", "raw-top-bin top1-slot incidence"),
+            ("top1_slot_accuracy", "raw-top-bin top1-slot acc/rstd"),
+            ("top2_slot_counts", "raw top bin by top2 slot"),
+            ("top2_slot_incidence", "raw-top-bin top2-slot incidence"),
+            ("top2_slot_accuracy", "raw-top-bin top2-slot acc/rstd"),
+        ):
+            vals = raw_top_subset.get(key, []) or []
+            if not vals:
+                continue
+            if "acc/rstd" in title2:
+                print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in vals[:5]))
+            elif "incidence" in title2:
+                print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in vals[:5]))
+            else:
+                print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in vals[:5]))
+
+    for raw_key, raw_title, comp in (
+        ("raw_left_tail_subset", "raw left tail", "<="),
+        ("raw_right_tail_subset", "raw right tail", ">="),
+    ):
+        raw_subset = summary.get(raw_key, {}) or {}
+        if not raw_subset:
+            continue
+        print(
+            f"{raw_title} residual {comp}{float(raw_subset.get('residual_cutoff', float('nan'))):.4f} acc/rstd: "
+            f"{float(raw_subset.get('accuracy', float('nan'))):.4f}/{float(raw_subset.get('recall_std', float('nan'))):.4f} "
+            f"({int(raw_subset.get('correct', 0))}/{int(raw_subset.get('count', 0))})"
+        )
+        for key, title2 in (
+            ("perm_accuracy", f"{raw_title.replace(' ', '-')} perm acc/rstd"),
+            ("ideal_counts", f"{raw_title} by ideal"),
+            ("correct_slot_counts", f"{raw_title} by correct slot"),
+            ("slot_incidence", f"{raw_title.replace(' ', '-')} slot incidence"),
+            ("correct_slot_accuracy", f"{raw_title.replace(' ', '-')} slot acc/rstd"),
+            ("top1_slot_counts", f"{raw_title} by top1 slot"),
+            ("top1_slot_incidence", f"{raw_title.replace(' ', '-')} top1-slot incidence"),
+            ("top1_slot_accuracy", f"{raw_title.replace(' ', '-')} top1-slot acc/rstd"),
+            ("top2_slot_counts", f"{raw_title} by top2 slot"),
+            ("top2_slot_incidence", f"{raw_title.replace(' ', '-')} top2-slot incidence"),
+            ("top2_slot_accuracy", f"{raw_title.replace(' ', '-')} top2-slot acc/rstd"),
+        ):
+            vals = raw_subset.get(key, []) or []
+            if not vals:
+                continue
+            if "acc/rstd" in title2:
+                print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('accuracy', float('nan')):.3f}/{x.get('recall_std', float('nan')):.3f}" for x in vals[:5]))
+            elif "incidence" in title2:
+                print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('rate', float('nan')):.3f}" for x in vals[:5]))
+            else:
+                print(title2 + ":", ", ".join(f"{x.get('label')}:{x.get('fraction', float('nan')):.2f}" for x in vals[:5]))
+
+    corr_split = summary.get("correctness_split", {}) or {}
+    for split_name in ("correct", "incorrect"):
+        split = corr_split.get(split_name, {}) or {}
+        if not split:
+            continue
+        neg = split.get("negative_tail_summary", {}) or {}
+        split_fit = split.get("standardized_residual_fit", {}) or {}
+        print(
+            "{} refs: n_samples={}, mean_sigma_i={:.4f}, z_skew={:.4f}, left_tail_count={}".format(
+                split_name,
+                int(split.get("n_samples", 0)),
+                float(split.get("mean_sample_sigma_i", float("nan"))),
+                float(split_fit.get("skew", float("nan"))),
+                int(neg.get("count", 0)),
+            )
+        )
+
+    raw_values_for_sweep = summary.get("all_residuals_for_sweep", None)
+    if isinstance(raw_values_for_sweep, list) and raw_values_for_sweep:
+        fit_l = _laplace_fit_report(raw_values_for_sweep)
+        fit_c = _cauchy_fit_report(raw_values_for_sweep)
+        print(
+            "raw scale sweep (KS/KL): {}".format(
+                _format_scale_sweep_fit_reports(
+                    raw_values_for_sweep,
+                    laplace_loc=float(fit_l.get("loc", float("nan"))),
+                    laplace_scale=float(fit_l.get("scale", float("nan"))),
+                    cauchy_loc=float(fit_c.get("loc", float("nan"))),
+                    cauchy_scale=float(fit_c.get("scale", float("nan"))),
+                )
+            )
+        )
+
+
 def _merge_count_maps(dst: Dict[str, object], src: Dict[str, object]) -> None:
     for key, val in (src or {}).items():
         key_s = str(key)
@@ -3541,6 +3801,14 @@ def _run_multi_results_analysis(
             )
             print("offline PriDe slot-acc delta:", _format_group_comparisons(pride_cmp.get("correct_slot_accuracy", []) or [], top_n=8))
             print("offline PriDe neg-tail slot-inc delta:", _format_group_comparisons(pride_cmp.get("negative_tail_slot_incidence", []) or [], top_n=8))
+            pride_summary_print = dict(pooled_summary_pride)
+            pride_summary_print["all_residuals_for_sweep"] = list((pride_bucket.get("residuals", []) or []))
+            _print_margin_summary_details(
+                title="PriDe (self-consistent)",
+                summary=pride_summary_print,
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
+            )
         if pooled_summary_pride_fixed_ref:
             pride_fixed_cmp = _build_pride_comparison(pooled_summary, pooled_summary_pride_fixed_ref)
             pride_fixed_sigma = (pride_fixed_cmp.get("mean_sample_sigma_i", {}) or {})
@@ -3561,6 +3829,14 @@ def _run_multi_results_analysis(
             )
             print("offline PriDe (fixed-ref) slot-acc delta:", _format_group_comparisons(pride_fixed_cmp.get("correct_slot_accuracy", []) or [], top_n=8))
             print("offline PriDe (fixed-ref) neg-tail slot-inc delta:", _format_group_comparisons(pride_fixed_cmp.get("negative_tail_slot_incidence", []) or [], top_n=8))
+            pride_fixed_summary_print = dict(pooled_summary_pride_fixed_ref)
+            pride_fixed_summary_print["all_residuals_for_sweep"] = list((pride_fixedref_bucket.get("residuals", []) or []))
+            _print_margin_summary_details(
+                title="PriDe (fixed-ref)",
+                summary=pride_fixed_summary_print,
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
+            )
         peak_info = (pooled_summary or {}).get("peak_bin_summary", []) or []
         if peak_info:
             top_bin = peak_info[0]
@@ -4679,6 +4955,14 @@ def _run_analysis(
             )
             print("offline PriDe slot-acc delta:", _format_group_comparisons(pride_cmp.get("correct_slot_accuracy", []) or [], top_n=8))
             print("offline PriDe neg-tail slot-inc delta:", _format_group_comparisons(pride_cmp.get("negative_tail_slot_incidence", []) or [], top_n=8))
+            pride_summary_print = dict(pride_summary_for_k)
+            pride_summary_print["all_residuals_for_sweep"] = list((pride_bucket_for_k.get("residuals", []) or []))
+            _print_margin_summary_details(
+                title="PriDe (self-consistent)",
+                summary=pride_summary_print,
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
+            )
         pride_fixedref_bucket_for_k = margin_noise_pride_fixedref_by_k.get(int(k))
         if pride_fixedref_bucket_for_k:
             pride_fixedref_summary_for_k = _summarize_margin_noise_bucket(
@@ -4717,6 +5001,14 @@ def _run_analysis(
             )
             print("offline PriDe (fixed-ref) slot-acc delta:", _format_group_comparisons(pride_fixedref_cmp.get("correct_slot_accuracy", []) or [], top_n=8))
             print("offline PriDe (fixed-ref) neg-tail slot-inc delta:", _format_group_comparisons(pride_fixedref_cmp.get("negative_tail_slot_incidence", []) or [], top_n=8))
+            pride_fixedref_summary_print = dict(pride_fixedref_summary_for_k)
+            pride_fixedref_summary_print["all_residuals_for_sweep"] = list((pride_fixedref_bucket_for_k.get("residuals", []) or []))
+            _print_margin_summary_details(
+                title="PriDe (fixed-ref)",
+                summary=pride_fixedref_summary_print,
+                negative_tail_z_cutoff=float(negative_tail_z_cutoff),
+                right_tail_z_cutoff=float(right_tail_z_cutoff),
+            )
         raw_values_for_sweep = (margin_noise_by_k.get(int(k), {}) or {}).get("residuals", []) if int(k) in margin_noise_by_k else []
         if raw_values_for_sweep:
             fit_l = _laplace_fit_report(raw_values_for_sweep)
