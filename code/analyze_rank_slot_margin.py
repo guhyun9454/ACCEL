@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from analyze_perm_noise import (
+    _apply_offline_pride_to_results,
     _aggregate_probs_over_permutations,
     _cauchy_fit_report,
     _discover_cache_files,
@@ -251,6 +252,55 @@ def _save_rank_slot_heatmap(
     return out_path
 
 
+def _compare_rank_slot_summaries(
+    raw_summary: Dict[str, Dict[str, Dict[str, float]]],
+    pride_summary: Dict[str, Dict[str, Dict[str, float]]],
+    *,
+    value_key: str,
+) -> Dict[str, Dict[str, Dict[str, float]]]:
+    out: Dict[str, Dict[str, Dict[str, float]]] = {}
+    rank_keys = sorted(set(raw_summary.keys()) | set(pride_summary.keys()))
+    for rank_key in rank_keys:
+        out[rank_key] = {}
+        slot_keys = sorted(set((raw_summary.get(rank_key, {}) or {}).keys()) | set((pride_summary.get(rank_key, {}) or {}).keys()))
+        for slot in slot_keys:
+            raw_val = float(((raw_summary.get(rank_key, {}) or {}).get(slot, {}) or {}).get(value_key, float("nan")))
+            pride_val = float(((pride_summary.get(rank_key, {}) or {}).get(slot, {}) or {}).get(value_key, float("nan")))
+            delta = float(pride_val - raw_val) if np.isfinite(raw_val) and np.isfinite(pride_val) else float("nan")
+            out[rank_key][slot] = {
+                "raw": raw_val,
+                "pride": pride_val,
+                "delta": delta,
+            }
+    return out
+
+
+def _print_rank_slot_block(title: str, summary: Dict[str, Dict[str, Dict[str, float]]], k: int) -> None:
+    print(title)
+    for r in range(1, int(k) + 1):
+        rank_key = f"rank{r}"
+        pieces = []
+        for slot in _slot_labels(int(k)):
+            fit = (summary.get(rank_key, {}) or {}).get(slot, {}) or {}
+            pieces.append(f"{slot}:{float(fit.get('mean', float('nan'))):+.3f}/{float(fit.get('std', float('nan'))):.3f}")
+        print(f"{rank_key}: " + ", ".join(pieces))
+    print("")
+
+
+def _print_rank_slot_comparison(title: str, comparison: Dict[str, Dict[str, Dict[str, float]]], k: int) -> None:
+    print(title)
+    for r in range(1, int(k) + 1):
+        rank_key = f"rank{r}"
+        pieces = []
+        for slot in _slot_labels(int(k)):
+            fit = (comparison.get(rank_key, {}) or {}).get(slot, {}) or {}
+            pieces.append(
+                f"{slot}:{float(fit.get('raw', float('nan'))):+.3f}->{float(fit.get('pride', float('nan'))):+.3f} ({float(fit.get('delta', float('nan'))):+.3f})"
+            )
+        print(f"{rank_key}: " + ", ".join(pieces))
+    print("")
+
+
 def _run_multi(
     *,
     results_dirs: List[str],
@@ -259,9 +309,14 @@ def _run_multi(
     max_samples: int,
     aggregate_out_dir: str,
     save_plots: bool,
+    apply_pride_offline: bool,
+    pride_prefix_percent: float,
+    pride_seed: int,
 ) -> None:
     os.makedirs(aggregate_out_dir, exist_ok=True)
     combined_by_k: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
+    combined_pride_by_k: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
+    pride_infos_by_k: Dict[int, List[Dict[str, object]]] = {}
 
     for results_dir in results_dirs:
         cache_files = _discover_cache_files(results_dir, subjects, int(n_runs))
@@ -277,6 +332,23 @@ def _run_multi(
                 continue
             combined_by_k.setdefault(int(k), _rank_slot_bucket(int(k)))
             _merge_rank_slot_bucket(combined_by_k[int(k)], bucket)
+            if bool(apply_pride_offline):
+                data0 = results[0].get("data", {}) or {}
+                probs0 = data0.get("probs", None)
+                if isinstance(probs0, list):
+                    perm_list, _ = _infer_perm_list(int(k), len(probs0))
+                    pride_results, pride_info = _apply_offline_pride_to_results(
+                        results=results,
+                        perm_list=perm_list,
+                        option_ids=_slot_labels(int(k)),
+                        pride_prefix_percent=float(pride_prefix_percent),
+                        pride_seed=int(pride_seed),
+                    )
+                    k_pride, pride_bucket = _analyze_results_file(pride_results, ci.subject, int(ci.run_idx))
+                    if k_pride is not None:
+                        combined_pride_by_k.setdefault(int(k_pride), _rank_slot_bucket(int(k_pride)))
+                        _merge_rank_slot_bucket(combined_pride_by_k[int(k_pride)], pride_bucket)
+                        pride_infos_by_k.setdefault(int(k_pride), []).append(pride_info)
 
     if not combined_by_k:
         raise SystemExit("No valid records found.")
@@ -286,16 +358,21 @@ def _run_multi(
     for k in sorted(combined_by_k.keys()):
         bucket = combined_by_k[int(k)]
         summary = _summarize_rank_slot_bucket(bucket, int(k))
-        output["by_k"][str(int(k))] = summary
+        pride_summary = _summarize_rank_slot_bucket(combined_pride_by_k[int(k)], int(k)) if int(k) in combined_pride_by_k else {}
+        comparison_mean = _compare_rank_slot_summaries(summary, pride_summary, value_key="mean") if pride_summary else {}
+        comparison_std = _compare_rank_slot_summaries(summary, pride_summary, value_key="std") if pride_summary else {}
+        output["by_k"][str(int(k))] = {
+            "raw": summary,
+            "pride": pride_summary,
+            "comparison_mean": comparison_mean,
+            "comparison_std": comparison_std,
+            "pride_info": pride_infos_by_k.get(int(k), []),
+        }
         print(f"--- k={int(k)} ---")
-        for r in range(1, int(k) + 1):
-            rank_key = f"rank{r}"
-            pieces = []
-            for slot in _slot_labels(int(k)):
-                fit = (summary.get(rank_key, {}) or {}).get(slot, {}) or {}
-                pieces.append(f"{slot}:{float(fit.get('mean', float('nan'))):+.3f}/{float(fit.get('std', float('nan'))):.3f}")
-            print(f"{rank_key}: " + ", ".join(pieces))
-        print("")
+        _print_rank_slot_block("raw:", summary, int(k))
+        if pride_summary:
+            _print_rank_slot_block("pride:", pride_summary, int(k))
+            _print_rank_slot_comparison("raw -> pride (mean delta):", comparison_mean, int(k))
 
         if save_plots:
             grid_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_grid_k{int(k)}.png")
@@ -322,6 +399,46 @@ def _run_multi(
             for p in (saved_grid, saved_mean, saved_std):
                 if p:
                     print(f"Saved: {p}")
+            if pride_summary:
+                pride_grid_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_pride_grid_k{int(k)}.png")
+                pride_mean_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_pride_mean_k{int(k)}.png")
+                pride_std_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_pride_std_k{int(k)}.png")
+                pride_bucket = combined_pride_by_k[int(k)]
+                saved_pride_grid = _save_rank_slot_grid_plot(
+                    summary=pride_summary,
+                    bucket=pride_bucket,
+                    out_path=pride_grid_path,
+                    title=f"Multi-model cyclic rank-slot delta distributions after PriDe (k={int(k)})",
+                )
+                saved_pride_mean = _save_rank_slot_heatmap(
+                    summary=pride_summary,
+                    out_path=pride_mean_path,
+                    value_key="mean",
+                    title=f"Multi-model cyclic rank-slot delta mean after PriDe (k={int(k)})",
+                )
+                saved_pride_std = _save_rank_slot_heatmap(
+                    summary=pride_summary,
+                    out_path=pride_std_path,
+                    value_key="std",
+                    title=f"Multi-model cyclic rank-slot delta std after PriDe (k={int(k)})",
+                )
+                delta_mean_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_pride_minus_raw_mean_k{int(k)}.png")
+                delta_std_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_pride_minus_raw_std_k{int(k)}.png")
+                saved_delta_mean = _save_rank_slot_heatmap(
+                    summary=comparison_mean,
+                    out_path=delta_mean_path,
+                    value_key="delta",
+                    title=f"Multi-model rank-slot delta mean change (PriDe - raw) (k={int(k)})",
+                )
+                saved_delta_std = _save_rank_slot_heatmap(
+                    summary=comparison_std,
+                    out_path=delta_std_path,
+                    value_key="delta",
+                    title=f"Multi-model rank-slot delta std change (PriDe - raw) (k={int(k)})",
+                )
+                for p in (saved_pride_grid, saved_pride_mean, saved_pride_std, saved_delta_mean, saved_delta_std):
+                    if p:
+                        print(f"Saved: {p}")
 
     out_path = os.path.join(aggregate_out_dir, "multi_model_rank_slot_delta_summary.json")
     with open(out_path, "w", encoding="utf-8") as f:
@@ -336,12 +453,17 @@ def _run_single(
     n_runs: int,
     max_samples: int,
     save_plots: bool,
+    apply_pride_offline: bool,
+    pride_prefix_percent: float,
+    pride_seed: int,
 ) -> None:
     cache_files = _discover_cache_files(cache_dir, subjects, int(n_runs))
     if not cache_files:
         raise SystemExit(f"No cache files found under: {cache_dir}")
 
     combined_by_k: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
+    combined_pride_by_k: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
+    pride_infos_by_k: Dict[int, List[Dict[str, object]]] = {}
     for ci in cache_files:
         results = _read_results_file(ci.path)
         if int(max_samples) > 0:
@@ -351,6 +473,23 @@ def _run_single(
             continue
         combined_by_k.setdefault(int(k), _rank_slot_bucket(int(k)))
         _merge_rank_slot_bucket(combined_by_k[int(k)], bucket)
+        if bool(apply_pride_offline):
+            data0 = results[0].get("data", {}) or {}
+            probs0 = data0.get("probs", None)
+            if isinstance(probs0, list):
+                perm_list, _ = _infer_perm_list(int(k), len(probs0))
+                pride_results, pride_info = _apply_offline_pride_to_results(
+                    results=results,
+                    perm_list=perm_list,
+                    option_ids=_slot_labels(int(k)),
+                    pride_prefix_percent=float(pride_prefix_percent),
+                    pride_seed=int(pride_seed),
+                )
+                k_pride, pride_bucket = _analyze_results_file(pride_results, ci.subject, int(ci.run_idx))
+                if k_pride is not None:
+                    combined_pride_by_k.setdefault(int(k_pride), _rank_slot_bucket(int(k_pride)))
+                    _merge_rank_slot_bucket(combined_pride_by_k[int(k_pride)], pride_bucket)
+                    pride_infos_by_k.setdefault(int(k_pride), []).append(pride_info)
 
     if not combined_by_k:
         raise SystemExit("No valid records found.")
@@ -361,16 +500,21 @@ def _run_single(
     for k in sorted(combined_by_k.keys()):
         bucket = combined_by_k[int(k)]
         summary = _summarize_rank_slot_bucket(bucket, int(k))
-        output["by_k"][str(int(k))] = summary
+        pride_summary = _summarize_rank_slot_bucket(combined_pride_by_k[int(k)], int(k)) if int(k) in combined_pride_by_k else {}
+        comparison_mean = _compare_rank_slot_summaries(summary, pride_summary, value_key="mean") if pride_summary else {}
+        comparison_std = _compare_rank_slot_summaries(summary, pride_summary, value_key="std") if pride_summary else {}
+        output["by_k"][str(int(k))] = {
+            "raw": summary,
+            "pride": pride_summary,
+            "comparison_mean": comparison_mean,
+            "comparison_std": comparison_std,
+            "pride_info": pride_infos_by_k.get(int(k), []),
+        }
         print(f"--- k={int(k)} ---")
-        for r in range(1, int(k) + 1):
-            rank_key = f"rank{r}"
-            pieces = []
-            for slot in _slot_labels(int(k)):
-                fit = (summary.get(rank_key, {}) or {}).get(slot, {}) or {}
-                pieces.append(f"{slot}:{float(fit.get('mean', float('nan'))):+.3f}/{float(fit.get('std', float('nan'))):.3f}")
-            print(f"{rank_key}: " + ", ".join(pieces))
-        print("")
+        _print_rank_slot_block("raw:", summary, int(k))
+        if pride_summary:
+            _print_rank_slot_block("pride:", pride_summary, int(k))
+            _print_rank_slot_comparison("raw -> pride (mean delta):", comparison_mean, int(k))
 
         if save_plots:
             grid_path = os.path.join(cache_dir, f"rank_slot_delta_grid_k{int(k)}.png")
@@ -397,6 +541,46 @@ def _run_single(
             for p in (saved_grid, saved_mean, saved_std):
                 if p:
                     print(f"Saved: {p}")
+            if pride_summary:
+                pride_bucket = combined_pride_by_k[int(k)]
+                pride_grid_path = os.path.join(cache_dir, f"rank_slot_delta_pride_grid_k{int(k)}.png")
+                pride_mean_path = os.path.join(cache_dir, f"rank_slot_delta_pride_mean_k{int(k)}.png")
+                pride_std_path = os.path.join(cache_dir, f"rank_slot_delta_pride_std_k{int(k)}.png")
+                saved_pride_grid = _save_rank_slot_grid_plot(
+                    summary=pride_summary,
+                    bucket=pride_bucket,
+                    out_path=pride_grid_path,
+                    title=f"Cyclic rank-slot delta distributions after PriDe (k={int(k)})",
+                )
+                saved_pride_mean = _save_rank_slot_heatmap(
+                    summary=pride_summary,
+                    out_path=pride_mean_path,
+                    value_key="mean",
+                    title=f"Cyclic rank-slot delta mean after PriDe (k={int(k)})",
+                )
+                saved_pride_std = _save_rank_slot_heatmap(
+                    summary=pride_summary,
+                    out_path=pride_std_path,
+                    value_key="std",
+                    title=f"Cyclic rank-slot delta std after PriDe (k={int(k)})",
+                )
+                delta_mean_path = os.path.join(cache_dir, f"rank_slot_delta_pride_minus_raw_mean_k{int(k)}.png")
+                delta_std_path = os.path.join(cache_dir, f"rank_slot_delta_pride_minus_raw_std_k{int(k)}.png")
+                saved_delta_mean = _save_rank_slot_heatmap(
+                    summary=comparison_mean,
+                    out_path=delta_mean_path,
+                    value_key="delta",
+                    title=f"Rank-slot delta mean change (PriDe - raw) (k={int(k)})",
+                )
+                saved_delta_std = _save_rank_slot_heatmap(
+                    summary=comparison_std,
+                    out_path=delta_std_path,
+                    value_key="delta",
+                    title=f"Rank-slot delta std change (PriDe - raw) (k={int(k)})",
+                )
+                for p in (saved_pride_grid, saved_pride_mean, saved_pride_std, saved_delta_mean, saved_delta_std):
+                    if p:
+                        print(f"Saved: {p}")
 
     out_path = os.path.join(cache_dir, "rank_slot_delta_summary.json")
     with open(out_path, "w", encoding="utf-8") as f:
@@ -413,6 +597,9 @@ def main() -> None:
     ap.add_argument("--n_runs", type=int, default=1, help="Number of run caches to read.")
     ap.add_argument("--max_samples", type=int, default=0, help="Optional cap per cache file.")
     ap.add_argument("--save_plots", action="store_true", help="Save rank-slot plots.")
+    ap.add_argument("--apply_pride_offline", action="store_true", help="Apply PriDe offline and compare before/after.")
+    ap.add_argument("--pride_prefix_percent", type=float, default=100.0, help="Percent of samples used for PriDe prior estimation.")
+    ap.add_argument("--pride_seed", type=int, default=0, help="Seed for offline PriDe prefix sampling.")
     args = ap.parse_args()
 
     if args.results_dirs:
@@ -425,6 +612,9 @@ def main() -> None:
             max_samples=int(args.max_samples),
             aggregate_out_dir=str(args.aggregate_out_dir),
             save_plots=bool(args.save_plots),
+            apply_pride_offline=bool(args.apply_pride_offline),
+            pride_prefix_percent=float(args.pride_prefix_percent),
+            pride_seed=int(args.pride_seed),
         )
         return
 
@@ -436,6 +626,9 @@ def main() -> None:
         n_runs=int(args.n_runs),
         max_samples=int(args.max_samples),
         save_plots=bool(args.save_plots),
+        apply_pride_offline=bool(args.apply_pride_offline),
+        pride_prefix_percent=float(args.pride_prefix_percent),
+        pride_seed=int(args.pride_seed),
     )
 
 
