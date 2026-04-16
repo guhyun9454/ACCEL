@@ -51,12 +51,22 @@ def _rank_slot_bucket(k: int) -> Dict[str, Dict[str, List[float]]]:
     return {f"rank{r}": {slot: [] for slot in labels} for r in range(1, int(k) + 1)}
 
 
+def _rank_prob_bucket(k: int) -> Dict[str, List[float]]:
+    return {f"rank{r}": [] for r in range(1, int(k) + 1)}
+
+
 def _merge_rank_slot_bucket(dst: Dict[str, Dict[str, List[float]]], src: Dict[str, Dict[str, List[float]]]) -> None:
     for rank_key, slot_map in (src or {}).items():
         dst.setdefault(str(rank_key), {})
         for slot, vals in (slot_map or {}).items():
             dst[str(rank_key)].setdefault(str(slot), [])
             dst[str(rank_key)][str(slot)].extend(float(x) for x in (vals or []))
+
+
+def _merge_rank_prob_bucket(dst: Dict[str, List[float]], src: Dict[str, List[float]]) -> None:
+    for rank_key, vals in (src or {}).items():
+        dst.setdefault(str(rank_key), [])
+        dst[str(rank_key)].extend(float(x) for x in (vals or []))
 
 
 def _summarize_values(values: Sequence[float]) -> Dict[str, float]:
@@ -93,27 +103,38 @@ def _summarize_rank_slot_bucket(bucket: Dict[str, Dict[str, List[float]]], k: in
     return out
 
 
-def _analyze_results_file(results: List[dict], subject: str, run_idx: int) -> Tuple[Optional[int], Dict[str, Dict[str, List[float]]]]:
+def _summarize_rank_prob_bucket(bucket: Dict[str, List[float]], k: int) -> Dict[str, Dict[str, float]]:
+    out: Dict[str, Dict[str, float]] = {}
+    for r in range(1, int(k) + 1):
+        rank_key = f"rank{r}"
+        out[rank_key] = _summarize_values((bucket or {}).get(rank_key, []))
+    return out
+
+
+def _analyze_results_file(
+    results: List[dict], subject: str, run_idx: int
+) -> Tuple[Optional[int], Dict[str, Dict[str, List[float]]], Dict[str, List[float]]]:
     if not results:
-        return None, {}
+        return None, {}, {}
 
     data0 = results[0].get("data", {}) or {}
     options = data0.get("options", None)
     if not isinstance(options, list) or not options:
-        return None, {}
+        return None, {}, {}
     k = len(options)
     labels = _slot_labels(k)
     probs0 = data0.get("probs", None)
     if not isinstance(probs0, list):
-        return None, {}
+        return None, {}, {}
     perm_count = len(probs0)
     perm_list, _ = _infer_perm_list(k, perm_count)
     cyc_perms = _rotations(k)
     cyc_idxs = [perm_list.index(p) for p in cyc_perms if p in perm_list]
     if len(cyc_idxs) != k:
-        return None, {}
+        return None, {}, {}
 
     bucket = _rank_slot_bucket(k)
+    gt_bucket = _rank_prob_bucket(k)
     selected_perm_tuples = [tuple(int(x) for x in perm_list[idx]) for idx in cyc_idxs]
 
     for r in results:
@@ -135,6 +156,7 @@ def _analyze_results_file(results: List[dict], subject: str, run_idx: int) -> Tu
 
         for rank_idx, content_idx in enumerate(rank_order, start=1):
             ref_prob = float(ref_dist[int(content_idx)])
+            gt_bucket[f"rank{int(rank_idx)}"].append(ref_prob)
             for view_idx, perm in enumerate(selected_perm_tuples):
                 slot_idx = next((j for j, c_idx in enumerate(perm) if int(c_idx) == int(content_idx)), -1)
                 if slot_idx < 0:
@@ -144,7 +166,7 @@ def _analyze_results_file(results: List[dict], subject: str, run_idx: int) -> Tu
                 delta = float(view_prob - ref_prob)
                 bucket[f"rank{int(rank_idx)}"][slot_label].append(delta)
 
-    return int(k), bucket
+    return int(k), bucket, gt_bucket
 
 
 def _save_rank_slot_grid_plot(
@@ -252,6 +274,95 @@ def _save_rank_slot_heatmap(
     return out_path
 
 
+def _save_rank_prob_grid_plot(
+    *,
+    summary: Dict[str, Dict[str, float]],
+    bucket: Dict[str, List[float]],
+    out_path: str,
+    title: str,
+) -> Optional[str]:
+    plt = _try_import_matplotlib()
+    if plt is None:
+        return None
+    rank_keys = list(summary.keys())
+    if not rank_keys:
+        return None
+    fig, axes = plt.subplots(1, len(rank_keys), figsize=(3.0 * len(rank_keys), 2.9), dpi=160, squeeze=False)
+    for idx, rank_key in enumerate(rank_keys):
+        ax = axes[0][idx]
+        vals = np.asarray((bucket or {}).get(rank_key, []), dtype=np.float64)
+        fit = (summary.get(rank_key, {}) or {})
+        gfit = fit.get("gaussian_fit", {}) or {}
+        lfit = fit.get("laplace_fit", {}) or {}
+        cfit = fit.get("cauchy_fit", {}) or {}
+        if vals.size > 0:
+            ax.hist(vals, bins=35, density=True, alpha=0.68, color="#9ecae1")
+            x_min = float(np.min(vals))
+            x_max = float(np.max(vals))
+            if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+                xs = np.linspace(x_min, x_max, 300)
+                mu = float(gfit.get("mean", float("nan")))
+                sigma = float(gfit.get("std", float("nan")))
+                if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12:
+                    gpdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
+                    ax.plot(xs, gpdf, color="#d62728", lw=1.5)
+                loc_l = float(lfit.get("loc", float("nan")))
+                scale_l = float(lfit.get("scale", float("nan")))
+                if np.isfinite(loc_l) and np.isfinite(scale_l) and scale_l > 1e-12:
+                    lpdf = np.exp(-np.abs(xs - loc_l) / scale_l) / (2.0 * scale_l)
+                    ax.plot(xs, lpdf, color="#2ca02c", lw=1.2, ls="--")
+                loc_c = float(cfit.get("loc", float("nan")))
+                scale_c = float(cfit.get("scale", float("nan")))
+                if np.isfinite(loc_c) and np.isfinite(scale_c) and scale_c > 1e-12:
+                    cpdf = 1.0 / (math.pi * scale_c * (1.0 + ((xs - loc_c) / scale_c) ** 2))
+                    ax.plot(xs, cpdf, color="#9467bd", lw=1.2, ls=":")
+        ax.set_title(
+            f"{rank_key}\n"
+            f"n={int(fit.get('n', 0))}, mean={float(fit.get('mean', float('nan'))):.3f}, std={float(fit.get('std', float('nan'))):.3f}\n"
+            f"G/L/C KS={float(gfit.get('ks_to_fit', float('nan'))):.2f}/"
+            f"{float(lfit.get('ks_to_fit', float('nan'))):.2f}/"
+            f"{float(cfit.get('ks_to_fit', float('nan'))):.2f}",
+            fontsize=8,
+        )
+        ax.grid(True, alpha=0.2)
+    fig.suptitle(title, fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(out_path)
+    plt.close(fig)
+    return out_path
+
+
+def _save_rank_prob_stat_plot(
+    *,
+    summary: Dict[str, Dict[str, float]],
+    out_path: str,
+    value_key: str,
+    title: str,
+) -> Optional[str]:
+    plt = _try_import_matplotlib()
+    if plt is None:
+        return None
+    rank_keys = list(summary.keys())
+    if not rank_keys:
+        return None
+    vals = [float((summary.get(rank_key, {}) or {}).get(value_key, float("nan"))) for rank_key in rank_keys]
+    xs = np.arange(len(rank_keys))
+    fig = plt.figure(figsize=(1.2 + 1.1 * len(rank_keys), 3.2), dpi=180)
+    ax = fig.add_subplot(1, 1, 1)
+    ax.bar(xs, vals, color="#6baed6", alpha=0.85)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(rank_keys)
+    ax.set_title(title)
+    ax.grid(True, axis="y", alpha=0.25)
+    for x, val in zip(xs, vals):
+        if np.isfinite(val):
+            ax.text(float(x), float(val), f"{val:.3f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    return out_path
+
+
 def _compare_rank_slot_summaries(
     raw_summary: Dict[str, Dict[str, Dict[str, float]]],
     pride_summary: Dict[str, Dict[str, Dict[str, float]]],
@@ -301,6 +412,30 @@ def _print_rank_slot_comparison(title: str, comparison: Dict[str, Dict[str, Dict
     print("")
 
 
+def _print_rank_prob_block(title: str, summary: Dict[str, Dict[str, float]], k: int) -> None:
+    print(title)
+    pieces = []
+    for r in range(1, int(k) + 1):
+        rank_key = f"rank{r}"
+        fit = (summary.get(rank_key, {}) or {})
+        pieces.append(f"{rank_key}:{float(fit.get('mean', float('nan'))):.3f}/{float(fit.get('std', float('nan'))):.3f}")
+    print(", ".join(pieces))
+    print("")
+
+
+def _print_rank_prob_comparison(title: str, comparison: Dict[str, Dict[str, Dict[str, float]]], k: int) -> None:
+    print(title)
+    pieces = []
+    for r in range(1, int(k) + 1):
+        rank_key = f"rank{r}"
+        fit = (comparison.get(rank_key, {}) or {})
+        pieces.append(
+            f"{rank_key}:{float(fit.get('raw', float('nan'))):.3f}->{float(fit.get('pride', float('nan'))):.3f} ({float(fit.get('delta', float('nan'))):+.3f})"
+        )
+    print(", ".join(pieces))
+    print("")
+
+
 def _run_multi(
     *,
     results_dirs: List[str],
@@ -316,6 +451,8 @@ def _run_multi(
     os.makedirs(aggregate_out_dir, exist_ok=True)
     combined_by_k: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
     combined_pride_by_k: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
+    gt_probs_by_k: Dict[int, Dict[str, List[float]]] = {}
+    gt_pride_probs_by_k: Dict[int, Dict[str, List[float]]] = {}
     pride_infos_by_k: Dict[int, List[Dict[str, object]]] = {}
 
     for results_dir in results_dirs:
@@ -327,11 +464,13 @@ def _run_multi(
             results = _read_results_file(ci.path)
             if int(max_samples) > 0:
                 results = results[: int(max_samples)]
-            k, bucket = _analyze_results_file(results, ci.subject, int(ci.run_idx))
+            k, bucket, gt_bucket = _analyze_results_file(results, ci.subject, int(ci.run_idx))
             if k is None:
                 continue
             combined_by_k.setdefault(int(k), _rank_slot_bucket(int(k)))
             _merge_rank_slot_bucket(combined_by_k[int(k)], bucket)
+            gt_probs_by_k.setdefault(int(k), _rank_prob_bucket(int(k)))
+            _merge_rank_prob_bucket(gt_probs_by_k[int(k)], gt_bucket)
             if bool(apply_pride_offline):
                 data0 = results[0].get("data", {}) or {}
                 probs0 = data0.get("probs", None)
@@ -344,10 +483,12 @@ def _run_multi(
                         pride_prefix_percent=float(pride_prefix_percent),
                         pride_seed=int(pride_seed),
                     )
-                    k_pride, pride_bucket = _analyze_results_file(pride_results, ci.subject, int(ci.run_idx))
+                    k_pride, pride_bucket, pride_gt_bucket = _analyze_results_file(pride_results, ci.subject, int(ci.run_idx))
                     if k_pride is not None:
                         combined_pride_by_k.setdefault(int(k_pride), _rank_slot_bucket(int(k_pride)))
                         _merge_rank_slot_bucket(combined_pride_by_k[int(k_pride)], pride_bucket)
+                        gt_pride_probs_by_k.setdefault(int(k_pride), _rank_prob_bucket(int(k_pride)))
+                        _merge_rank_prob_bucket(gt_pride_probs_by_k[int(k_pride)], pride_gt_bucket)
                         pride_infos_by_k.setdefault(int(k_pride), []).append(pride_info)
 
     if not combined_by_k:
@@ -358,26 +499,52 @@ def _run_multi(
     for k in sorted(combined_by_k.keys()):
         bucket = combined_by_k[int(k)]
         summary = _summarize_rank_slot_bucket(bucket, int(k))
+        gt_prob_summary = _summarize_rank_prob_bucket(gt_probs_by_k[int(k)], int(k))
         pride_summary = _summarize_rank_slot_bucket(combined_pride_by_k[int(k)], int(k)) if int(k) in combined_pride_by_k else {}
+        pride_gt_prob_summary = _summarize_rank_prob_bucket(gt_pride_probs_by_k[int(k)], int(k)) if int(k) in gt_pride_probs_by_k else {}
         comparison_mean = _compare_rank_slot_summaries(summary, pride_summary, value_key="mean") if pride_summary else {}
         comparison_std = _compare_rank_slot_summaries(summary, pride_summary, value_key="std") if pride_summary else {}
+        gt_prob_comparison_mean = _compare_rank_slot_summaries(
+            {rk: {"GT": fit} for rk, fit in gt_prob_summary.items()},
+            {rk: {"GT": fit} for rk, fit in pride_gt_prob_summary.items()},
+            value_key="mean",
+        ) if pride_gt_prob_summary else {}
+        gt_prob_comparison_std = _compare_rank_slot_summaries(
+            {rk: {"GT": fit} for rk, fit in gt_prob_summary.items()},
+            {rk: {"GT": fit} for rk, fit in pride_gt_prob_summary.items()},
+            value_key="std",
+        ) if pride_gt_prob_summary else {}
         output["by_k"][str(int(k))] = {
             "raw": summary,
+            "raw_gt_probs": gt_prob_summary,
             "pride": pride_summary,
+            "pride_gt_probs": pride_gt_prob_summary,
             "comparison_mean": comparison_mean,
             "comparison_std": comparison_std,
+            "gt_prob_comparison_mean": gt_prob_comparison_mean,
+            "gt_prob_comparison_std": gt_prob_comparison_std,
             "pride_info": pride_infos_by_k.get(int(k), []),
         }
         print(f"--- k={int(k)} ---")
         _print_rank_slot_block("raw:", summary, int(k))
+        _print_rank_prob_block("raw gt probs:", gt_prob_summary, int(k))
         if pride_summary:
             _print_rank_slot_block("pride:", pride_summary, int(k))
             _print_rank_slot_comparison("raw -> pride (mean delta):", comparison_mean, int(k))
+            _print_rank_prob_block("pride gt probs:", pride_gt_prob_summary, int(k))
+            _print_rank_prob_comparison(
+                "raw -> pride gt probs (mean delta):",
+                {rk: ((gt_prob_comparison_mean.get(rk, {}) or {}).get("GT", {}) or {}) for rk in gt_prob_summary.keys()},
+                int(k),
+            )
 
         if save_plots:
             grid_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_grid_k{int(k)}.png")
             mean_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_mean_k{int(k)}.png")
             std_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_std_k{int(k)}.png")
+            gt_grid_path = os.path.join(aggregate_out_dir, f"multi_model_rank_gt_prob_grid_k{int(k)}.png")
+            gt_mean_path = os.path.join(aggregate_out_dir, f"multi_model_rank_gt_prob_mean_k{int(k)}.png")
+            gt_std_path = os.path.join(aggregate_out_dir, f"multi_model_rank_gt_prob_std_k{int(k)}.png")
             saved_grid = _save_rank_slot_grid_plot(
                 summary=summary,
                 bucket=bucket,
@@ -396,13 +563,36 @@ def _run_multi(
                 value_key="std",
                 title=f"Multi-model cyclic rank-slot delta std (k={int(k)})",
             )
-            for p in (saved_grid, saved_mean, saved_std):
+            saved_gt_grid = _save_rank_prob_grid_plot(
+                summary=gt_prob_summary,
+                bucket=gt_probs_by_k[int(k)],
+                out_path=gt_grid_path,
+                title=f"Multi-model cyclic GT rank-prob distributions (k={int(k)})",
+            )
+            saved_gt_mean = _save_rank_prob_stat_plot(
+                summary=gt_prob_summary,
+                out_path=gt_mean_path,
+                value_key="mean",
+                title=f"Multi-model cyclic GT rank-prob mean (k={int(k)})",
+            )
+            saved_gt_std = _save_rank_prob_stat_plot(
+                summary=gt_prob_summary,
+                out_path=gt_std_path,
+                value_key="std",
+                title=f"Multi-model cyclic GT rank-prob std (k={int(k)})",
+            )
+            for p in (saved_grid, saved_mean, saved_std, saved_gt_grid, saved_gt_mean, saved_gt_std):
                 if p:
                     print(f"Saved: {p}")
             if pride_summary:
                 pride_grid_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_pride_grid_k{int(k)}.png")
                 pride_mean_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_pride_mean_k{int(k)}.png")
                 pride_std_path = os.path.join(aggregate_out_dir, f"multi_model_rank_slot_delta_pride_std_k{int(k)}.png")
+                pride_gt_grid_path = os.path.join(aggregate_out_dir, f"multi_model_rank_gt_prob_pride_grid_k{int(k)}.png")
+                pride_gt_mean_path = os.path.join(aggregate_out_dir, f"multi_model_rank_gt_prob_pride_mean_k{int(k)}.png")
+                pride_gt_std_path = os.path.join(aggregate_out_dir, f"multi_model_rank_gt_prob_pride_std_k{int(k)}.png")
+                delta_gt_mean_path = os.path.join(aggregate_out_dir, f"multi_model_rank_gt_prob_pride_minus_raw_mean_k{int(k)}.png")
+                delta_gt_std_path = os.path.join(aggregate_out_dir, f"multi_model_rank_gt_prob_pride_minus_raw_std_k{int(k)}.png")
                 pride_bucket = combined_pride_by_k[int(k)]
                 saved_pride_grid = _save_rank_slot_grid_plot(
                     summary=pride_summary,
@@ -436,7 +626,48 @@ def _run_multi(
                     value_key="delta",
                     title=f"Multi-model rank-slot delta std change (PriDe - raw) (k={int(k)})",
                 )
-                for p in (saved_pride_grid, saved_pride_mean, saved_pride_std, saved_delta_mean, saved_delta_std):
+                saved_pride_gt_grid = _save_rank_prob_grid_plot(
+                    summary=pride_gt_prob_summary,
+                    bucket=gt_pride_probs_by_k[int(k)],
+                    out_path=pride_gt_grid_path,
+                    title=f"Multi-model cyclic GT rank-prob distributions after PriDe (k={int(k)})",
+                )
+                saved_pride_gt_mean = _save_rank_prob_stat_plot(
+                    summary=pride_gt_prob_summary,
+                    out_path=pride_gt_mean_path,
+                    value_key="mean",
+                    title=f"Multi-model cyclic GT rank-prob mean after PriDe (k={int(k)})",
+                )
+                saved_pride_gt_std = _save_rank_prob_stat_plot(
+                    summary=pride_gt_prob_summary,
+                    out_path=pride_gt_std_path,
+                    value_key="std",
+                    title=f"Multi-model cyclic GT rank-prob std after PriDe (k={int(k)})",
+                )
+                saved_delta_gt_mean = _save_rank_prob_stat_plot(
+                    summary={rk: {"delta": ((gt_prob_comparison_mean.get(rk, {}) or {}).get("GT", {}) or {}).get("delta", float("nan"))} for rk in gt_prob_summary.keys()},
+                    out_path=delta_gt_mean_path,
+                    value_key="delta",
+                    title=f"Multi-model GT rank-prob mean change (PriDe - raw) (k={int(k)})",
+                )
+                saved_delta_gt_std = _save_rank_prob_stat_plot(
+                    summary={rk: {"delta": ((gt_prob_comparison_std.get(rk, {}) or {}).get("GT", {}) or {}).get("delta", float("nan"))} for rk in gt_prob_summary.keys()},
+                    out_path=delta_gt_std_path,
+                    value_key="delta",
+                    title=f"Multi-model GT rank-prob std change (PriDe - raw) (k={int(k)})",
+                )
+                for p in (
+                    saved_pride_grid,
+                    saved_pride_mean,
+                    saved_pride_std,
+                    saved_delta_mean,
+                    saved_delta_std,
+                    saved_pride_gt_grid,
+                    saved_pride_gt_mean,
+                    saved_pride_gt_std,
+                    saved_delta_gt_mean,
+                    saved_delta_gt_std,
+                ):
                     if p:
                         print(f"Saved: {p}")
 
@@ -463,16 +694,20 @@ def _run_single(
 
     combined_by_k: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
     combined_pride_by_k: Dict[int, Dict[str, Dict[str, List[float]]]] = {}
+    gt_probs_by_k: Dict[int, Dict[str, List[float]]] = {}
+    gt_pride_probs_by_k: Dict[int, Dict[str, List[float]]] = {}
     pride_infos_by_k: Dict[int, List[Dict[str, object]]] = {}
     for ci in cache_files:
         results = _read_results_file(ci.path)
         if int(max_samples) > 0:
             results = results[: int(max_samples)]
-        k, bucket = _analyze_results_file(results, ci.subject, int(ci.run_idx))
+        k, bucket, gt_bucket = _analyze_results_file(results, ci.subject, int(ci.run_idx))
         if k is None:
             continue
         combined_by_k.setdefault(int(k), _rank_slot_bucket(int(k)))
         _merge_rank_slot_bucket(combined_by_k[int(k)], bucket)
+        gt_probs_by_k.setdefault(int(k), _rank_prob_bucket(int(k)))
+        _merge_rank_prob_bucket(gt_probs_by_k[int(k)], gt_bucket)
         if bool(apply_pride_offline):
             data0 = results[0].get("data", {}) or {}
             probs0 = data0.get("probs", None)
@@ -485,10 +720,12 @@ def _run_single(
                     pride_prefix_percent=float(pride_prefix_percent),
                     pride_seed=int(pride_seed),
                 )
-                k_pride, pride_bucket = _analyze_results_file(pride_results, ci.subject, int(ci.run_idx))
+                k_pride, pride_bucket, pride_gt_bucket = _analyze_results_file(pride_results, ci.subject, int(ci.run_idx))
                 if k_pride is not None:
                     combined_pride_by_k.setdefault(int(k_pride), _rank_slot_bucket(int(k_pride)))
                     _merge_rank_slot_bucket(combined_pride_by_k[int(k_pride)], pride_bucket)
+                    gt_pride_probs_by_k.setdefault(int(k_pride), _rank_prob_bucket(int(k_pride)))
+                    _merge_rank_prob_bucket(gt_pride_probs_by_k[int(k_pride)], pride_gt_bucket)
                     pride_infos_by_k.setdefault(int(k_pride), []).append(pride_info)
 
     if not combined_by_k:
@@ -500,26 +737,52 @@ def _run_single(
     for k in sorted(combined_by_k.keys()):
         bucket = combined_by_k[int(k)]
         summary = _summarize_rank_slot_bucket(bucket, int(k))
+        gt_prob_summary = _summarize_rank_prob_bucket(gt_probs_by_k[int(k)], int(k))
         pride_summary = _summarize_rank_slot_bucket(combined_pride_by_k[int(k)], int(k)) if int(k) in combined_pride_by_k else {}
+        pride_gt_prob_summary = _summarize_rank_prob_bucket(gt_pride_probs_by_k[int(k)], int(k)) if int(k) in gt_pride_probs_by_k else {}
         comparison_mean = _compare_rank_slot_summaries(summary, pride_summary, value_key="mean") if pride_summary else {}
         comparison_std = _compare_rank_slot_summaries(summary, pride_summary, value_key="std") if pride_summary else {}
+        gt_prob_comparison_mean = _compare_rank_slot_summaries(
+            {rk: {"GT": fit} for rk, fit in gt_prob_summary.items()},
+            {rk: {"GT": fit} for rk, fit in pride_gt_prob_summary.items()},
+            value_key="mean",
+        ) if pride_gt_prob_summary else {}
+        gt_prob_comparison_std = _compare_rank_slot_summaries(
+            {rk: {"GT": fit} for rk, fit in gt_prob_summary.items()},
+            {rk: {"GT": fit} for rk, fit in pride_gt_prob_summary.items()},
+            value_key="std",
+        ) if pride_gt_prob_summary else {}
         output["by_k"][str(int(k))] = {
             "raw": summary,
+            "raw_gt_probs": gt_prob_summary,
             "pride": pride_summary,
+            "pride_gt_probs": pride_gt_prob_summary,
             "comparison_mean": comparison_mean,
             "comparison_std": comparison_std,
+            "gt_prob_comparison_mean": gt_prob_comparison_mean,
+            "gt_prob_comparison_std": gt_prob_comparison_std,
             "pride_info": pride_infos_by_k.get(int(k), []),
         }
         print(f"--- k={int(k)} ---")
         _print_rank_slot_block("raw:", summary, int(k))
+        _print_rank_prob_block("raw gt probs:", gt_prob_summary, int(k))
         if pride_summary:
             _print_rank_slot_block("pride:", pride_summary, int(k))
             _print_rank_slot_comparison("raw -> pride (mean delta):", comparison_mean, int(k))
+            _print_rank_prob_block("pride gt probs:", pride_gt_prob_summary, int(k))
+            _print_rank_prob_comparison(
+                "raw -> pride gt probs (mean delta):",
+                {rk: ((gt_prob_comparison_mean.get(rk, {}) or {}).get("GT", {}) or {}) for rk in gt_prob_summary.keys()},
+                int(k),
+            )
 
         if save_plots:
             grid_path = os.path.join(cache_dir, f"rank_slot_delta_grid_k{int(k)}.png")
             mean_path = os.path.join(cache_dir, f"rank_slot_delta_mean_k{int(k)}.png")
             std_path = os.path.join(cache_dir, f"rank_slot_delta_std_k{int(k)}.png")
+            gt_grid_path = os.path.join(cache_dir, f"rank_gt_prob_grid_k{int(k)}.png")
+            gt_mean_path = os.path.join(cache_dir, f"rank_gt_prob_mean_k{int(k)}.png")
+            gt_std_path = os.path.join(cache_dir, f"rank_gt_prob_std_k{int(k)}.png")
             saved_grid = _save_rank_slot_grid_plot(
                 summary=summary,
                 bucket=bucket,
@@ -538,7 +801,25 @@ def _run_single(
                 value_key="std",
                 title=f"Cyclic rank-slot delta std (k={int(k)})",
             )
-            for p in (saved_grid, saved_mean, saved_std):
+            saved_gt_grid = _save_rank_prob_grid_plot(
+                summary=gt_prob_summary,
+                bucket=gt_probs_by_k[int(k)],
+                out_path=gt_grid_path,
+                title=f"Cyclic GT rank-prob distributions (k={int(k)})",
+            )
+            saved_gt_mean = _save_rank_prob_stat_plot(
+                summary=gt_prob_summary,
+                out_path=gt_mean_path,
+                value_key="mean",
+                title=f"Cyclic GT rank-prob mean (k={int(k)})",
+            )
+            saved_gt_std = _save_rank_prob_stat_plot(
+                summary=gt_prob_summary,
+                out_path=gt_std_path,
+                value_key="std",
+                title=f"Cyclic GT rank-prob std (k={int(k)})",
+            )
+            for p in (saved_grid, saved_mean, saved_std, saved_gt_grid, saved_gt_mean, saved_gt_std):
                 if p:
                     print(f"Saved: {p}")
             if pride_summary:
@@ -546,6 +827,11 @@ def _run_single(
                 pride_grid_path = os.path.join(cache_dir, f"rank_slot_delta_pride_grid_k{int(k)}.png")
                 pride_mean_path = os.path.join(cache_dir, f"rank_slot_delta_pride_mean_k{int(k)}.png")
                 pride_std_path = os.path.join(cache_dir, f"rank_slot_delta_pride_std_k{int(k)}.png")
+                pride_gt_grid_path = os.path.join(cache_dir, f"rank_gt_prob_pride_grid_k{int(k)}.png")
+                pride_gt_mean_path = os.path.join(cache_dir, f"rank_gt_prob_pride_mean_k{int(k)}.png")
+                pride_gt_std_path = os.path.join(cache_dir, f"rank_gt_prob_pride_std_k{int(k)}.png")
+                delta_gt_mean_path = os.path.join(cache_dir, f"rank_gt_prob_pride_minus_raw_mean_k{int(k)}.png")
+                delta_gt_std_path = os.path.join(cache_dir, f"rank_gt_prob_pride_minus_raw_std_k{int(k)}.png")
                 saved_pride_grid = _save_rank_slot_grid_plot(
                     summary=pride_summary,
                     bucket=pride_bucket,
@@ -578,7 +864,48 @@ def _run_single(
                     value_key="delta",
                     title=f"Rank-slot delta std change (PriDe - raw) (k={int(k)})",
                 )
-                for p in (saved_pride_grid, saved_pride_mean, saved_pride_std, saved_delta_mean, saved_delta_std):
+                saved_pride_gt_grid = _save_rank_prob_grid_plot(
+                    summary=pride_gt_prob_summary,
+                    bucket=gt_pride_probs_by_k[int(k)],
+                    out_path=pride_gt_grid_path,
+                    title=f"Cyclic GT rank-prob distributions after PriDe (k={int(k)})",
+                )
+                saved_pride_gt_mean = _save_rank_prob_stat_plot(
+                    summary=pride_gt_prob_summary,
+                    out_path=pride_gt_mean_path,
+                    value_key="mean",
+                    title=f"Cyclic GT rank-prob mean after PriDe (k={int(k)})",
+                )
+                saved_pride_gt_std = _save_rank_prob_stat_plot(
+                    summary=pride_gt_prob_summary,
+                    out_path=pride_gt_std_path,
+                    value_key="std",
+                    title=f"Cyclic GT rank-prob std after PriDe (k={int(k)})",
+                )
+                saved_delta_gt_mean = _save_rank_prob_stat_plot(
+                    summary={rk: {"delta": ((gt_prob_comparison_mean.get(rk, {}) or {}).get("GT", {}) or {}).get("delta", float("nan"))} for rk in gt_prob_summary.keys()},
+                    out_path=delta_gt_mean_path,
+                    value_key="delta",
+                    title=f"GT rank-prob mean change (PriDe - raw) (k={int(k)})",
+                )
+                saved_delta_gt_std = _save_rank_prob_stat_plot(
+                    summary={rk: {"delta": ((gt_prob_comparison_std.get(rk, {}) or {}).get("GT", {}) or {}).get("delta", float("nan"))} for rk in gt_prob_summary.keys()},
+                    out_path=delta_gt_std_path,
+                    value_key="delta",
+                    title=f"GT rank-prob std change (PriDe - raw) (k={int(k)})",
+                )
+                for p in (
+                    saved_pride_grid,
+                    saved_pride_mean,
+                    saved_pride_std,
+                    saved_delta_mean,
+                    saved_delta_std,
+                    saved_pride_gt_grid,
+                    saved_pride_gt_mean,
+                    saved_pride_gt_std,
+                    saved_delta_gt_mean,
+                    saved_delta_gt_std,
+                ):
                     if p:
                         print(f"Saved: {p}")
 
