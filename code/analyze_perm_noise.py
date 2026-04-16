@@ -675,6 +675,9 @@ def _print_margin_summary_details(
     raw_fit = summary.get("pooled_residual_fit", {}) or {}
     raw_laplace_fit = summary.get("pooled_residual_laplace_fit", {}) or {}
     raw_cauchy_fit = summary.get("pooled_residual_cauchy_fit", {}) or {}
+    zeta_fit = summary.get("zeta_default_fit", {}) or {}
+    zeta_laplace_fit = summary.get("zeta_default_laplace_fit", {}) or {}
+    zeta_cauchy_fit = summary.get("zeta_default_cauchy_fit", {}) or {}
     print(
         "raw pooled fits: Gaussian KS={:.4f}, KL={:.4f} | Laplace KS={:.4f}, KL={:.4f} | Cauchy KS={:.4f}, KL={:.4f}".format(
             float(raw_fit.get("ks_to_fit", float("nan"))),
@@ -683,6 +686,18 @@ def _print_margin_summary_details(
             float(raw_laplace_fit.get("kl_hist_to_fit", float("nan"))),
             float(raw_cauchy_fit.get("ks_to_fit", float("nan"))),
             float(raw_cauchy_fit.get("kl_hist_to_fit", float("nan"))),
+        )
+    )
+    print(
+        "zeta(default-pair) fits: mean={:+.4f}, std={:.4f} | Gaussian KS={:.4f}, KL={:.4f} | Laplace KS={:.4f}, KL={:.4f} | Cauchy KS={:.4f}, KL={:.4f}".format(
+            float(summary.get("mean_zeta_default", float("nan"))),
+            float(summary.get("std_zeta_default", float("nan"))),
+            float(zeta_fit.get("ks_to_fit", float("nan"))),
+            float(zeta_fit.get("kl_hist_to_fit", float("nan"))),
+            float(zeta_laplace_fit.get("ks_to_fit", float("nan"))),
+            float(zeta_laplace_fit.get("kl_hist_to_fit", float("nan"))),
+            float(zeta_cauchy_fit.get("ks_to_fit", float("nan"))),
+            float(zeta_cauchy_fit.get("kl_hist_to_fit", float("nan"))),
         )
     )
     for fits_key, fits_title in (
@@ -943,6 +958,7 @@ def _make_margin_noise_bucket(with_correctness: bool = False) -> Dict[str, objec
         "sample_ref_margins": [],
         "sample_sigmas": [],
         "sample_base_gaps": [],
+        "zeta_values": [],
         "t_residuals": {},
         "t_z_scores": {},
         "standardized_bin_edges": [],
@@ -1458,6 +1474,7 @@ def _analyze_cyclic_margin_noise(
     sample_ref_margins: List[float] = []
     sample_sigmas: List[float] = []
     sample_base_gaps: List[float] = []
+    sample_zeta_values: List[float] = []
     t_residuals: Dict[int, List[float]] = {t: [] for t in range(1, n_views + 1)}
     t_z_scores: Dict[int, List[float]] = {t: [] for t in range(1, n_views + 1)}
     std_bin_edges = np.linspace(-4.0, 4.0, 81, dtype=np.float64)
@@ -1602,8 +1619,11 @@ def _analyze_cyclic_margin_noise(
         sigma_i = float(np.std(residuals))
 
         identity_dist = _aggregate_probs_over_permutations([probs_seq[identity_idx]], [perm_list[identity_idx]], k)
+        identity_top1, identity_top2 = _top2_indices(identity_dist)
         base_gap = _gap_of_distribution(identity_dist)
         base_margin_on_ref_pair = float(identity_dist[ref_top1] - identity_dist[ref_top2])
+        base_ref_gap = float(ref_dist[identity_top1] - ref_dist[identity_top2])
+        zeta_default = float(base_gap - base_ref_gap)
 
         pooled_residuals.extend([float(x) for x in residuals.tolist()])
         pooled_payload_perm_labels = [str(x) for x in selected_perm_labels]
@@ -1621,6 +1641,7 @@ def _analyze_cyclic_margin_noise(
         sample_ref_margins.append(ref_margin)
         sample_sigmas.append(sigma_i)
         sample_base_gaps.append(base_gap)
+        sample_zeta_values.append(zeta_default)
         corr_bucket = correctness_buckets["correct" if reference_correct else "incorrect"]
         corr_bucket.setdefault("residual_perm_labels", []).extend(pooled_payload_perm_labels)
         corr_bucket.setdefault("residual_ideal_labels", []).extend(pooled_payload_ideal_labels)
@@ -2142,6 +2163,10 @@ def _analyze_cyclic_margin_noise(
             "ref_margin": ref_margin,
             "base_gap": float(base_gap),
             "base_margin_on_ref_pair": base_margin_on_ref_pair,
+            "base_top1": int(identity_top1),
+            "base_top2": int(identity_top2),
+            "base_ref_gap": float(base_ref_gap),
+            "zeta_default": float(zeta_default),
             "sigma_i": sigma_i,
             "single_view_perm_indices": [int(x) for x in selected_perm_idxs],
             "single_view_perm_tuples": [list(x) for x in selected_perm_tuples],
@@ -2165,6 +2190,7 @@ def _analyze_cyclic_margin_noise(
     sample_ref_arr = np.asarray(sample_ref_margins, dtype=np.float64)
     sample_sigma_arr = np.asarray(sample_sigmas, dtype=np.float64)
     sample_base_gap_arr = np.asarray(sample_base_gaps, dtype=np.float64)
+    sample_zeta_arr = np.asarray(sample_zeta_values, dtype=np.float64)
 
     t_view_summary = []
     t1_std = float(np.std(np.asarray(t_residuals[1], dtype=np.float64))) if 1 in t_residuals and t_residuals[1] else float("nan")
@@ -2198,8 +2224,13 @@ def _analyze_cyclic_margin_noise(
         "mean_sigma_i": float(np.mean(sample_sigma_arr)) if sample_sigma_arr.size > 0 else float("nan"),
         "std_sigma_i": float(np.std(sample_sigma_arr)) if sample_sigma_arr.size > 0 else float("nan"),
         "mean_base_gap": float(np.mean(sample_base_gap_arr)) if sample_base_gap_arr.size > 0 else float("nan"),
+        "mean_zeta_default": float(np.mean(sample_zeta_arr)) if sample_zeta_arr.size > 0 else float("nan"),
+        "std_zeta_default": float(np.std(sample_zeta_arr)) if sample_zeta_arr.size > 0 else float("nan"),
         "corr_ref_margin_sigma": _safe_corr(sample_ref_arr, sample_sigma_arr),
         "corr_base_gap_sigma": _safe_corr(sample_base_gap_arr, sample_sigma_arr),
+        "zeta_default_fit": _gaussian_fit_report(sample_zeta_arr),
+        "zeta_default_laplace_fit": _laplace_fit_report(sample_zeta_arr),
+        "zeta_default_cauchy_fit": _cauchy_fit_report(sample_zeta_arr),
         "pooled_residual_fit": _gaussian_fit_report(pooled_resid_arr),
         "pooled_residual_laplace_fit": _laplace_fit_report(pooled_resid_arr),
         "pooled_residual_cauchy_fit": _cauchy_fit_report(pooled_resid_arr),
@@ -2287,6 +2318,7 @@ def _analyze_cyclic_margin_noise(
         "sample_ref_margins": [float(x) for x in sample_ref_margins],
         "sample_sigmas": [float(x) for x in sample_sigmas],
         "sample_base_gaps": [float(x) for x in sample_base_gaps],
+        "zeta_values": [float(x) for x in sample_zeta_values],
         "t_residuals": {int(t): [float(x) for x in vals] for t, vals in t_residuals.items()},
         "t_z_scores": {int(t): [float(x) for x in vals] for t, vals in t_z_scores.items()},
         "standardized_bin_edges": [float(x) for x in std_bin_edges.tolist()],
@@ -2397,6 +2429,7 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
     bucket.setdefault("sample_ref_margins", [])
     bucket.setdefault("sample_sigmas", [])
     bucket.setdefault("sample_base_gaps", [])
+    bucket.setdefault("zeta_values", [])
     bucket.setdefault("t_residuals", {})
     bucket.setdefault("t_z_scores", {})
     bucket.setdefault("standardized_bin_edges", [])
@@ -2425,6 +2458,7 @@ def _merge_margin_noise_payload_into_bucket(bucket: Dict[str, object], payload: 
     bucket["sample_ref_margins"].extend(payload.get("sample_ref_margins", []))
     bucket["sample_sigmas"].extend(payload.get("sample_sigmas", []))
     bucket["sample_base_gaps"].extend(payload.get("sample_base_gaps", []))
+    bucket["zeta_values"].extend(payload.get("zeta_values", []))
 
     for t, vals in (payload.get("t_residuals", {}) or {}).items():
         t_int = int(t)
@@ -2645,6 +2679,7 @@ def _summarize_margin_noise_bucket(
     sample_ref = np.asarray(bucket.get("sample_ref_margins", []), dtype=np.float64)
     sample_sigma = np.asarray(bucket.get("sample_sigmas", []), dtype=np.float64)
     sample_base_gap = np.asarray(bucket.get("sample_base_gaps", []), dtype=np.float64)
+    zeta_values = np.asarray(bucket.get("zeta_values", []), dtype=np.float64)
     t_residuals = bucket.get("t_residuals", {}) or {}
     t_z_scores = bucket.get("t_z_scores", {}) or {}
     std_bin_edges = bucket.get("standardized_bin_edges", []) or []
@@ -2893,6 +2928,11 @@ def _summarize_margin_noise_bucket(
         "n_residuals": int(residuals.size),
         "n_standardized_residuals": int(z_scores.size),
         "n_samples": int(sample_sigma.size),
+        "mean_zeta_default": float(np.mean(zeta_values)) if zeta_values.size > 0 else float("nan"),
+        "std_zeta_default": float(np.std(zeta_values)) if zeta_values.size > 0 else float("nan"),
+        "zeta_default_fit": _gaussian_fit_report(zeta_values),
+        "zeta_default_laplace_fit": _laplace_fit_report(zeta_values),
+        "zeta_default_cauchy_fit": _cauchy_fit_report(zeta_values),
         "pooled_residual_fit": fit_raw,
         "pooled_residual_laplace_fit": fit_raw_laplace,
         "pooled_residual_cauchy_fit": fit_raw_cauchy,
@@ -3268,6 +3308,7 @@ def _save_margin_bucket_plots(
 ) -> List[str]:
     saved: List[str] = []
     raw_residuals = np.asarray(bucket.get("residuals", []), dtype=np.float64)
+    zeta_values = np.asarray(bucket.get("zeta_values", []), dtype=np.float64)
     z_scores = np.asarray(bucket.get("z_scores", []), dtype=np.float64)
     sample_ref = np.asarray(bucket.get("sample_ref_margins", []), dtype=np.float64)
     sample_sigma = np.asarray(bucket.get("sample_sigmas", []), dtype=np.float64)
@@ -3337,6 +3378,41 @@ def _save_margin_bucket_plots(
         )
         if saved_sweep:
             saved.append(saved_sweep)
+
+    if zeta_values.size > 0:
+        fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
+        ax = fig.add_subplot(1, 1, 1)
+        zeta_label = "All models pooled zeta" if n_models is not None else "zeta(default pair)"
+        ax.hist(zeta_values, bins=60 if n_models is not None else 50, density=True, alpha=0.68, color="#9ecae1", label=zeta_label)
+        fit_zeta = summary.get("zeta_default_fit", {}) or {}
+        fit_zeta_laplace = summary.get("zeta_default_laplace_fit", {}) or {}
+        fit_zeta_cauchy = summary.get("zeta_default_cauchy_fit", {}) or {}
+        x_min = float(np.min(zeta_values))
+        x_max = float(np.max(zeta_values))
+        if np.isfinite(x_min) and np.isfinite(x_max) and x_max > x_min:
+            xs = np.linspace(x_min, x_max, 400)
+            mu = float(fit_zeta.get("mean", float("nan")))
+            sigma = float(fit_zeta.get("std", float("nan")))
+            if np.isfinite(mu) and np.isfinite(sigma) and sigma > 1e-12:
+                pdf = np.exp(-0.5 * ((xs - mu) / sigma) ** 2) / (sigma * math.sqrt(2.0 * math.pi))
+                ax.plot(xs, pdf, color="#d62728", lw=2.0, label="Gaussian (KS={:.3f}, KL={:.3f})".format(float(fit_zeta.get("ks_to_fit", float("nan"))), float(fit_zeta.get("kl_hist_to_fit", float("nan")))))
+            laplace_pdf = _laplace_pdf(xs, float(fit_zeta_laplace.get("loc", float("nan"))), float(fit_zeta_laplace.get("scale", float("nan"))))
+            if np.all(np.isfinite(laplace_pdf)):
+                ax.plot(xs, laplace_pdf, color="#2ca02c", lw=1.8, ls="--", label="Laplace (KS={:.3f}, KL={:.3f})".format(float(fit_zeta_laplace.get("ks_to_fit", float("nan"))), float(fit_zeta_laplace.get("kl_hist_to_fit", float("nan")))))
+            cauchy_pdf = _cauchy_pdf(xs, float(fit_zeta_cauchy.get("loc", float("nan"))), float(fit_zeta_cauchy.get("scale", float("nan"))))
+            if np.all(np.isfinite(cauchy_pdf)):
+                ax.plot(xs, cauchy_pdf, color="#9467bd", lw=1.8, ls=":", label="Cauchy (KS={:.3f}, KL={:.3f})".format(float(fit_zeta_cauchy.get("ks_to_fit", float("nan"))), float(fit_zeta_cauchy.get("kl_hist_to_fit", float("nan")))))
+        title_head = f"Multi-model pooled {mode_label}" if n_models is not None else mode_label
+        ax.set_title(f"{title_head} zeta(default-pair) distribution (k={k})")
+        ax.set_xlabel("zeta = default-gap - reference-gap(on default pair)")
+        ax.set_ylabel("Density")
+        ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        p = os.path.join(out_dir, f"{file_tag}_zeta_hist_k{k}.png")
+        fig.savefig(p)
+        plt.close(fig)
+        saved.append(p)
 
     if z_scores.size > 0:
         fig = plt.figure(figsize=(8.0, 5.0), dpi=180)
