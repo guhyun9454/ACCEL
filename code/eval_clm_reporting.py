@@ -5,6 +5,8 @@ from utils import _purple
 
 logger = logging.getLogger(__name__)
 
+SWAP_GAUSSIAN_LABEL = "swap_gaussian"
+
 
 def _log_baseline_report(curve_obj: dict):
     """
@@ -26,17 +28,17 @@ def _log_baseline_report(curve_obj: dict):
     else:
         logger.info("BASELINE full(ensemble)    : (disabled)")
 
-    for key in ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]:
+    for key in [SWAP_GAUSSIAN_LABEL]:
         if key in curve_obj:
             c0 = float(curve_obj[key]["costs"][0])
             a0 = float(curve_obj[key]["accuracies"][0])
-            st = curve_obj.get("ours_avggap_stats", {}) if key == "ours_avggap" else curve_obj[key].get("stats", {})
+            st = curve_obj[key].get("stats", {})
             if not isinstance(st, dict):
                 st = {}
             nb = int(st.get("n_base", 0))
-            np2 = int(st.get("n_probe2", 0))
+            np2 = int(st.get("n_swap", 0))
             nc = int(st.get("n_cyclic", 0))
-            extra = f", n_base={nb}, n_probe2={np2}, n_cyclic={nc}"
+            extra = f", n_base={nb}, n_swap={np2}, n_cyclic={nc}"
             recall_key = f"{key}_recall_std"
             rstd = curve_obj.get(recall_key)
             if isinstance(rstd, (int, float)):
@@ -86,15 +88,15 @@ def _log_named_report(name: str, curve_obj: dict):
     if "full" in always:
         logger.info(f"{name} full(ensemble)    : cost={always['full']['cost']:.3f}, acc={always['full']['acc']:.4f}{_recall_str(curve_obj.get('full_recall_std'))}")
 
-    for key in ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]:
+    for key in [SWAP_GAUSSIAN_LABEL]:
         if key in curve_obj:
             c0 = float(curve_obj[key]["costs"][0])
             a0 = float(curve_obj[key]["accuracies"][0])
-            st = curve_obj.get("ours_avggap_stats", {}) if key == "ours_avggap" else curve_obj[key].get("stats", {})
+            st = curve_obj[key].get("stats", {})
             if not isinstance(st, dict):
                 st = {}
-            nb, np2, nc = int(st.get("n_base", 0)), int(st.get("n_probe2", 0)), int(st.get("n_cyclic", 0))
-            extra = f", n_base={nb}, n_probe2={np2}, n_cyclic={nc}"
+            nb, np2, nc = int(st.get("n_base", 0)), int(st.get("n_swap", 0)), int(st.get("n_cyclic", 0))
+            extra = f", n_base={nb}, n_swap={np2}, n_cyclic={nc}"
             rstd = curve_obj.get(f"{key}_recall_std")
             if isinstance(rstd, (int, float)):
                 extra += f", recall_std={rstd:.4f}"

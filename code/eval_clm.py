@@ -31,6 +31,7 @@ from eval_clm_utils import (
 )
 from eval_clm_online import (
     _recall_std,
+    _gaussian_swap_posterior_prob,
     _run_cyclic_random_fraction,
     _run_cyclic_random_fraction_with_preds,
     _run_online_avggap_policy,
@@ -42,6 +43,9 @@ from eval_clm_online import (
     _run_online_sqrt_policy_with_stats,
     _run_online_switch_cyclic_with_preds,
     _run_online_switch_cyclic_with_stats,
+    _run_online_swap_gaussian_policy,
+    _run_online_swap_gaussian_policy_with_preds,
+    _run_online_swap_gaussian_policy_with_stats,
     _run_online_th1_quantile_th2_from_th1_rule,
     _run_online_th1_quantile_th2_from_th1_rule_with_preds,
     _run_online_th1_quantile_th2_from_th1_rule_with_stats,
@@ -77,8 +81,9 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-PRIMARY_OURS_LABEL = "th1/sqrt2"
 LEGACY_OURS_LABEL = "th1/2"
+SWAP_GAUSSIAN_LABEL = "swap_gaussian"
+PRIMARY_OURS_LABEL = SWAP_GAUSSIAN_LABEL
 
 
 def _rule_th1_half(th1_val: float) -> float:
@@ -354,6 +359,42 @@ def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
     return agg
 
 
+def _slot_labels_for_k(k: int) -> List[str]:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if 0 < int(k) <= len(alphabet):
+        return list(alphabet[: int(k)])
+    return [str(i) for i in range(int(k))]
+
+
+def _load_rank_slot_std_lookup(summary_path: str, k: int) -> Dict[Tuple[int, str], float]:
+    if not summary_path or not os.path.exists(summary_path):
+        raise FileNotFoundError(
+            f"rank-slot summary json not found: {summary_path}. "
+            f"Please provide --rank_slot_summary_json."
+        )
+    with open(summary_path, "r", encoding="utf-8") as f:
+        obj = json.load(f)
+    by_k = obj.get("by_k", {}) or {}
+    k_obj = by_k.get(str(int(k)))
+    if not isinstance(k_obj, dict):
+        raise ValueError(f"rank-slot summary missing by_k[{k}] in {summary_path}")
+    raw = k_obj.get("raw", {}) or {}
+    labels = _slot_labels_for_k(int(k))
+    lookup: Dict[Tuple[int, str], float] = {}
+    for r in range(1, int(k) + 1):
+        rank_key = f"rank{r}"
+        slot_map = raw.get(rank_key)
+        if not isinstance(slot_map, dict):
+            raise ValueError(f"rank-slot summary missing raw[{rank_key}] in {summary_path}")
+        for slot in labels:
+            fit = slot_map.get(slot, {}) or {}
+            std_val = float(fit.get("std", float("nan")))
+            if not np.isfinite(std_val) or std_val <= 0.0:
+                raise ValueError(f"invalid std for ({rank_key},{slot}) in {summary_path}: {std_val}")
+            lookup[(int(r), str(slot))] = std_val
+    return lookup
+
+
 def _probe_shift_cyclic_put_top2_into_top1_slot(base_probs: np.ndarray, k: int) -> Tuple[int, int, int]:
     """
     규칙:
@@ -460,9 +501,9 @@ def _plot_baseline_points_scatter(
     #                marker='X', s=150, color='black', label='Full', zorder=10)
 
     # 2. Policy Points (REAL-WORLD online; single point)
-    policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
-    markers = ['s', '^', 'v', 'o']
-    colors = ['orange', 'brown', 'green', 'blue']
+    policies = [SWAP_GAUSSIAN_LABEL]
+    markers = ['v']
+    colors = ['green']
     
     for key, m, c in zip(policies, markers, colors):
         if key in curve_obj:
@@ -529,9 +570,9 @@ def _plot_baseline_vs_pride_points_scatter(
                 zorder=10,
             )
 
-        policies = ["switch_full", "switch_cyclic", "ours_top2flip", "ours_avggap"]
-        markers = ['s', '^', 'v', 'o']
-        colors = ['orange', 'brown', 'green', 'blue']
+        policies = [SWAP_GAUSSIAN_LABEL]
+        markers = ['v']
+        colors = ['green']
         for key, m, c in zip(policies, markers, colors):
             if key not in obj:
                 continue
@@ -1557,6 +1598,11 @@ def _compute_curves_for_one_percentile(
     base_pred_idx: Optional[List[int]] = None,
     cyclic_pred_idx: Optional[List[int]] = None,
     probe2_pred_idx: Optional[List[int]] = None,
+    swap_posterior_prob: Optional[np.ndarray] = None,
+    swap_cand1_correct: Optional[List[bool]] = None,
+    swap_cand2_correct: Optional[List[bool]] = None,
+    swap_cand1_pred_idx: Optional[List[int]] = None,
+    swap_cand2_pred_idx: Optional[List[int]] = None,
     full_pred_idx: Optional[List[int]] = None,
     cyclic_fractions: Optional[List[float]] = None,
     run_seed_offset: int = 0,
@@ -1654,50 +1700,25 @@ def _compute_curves_for_one_percentile(
     switch_full_cost = (total_cost_sf / float(N)) if (full_enabled and len(full_correct_list) == N) else float("nan")
     switch_full_acc = (corrects_sf / float(N)) if (full_enabled and len(full_correct_list) == N) else float("nan")
 
-    # 2) ours_top2flip / ours_avggap (REAL-WORLD online) + stats
-    _, _, top2_stats = _run_online_top2flip_policy_with_stats(
-        default_conf=default_conf,
-        flip_trigger=flip_trigger,
-        base_correct=base_correct_list,
-        cyclic_correct=cyclic_correct_list,
-        probe2_correct=probe2_correct,
-        k=k,
-        th1_percent=perc_value,
-        offline_prefix_n=0,
-        forced_cyclic_ids=forced_cyclic_ids,
-    )
-    c_top2, a_top2 = _run_online_top2flip_policy(
-        default_conf=default_conf,
-        flip_trigger=flip_trigger,
-        base_correct=base_correct_list,
-        cyclic_correct=cyclic_correct_list,
-        probe2_correct=probe2_correct,
-        k=k,
-        th1_percent=perc_value,
-        offline_prefix_n=0,
-        forced_cyclic_ids=forced_cyclic_ids,
-    )
-    _, _, sc_stats = _run_online_switch_cyclic_with_stats(
-        default_conf=default_conf,
-        base_correct=base_correct_list,
-        cyclic_correct=cyclic_correct_list,
-        k=k,
-        th1_percent=perc_value,
-        offline_prefix_n=0,
-        forced_cyclic_ids=forced_cyclic_ids,
-    )
-    c_avg, a_avg, avg_stats = _run_online_avggap_policy_with_stats(
-        default_conf=default_conf,
-        mean_conf=mean_conf,
-        base_correct=base_correct_list,
-        cyclic_correct=cyclic_correct_list,
-        probe2_correct=probe2_correct,
-        k=k,
-        th1_percent=perc_value,
-        th2_percent=perc_value,
-        offline_prefix_n=0,
-        forced_cyclic_ids=forced_cyclic_ids,
-    )
+    # 2) new production rule: exact top1-top2 swap + Gaussian posterior
+    swap_cost = float("nan")
+    swap_acc = float("nan")
+    swap_stats: Dict[str, int] = {"n_base": 0, "n_swap": 0}
+    if (
+        swap_posterior_prob is not None
+        and swap_cand1_correct is not None
+        and swap_cand2_correct is not None
+        and len(swap_cand1_correct) == N
+        and len(swap_cand2_correct) == N
+    ):
+        swap_cost, swap_acc, swap_stats = _run_online_swap_gaussian_policy_with_stats(
+            default_conf=default_conf,
+            swap_posterior_prob=swap_posterior_prob,
+            cand1_correct=swap_cand1_correct,
+            cand2_correct=swap_cand2_correct,
+            k=k,
+            th1_percent=perc_value,
+        )
 
     # Cyclic random fraction (for three-curves plot)
     # Default+PRIDE: alpha<100 → prefix cyclic, postfix base(보정). alpha>=100 → Cyclic과 동일(원본).
@@ -1743,26 +1764,28 @@ def _compute_curves_for_one_percentile(
 
         "cyclic": {"costs": [float(C_cyc)], "accuracies": [float(cyclic_acc_always)]},
         **{key: {"costs": [cyclic_random_costs[key]], "accuracies": [cyclic_random_accs[key]]} for key in cyclic_random_costs},
-        "switch_cyclic": {"costs": [float(switch_cyclic_cost)], "accuracies": [float(switch_cyclic_acc)], "stats": dict(sc_stats)},
-        "ours_top2flip": {"costs": [float(c_top2)], "accuracies": [float(a_top2)], "stats": dict(top2_stats)},
-        "ours_avggap": {"costs": [float(c_avg)], "accuracies": [float(a_avg)]},
-        "ours_avggap_stats": dict(avg_stats),
+        SWAP_GAUSSIAN_LABEL: {"costs": [float(swap_cost)], "accuracies": [float(swap_acc)], "stats": dict(swap_stats)},
     }
     # Optional: add recall_std when labels_idx and preds available
-    if labels_idx is not None and base_pred_idx is not None and cyclic_pred_idx is not None and probe2_pred_idx is not None:
+    if (
+        labels_idx is not None
+        and base_pred_idx is not None
+        and cyclic_pred_idx is not None
+        and swap_posterior_prob is not None
+        and swap_cand1_pred_idx is not None
+        and swap_cand2_pred_idx is not None
+    ):
         try:
-            _, _, preds_sc = _run_online_switch_cyclic_with_preds(
-                default_conf, base_pred_idx, cyclic_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids
+            _, _, preds_swap = _run_online_swap_gaussian_policy_with_preds(
+                default_conf,
+                swap_posterior_prob,
+                swap_cand1_pred_idx,
+                swap_cand2_pred_idx,
+                labels_idx,
+                k,
+                perc_value,
             )
-            _, _, preds_top2 = _run_online_top2flip_policy_with_preds(
-                default_conf, flip_trigger, base_pred_idx, cyclic_pred_idx, probe2_pred_idx, labels_idx, k, perc_value, 0, forced_cyclic_ids
-            )
-            _, _, preds_avg = _run_online_avggap_policy_with_preds(
-                default_conf, mean_conf, base_pred_idx, cyclic_pred_idx, probe2_pred_idx, labels_idx, k, perc_value, perc_value, 0, forced_cyclic_ids
-            )
-            curve_obj["switch_cyclic_recall_std"] = float(_recall_std(labels_idx, preds_sc, k))
-            curve_obj["ours_top2flip_recall_std"] = float(_recall_std(labels_idx, preds_top2, k))
-            curve_obj["ours_avggap_recall_std"] = float(_recall_std(labels_idx, preds_avg, k))
+            curve_obj[f"{SWAP_GAUSSIAN_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap, k))
             # Default: prefix->cyclic, postfix->base (debias_pride.py와 동일)
             default_pred_idx = (
                 [cyclic_pred_idx[i] if i in forced_cyclic_ids else base_pred_idx[i] for i in range(N)]
@@ -1789,8 +1812,6 @@ def _compute_curves_for_one_percentile(
     if full_enabled:
         curve_obj["always"]["full"] = {"cost": float(C_full), "acc": float(full_acc_always)}
         curve_obj["full"] = {"costs": [float(C_full)], "accuracies": [float(full_acc_always)]}
-        if full_enabled and len(full_correct_list) == N:
-            curve_obj["switch_full"] = {"costs": [float(switch_full_cost)], "accuracies": [float(switch_full_acc)]}
     return curve_obj
 
 
@@ -1894,21 +1915,12 @@ def main():
 
                     cobj = dict(cobj_base)
                     cobj["heuristic_points"] = [{
-                        "label": LEGACY_OURS_LABEL,
-                        "cost": float(ours_cost),
-                        "acc": float(ours_acc),
-                        "recall_std": float(ours_rstd),
-                        "n_base": int(800 + rng.integers(0, 50)),
-                        "n_probe2": int(150 + rng.integers(0, 50)),
-                        "n_cyclic": int(50 + rng.integers(0, 50)),
-                    }, {
                         "label": PRIMARY_OURS_LABEL,
                         "cost": float(ours_cost + 0.05),
                         "acc": float(np.clip(ours_acc + 0.01, 0.0, 1.0)),
                         "recall_std": float(np.clip(ours_rstd - 0.01, 0.0, 1.0)),
                         "n_base": int(780 + rng.integers(0, 50)),
-                        "n_probe2": int(170 + rng.integers(0, 50)),
-                        "n_cyclic": int(70 + rng.integers(0, 50)),
+                        "n_swap": int(170 + rng.integers(0, 50)),
                     }]
                     derived_records_by_p[float(p)] = [cobj]  # 1 "subject"
 
@@ -1930,19 +1942,6 @@ def main():
                         cobj_pr.setdefault("heuristic_points", []).append({
                             "label": LEGACY_OURS_LABEL, "th1_p": p, "cost": float(pride_cost),
                             "acc": float(pride_acc), "recall_std": float(pride_rstd),
-                            "n_base": 800, "n_probe2": 150, "n_cyclic": 50,
-                        })
-                        cobj_pr["heuristic_points"].append({
-                            "label": PRIMARY_OURS_LABEL, "th1_p": p, "cost": float(pride_cost + 0.05),
-                            "acc": float(np.clip(pride_acc + 0.01, 0.0, 1.0)), "recall_std": float(np.clip(pride_rstd - 0.01, 0.0, 1.0)),
-                            "n_base": 780, "n_probe2": 170, "n_cyclic": 70,
-                        })
-                        sqrt_cost = 1.0 + frac * 1.9 + float(rng.normal(0.0, 0.02))
-                        sqrt_acc = 0.53 + 0.19 * frac + float(rng.normal(0.0, 0.01))
-                        sqrt_rstd = 0.15 - 0.06 * frac + float(rng.normal(0.0, 0.006))
-                        cobj_pr["heuristic_points"].append({
-                            "label": "online_sqrt_all", "th1_p": p, "cost": float(sqrt_cost),
-                            "acc": float(np.clip(sqrt_acc, 0.0, 1.0)), "recall_std": float(np.clip(sqrt_rstd, 0.0, 1.0)),
                             "n_base": 800, "n_probe2": 150, "n_cyclic": 50,
                         })
                     derived_records_pride_by_alpha[alpha] = [cobj_pr]
@@ -2034,6 +2033,7 @@ def main():
         transition_records_ours_by_p: Dict[float, List[dict]] = {}
         sigma_analysis_baseline_records: List[dict] = []
         sigma_analysis_pride_by_alpha: Dict[float, List[dict]] = {}
+        rank_slot_std_lookup_cache: Dict[int, Dict[Tuple[int, str], float]] = {}
 
         def _make_transition_record_from_preds(base_correct, pred_idx, labels_idx, conf_arr, subject):
             """base_correct: List[bool], pred_idx: List[int], labels_idx: List[int], conf_arr: np.ndarray"""
@@ -2240,6 +2240,18 @@ def main():
                         full_corrects = 0
                         cyclic_total = 0
                         cyclic_corrects = 0
+                        if int(k) not in rank_slot_std_lookup_cache:
+                            rank_slot_std_lookup_cache[int(k)] = _load_rank_slot_std_lookup(
+                                getattr(args, "rank_slot_summary_json", None), int(k)
+                            )
+                        rank_slot_std_lookup = rank_slot_std_lookup_cache[int(k)]
+                        slot_labels = _slot_labels_for_k(int(k))
+
+                        swap_posterior_prob_list = []
+                        swap_cand1_pred_idx_list = []
+                        swap_cand2_pred_idx_list = []
+                        swap_cand1_correct_list = []
+                        swap_cand2_correct_list = []
 
                         for r in results:
                             if r.get('type') != 'result':
@@ -2281,6 +2293,49 @@ def main():
                             base_pred_idx_list.append(int(np.argmax(base_probs)))
                             corr_base = (pred_base == data['ideal'])
                             base_correct_list.append(corr_base)
+                            top_order_base = np.argsort(base_probs)[::-1]
+                            cand1_idx = int(top_order_base[0]) if top_order_base.size > 0 else 0
+                            cand2_idx = int(top_order_base[1]) if top_order_base.size > 1 else int(cand1_idx)
+                            swap_cand1_pred_idx_list.append(int(cand1_idx))
+                            swap_cand2_pred_idx_list.append(int(cand2_idx))
+                            swap_cand1_correct_list.append(int(cand1_idx) == int(option_ids.index(str(data['ideal']))))
+                            swap_cand2_correct_list.append(int(cand2_idx) == int(option_ids.index(str(data['ideal']))))
+
+                            swap_perm = list(range(k))
+                            swap_perm[cand1_idx], swap_perm[cand2_idx] = swap_perm[cand2_idx], swap_perm[cand1_idx]
+                            swap_probs = data.get("swap_top12_probs", None)
+                            if not isinstance(swap_probs, list):
+                                if full_enabled:
+                                    try:
+                                        swap_idx = perm_list.index(tuple(int(x) for x in swap_perm))
+                                        swap_probs = probs_seq_np[swap_idx].tolist()
+                                    except ValueError:
+                                        swap_probs = None
+                                if not isinstance(swap_probs, list):
+                                    raise ValueError(
+                                        f"Sample idx={data.get('idx')} missing swap_top12_probs; "
+                                        f"rerun eval_clm.py with updated cache generation or provide full permutations."
+                                    )
+                            swap_probs_np = np.asarray(swap_probs, dtype=np.float64)
+                            rank_order = np.argsort(np.asarray(agg_cyc, dtype=np.float64))[::-1].tolist()
+                            rank_map = {int(content_idx): int(pos + 1) for pos, content_idx in enumerate(rank_order)}
+                            rank1 = rank_map[int(cand1_idx)]
+                            rank2 = rank_map[int(cand2_idx)]
+                            slot1_base = str(slot_labels[int(cand1_idx)])
+                            slot1_swap = str(slot_labels[int(cand2_idx)])
+                            slot2_base = str(slot_labels[int(cand2_idx)])
+                            slot2_swap = str(slot_labels[int(cand1_idx)])
+                            p_swap = _gaussian_swap_posterior_prob(
+                                y1_base=float(base_probs[int(cand1_idx)]),
+                                y1_swap=float(swap_probs_np[int(cand2_idx)]),
+                                std1_base=float(rank_slot_std_lookup[(int(rank1), slot1_base)]),
+                                std1_swap=float(rank_slot_std_lookup[(int(rank1), slot1_swap)]),
+                                y2_base=float(base_probs[int(cand2_idx)]),
+                                y2_swap=float(swap_probs_np[int(cand1_idx)]),
+                                std2_base=float(rank_slot_std_lookup[(int(rank2), slot2_base)]),
+                                std2_swap=float(rank_slot_std_lookup[(int(rank2), slot2_swap)]),
+                            )
+                            swap_posterior_prob_list.append(float(p_swap))
                             base_results.append({
                                 'type': 'result',
                                 'data': {
@@ -2358,6 +2413,7 @@ def main():
                         mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
                         arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
                         arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
+                        arr_swap_posterior = np.asarray(swap_posterior_prob_list, dtype=np.float64)
                         cyclic_gap_mean = np.asarray(cyclic_gap_mean_list, dtype=np.float64)
                         cyclic_gap_std = np.asarray(cyclic_gap_std_list, dtype=np.float64)
                         sigma_analysis_baseline_records.append(
@@ -2443,37 +2499,61 @@ def main():
                                     probe2_correct=arr_probe2_correct, perc_value=perc, full_enabled=bool(full_enabled),
                                     labels_idx=labels_idx_for_curves, base_pred_idx=base_pred_idx_list,
                                     cyclic_pred_idx=cyclic_pred_idx_list, probe2_pred_idx=probe2_pred_idx_list,
+                                    swap_posterior_prob=arr_swap_posterior,
+                                    swap_cand1_correct=swap_cand1_correct_list,
+                                    swap_cand2_correct=swap_cand2_correct_list,
+                                    swap_cand1_pred_idx=swap_cand1_pred_idx_list,
+                                    swap_cand2_pred_idx=swap_cand2_pred_idx_list,
                                     full_pred_idx=full_pred_idx_list if full_enabled and len(full_pred_idx_list) == len(ideals) else None,
                                     cyclic_fractions=cyclic_fracs_run, run_seed_offset=run_idx_inner,
                                 )
 
                                 if cobj:
                                     by_perc_baseline[perc].append(cobj)
-                                    def _get_static_pt(th1_p, rule_func, label_key, marker_key):
-                                        c, a, th2p, st = _run_online_th1_quantile_th2_from_th1_rule_with_stats(
-                                            default_conf, mean_conf, base_correct_list, cyclic_correct_list,
-                                            arr_probe2_correct, k, th1_p, rule_func, None)
-                                        out = {'cost': c, 'acc': a, 'label': label_key, 'marker': marker_key, 'color': 'gray'}
+                                    if "heuristic_points" not in cobj:
+                                        c_swap, a_swap, st_swap = _run_online_swap_gaussian_policy_with_stats(
+                                            default_conf=default_conf,
+                                            swap_posterior_prob=arr_swap_posterior,
+                                            cand1_correct=swap_cand1_correct_list,
+                                            cand2_correct=swap_cand2_correct_list,
+                                            k=k,
+                                            th1_percent=perc,
+                                        )
+                                        hp_swap = {
+                                            "label": PRIMARY_OURS_LABEL,
+                                            "cost": float(c_swap),
+                                            "acc": float(a_swap),
+                                            "marker": "v",
+                                            "color": "gray",
+                                            "n_base": int(st_swap.get("n_base", 0)),
+                                            "n_swap": int(st_swap.get("n_swap", 0)),
+                                        }
                                         try:
-                                            _, _, _, preds = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
-                                                default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list, probe2_pred_idx_list,
-                                                labels_idx_for_curves, k, th1_p, rule_func, None)
-                                            out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
-                                            out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
+                                            _, _, preds_swap = _run_online_swap_gaussian_policy_with_preds(
+                                                default_conf,
+                                                arr_swap_posterior,
+                                                swap_cand1_pred_idx_list,
+                                                swap_cand2_pred_idx_list,
+                                                labels_idx_for_curves,
+                                                k,
+                                                perc,
+                                            )
+                                            hp_swap["recall_std"] = float(_recall_std(labels_idx_for_curves, preds_swap, k))
                                         except Exception:
                                             pass
-                                        return out
-                                    if "heuristic_points" not in cobj:
-                                        cobj["heuristic_points"] = [
-                                            _get_static_pt(perc, _rule_th1_half, LEGACY_OURS_LABEL, "*"),
-                                            _get_static_pt(perc, _rule_th1_sqrt2, PRIMARY_OURS_LABEL, "v"),
-                                        ]
+                                        cobj["heuristic_points"] = [hp_swap]
 
                                     # Ours (baseline) transition 기록
                                     try:
-                                        _, _, _, preds_ours = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
-                                            default_conf, mean_conf, base_pred_idx_list, cyclic_pred_idx_list,
-                                            probe2_pred_idx_list, labels_idx_for_curves, k, perc, _rule_th1_sqrt2, None)
+                                        _, _, preds_ours = _run_online_swap_gaussian_policy_with_preds(
+                                            default_conf,
+                                            arr_swap_posterior,
+                                            swap_cand1_pred_idx_list,
+                                            swap_cand2_pred_idx_list,
+                                            labels_idx_for_curves,
+                                            k,
+                                            perc,
+                                        )
                                         rec = _make_transition_record_from_preds(
                                             base_correct_list, preds_ours, labels_idx_for_curves, default_conf, subject)
                                         transition_records_ours_by_p.setdefault(perc, []).append(rec)
@@ -2628,24 +2708,8 @@ def main():
                                         except Exception:
                                             pass
                                         return out
-                                    def _get_static_pt_online_sqrt(th1_p):
-                                        c, a, th2p, st = _run_online_sqrt_policy_with_stats(
-                                            default_conf_pr, mean_conf_pr, bc_use, cc_use,
-                                            arr_probe2_correct_pr, k, th1_p, prefix_ids_set)
-                                        out = {'cost': c, 'acc': a, 'label': 'online_sqrt_all', 'th1_p': th1_p, 'marker': 'D', 'color': 'gray'}
-                                        try:
-                                            _, _, preds = _run_online_sqrt_policy_with_preds(
-                                                default_conf_pr, mean_conf_pr, bp_use, cp_use,
-                                                probe2_pred_idx_list_pr, labels_idx_for_curves, k, th1_p, prefix_ids_set)
-                                            out['recall_std'] = float(_recall_std(labels_idx_for_curves, preds, k))
-                                            out['n_base'], out['n_probe2'], out['n_cyclic'] = st['n_base'], st['n_probe2'], st['n_cyclic']
-                                        except Exception:
-                                            pass
-                                        return out
                                     pts_th12 = [_get_static_pt_pride(float(th1), _rule_th1_half, LEGACY_OURS_LABEL, "*") for th1 in ours_th1_list]
-                                    pts_var = [_get_static_pt_pride(float(th1), _rule_th1_sqrt2, PRIMARY_OURS_LABEL, "v") for th1 in ours_th1_list]
-                                    pts_sqrt = [_get_static_pt_online_sqrt(float(th1)) for th1 in ours_th1_list]
-                                    cobj_pr["heuristic_points"] = pts_th12 + pts_var + pts_sqrt
+                                    cobj_pr["heuristic_points"] = pts_th12
                                     by_pride_alpha[pride_alpha].append(cobj_pr)
 
                                 for ours_th1 in ours_th1_list:
@@ -2664,7 +2728,7 @@ def main():
                                     try:
                                         _, _, _, preds_op = _run_online_th1_quantile_th2_from_th1_rule_with_preds(
                                             default_conf_pr, mean_conf_pr, base_pred_idx_list_pr, cyclic_pred_idx_list_pr,
-                                            probe2_pred_idx_list_pr, labels_idx_for_curves, k, ours_th1, _rule_th1_sqrt2, prefix_ids_set)
+                                            probe2_pred_idx_list_pr, labels_idx_for_curves, k, ours_th1, _rule_th1_half, prefix_ids_set)
                                         rec_op = _make_transition_record_from_preds(
                                             base_correct_list_pr, preds_op, labels_idx_for_curves, default_conf_pr, subject)
                                         if float(pride_alpha) == 2.0:
@@ -2972,7 +3036,7 @@ def main():
                 return mean_c, mean_a, mean_r, std_c, std_a, std_r
 
             def get_heur_stats(cobjs, label=PRIMARY_OURS_LABEL):
-                costs, accs, rstds, nb, np2, nc = [], [], [], [], [], []
+                costs, accs, rstds, nb, naux, nc = [], [], [], [], [], []
                 for c in cobjs:
                     hps = {str(h.get("label")): h for h in (c.get("heuristic_points") or []) if isinstance(h, dict)}
                     if label in hps:
@@ -2984,8 +3048,10 @@ def main():
                             rstds.append(h["recall_std"])
                         if "n_base" in h:
                             nb.append(h["n_base"])
-                        if "n_probe2" in h:
-                            np2.append(h["n_probe2"])
+                        if "n_swap" in h:
+                            naux.append(h["n_swap"])
+                        elif "n_probe2" in h:
+                            naux.append(h["n_probe2"])
                         if "n_cyclic" in h:
                             nc.append(h["n_cyclic"])
                 if not accs:
@@ -2994,11 +3060,11 @@ def main():
                 mean_a, std_a = _macro_mean_std_over_runs(accs, n_subjects, n_runs)
                 mean_r, std_r = _macro_mean_std_over_runs(rstds, n_subjects, n_runs)
                 mean_nb = float(np.mean(nb)) if nb else 0.0
-                mean_np2 = float(np.mean(np2)) if np2 else 0.0
+                mean_np2 = float(np.mean(naux)) if naux else 0.0
                 mean_nc = float(np.mean(nc)) if nc else 0.0
                 return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
 
-            def get_heur_stats_by_th1_p(cobjs, th1_p, label_filter="online_sqrt_all"):
+            def get_heur_stats_by_th1_p(cobjs, th1_p, label_filter=LEGACY_OURS_LABEL):
                 costs, accs, rstds, nb, np2, nc = [], [], [], [], [], []
                 for c in cobjs:
                     for h in (c.get("heuristic_points") or []):
@@ -3044,31 +3110,15 @@ def main():
                 a_str = f"{float(alpha):g}"
                 logger.info(f"default_pride_α{a_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
 
-            # 2. ours + pride (per alpha): legacy th1/2, primary variance sqrt2, and online sqrt
-            logger.info("---- ours + pride (th1/2 legacy) ----")
+            # 2. ours + pride (legacy heuristic comparison baseline)
+            logger.info("---- ours + pride ----")
             for alpha in pride_alphas:
                 cobjs = derived_records_pride_by_alpha[alpha]
                 for p in pride_fracs:
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, LEGACY_OURS_LABEL)
                     a_str = f"{float(alpha):g}"
                     p_str = f"{float(p):g}"
-                    logger.info(f"ours_pride_th12_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
-            logger.info(f"---- ours + pride ({PRIMARY_OURS_LABEL}) ----")
-            for alpha in pride_alphas:
-                cobjs = derived_records_pride_by_alpha[alpha]
-                for p in pride_fracs:
-                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, PRIMARY_OURS_LABEL)
-                    a_str = f"{float(alpha):g}"
-                    p_str = f"{float(p):g}"
-                    logger.info(f"ours_pride_var_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
-            logger.info("---- ours + pride (Online Sqrt) ----")
-            for alpha in pride_alphas:
-                cobjs = derived_records_pride_by_alpha[alpha]
-                for p in pride_fracs:
-                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(cobjs, p, "online_sqrt_all")
-                    a_str = f"{float(alpha):g}"
-                    p_str = f"{float(p):g}"
-                    logger.info(f"ours_pride_sqrt_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                    logger.info(f"ours_pride_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 3. ours
             logger.info("---- ours ----")
@@ -3076,7 +3126,7 @@ def main():
                 if float(p) in derived_records_by_p:
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], PRIMARY_OURS_LABEL)
                     p_str = f"{float(p):g}"
-                    logger.info(f"ours_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                    logger.info(f"ours_swap_gaussian_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 4. cyclic
             logger.info("---- cyclic ----")

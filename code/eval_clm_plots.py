@@ -11,7 +11,8 @@ from utils import _purple
 
 logger = logging.getLogger(__name__)
 
-PRIMARY_OURS_LABEL = "th1/sqrt2"
+PRIMARY_OURS_LABEL = "swap_gaussian"
+LEGACY_OURS_PRIDE_LABEL = "th1/2"
 
 
 def _plot_three_curves_acc_recall_std(
@@ -27,7 +28,8 @@ def _plot_three_curves_acc_recall_std(
     wandb_run: Any = None,
 ):
     """
-    Three curves: (1) Cyclic (no PRIDE), (2) Default+PRIDE, (3) OURS (th1/sqrt2, no PRIDE).
+    Three curves: (1) Cyclic, (2) PriDe, (3) Ours (swap Gaussian), plus
+    the companion Ours vs Ours+PriDe comparison panels.
     X=Cost, Y=Accuracy or Recall_std. Fractions configurable via args.
     """
     if not derived_records_by_p:
@@ -101,7 +103,7 @@ def _plot_three_curves_acc_recall_std(
             rstd_stds.append(float(np.nanstd(rl)) if len(rl) > 1 else 0.0)
         return costs, accs, rstds, acc_stds, rstd_stds
 
-    def _agg_heur_by_th1_p(cobjs_list, th1_list, label_filter="online_sqrt_all"):
+    def _agg_heur_by_th1_p(cobjs_list, th1_list, label_filter=LEGACY_OURS_PRIDE_LABEL):
         costs, accs, rstds, acc_stds, rstd_stds = [], [], [], [], []
         for p in th1_list:
             cl, al, rl = [], [], []
@@ -140,9 +142,9 @@ def _plot_three_curves_acc_recall_std(
     if derived_records_pride_by_alpha:
         alpha_ours = pride_prefix_list[0] if pride_prefix_list else 10
         cobjs_op = derived_records_pride_by_alpha.get(alpha_ours, [])
-        cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, PRIMARY_OURS_LABEL) if cobjs_op else _def5
+        cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, LEGACY_OURS_PRIDE_LABEL) if cobjs_op else _def5
     else:
-        cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur(derived_records_pride_by_p, PRIMARY_OURS_LABEL, pride_ours_fractions) if derived_records_pride_by_p else _def5
+        cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur(derived_records_pride_by_p, LEGACY_OURS_PRIDE_LABEL, pride_ours_fractions) if derived_records_pride_by_p else _def5
 
     default_acc = float(acc_cyc[0]) if acc_cyc and np.isfinite(acc_cyc[0]) else float("nan")
     default_recall_std = float(rstd_cyc[0]) if rstd_cyc and np.isfinite(rstd_cyc[0]) else float("nan")
@@ -212,7 +214,7 @@ def _plot_three_curves_acc_recall_std(
 
     fig3, ax3 = plt.subplots(figsize=(10, 6.5), dpi=160)
     _plot_curve(ax3, cost_ours, delta_acc_ours, "^", color_ours, "-.", "Ours")
-    _plot_curve(ax3, cost_ours_pride, delta_acc_ours_pride, "D", color_pride, "--", "Ours (with PriDe)")
+    _plot_curve(ax3, cost_ours_pride, delta_acc_ours_pride, "D", color_pride, "--", "Ours+PriDe")
     ax3.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax3.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax3.set_ylabel("Δ Accuracy (%)", fontsize=11)
@@ -233,7 +235,7 @@ def _plot_three_curves_acc_recall_std(
 
     fig4, ax4 = plt.subplots(figsize=(10, 6.5), dpi=160)
     _plot_curve(ax4, cost_ours, delta_rstd_ours, "^", color_ours, "-.", "Ours")
-    _plot_curve(ax4, cost_ours_pride, delta_rstd_ours_pride, "D", color_pride, "--", "Ours (with PriDe)")
+    _plot_curve(ax4, cost_ours_pride, delta_rstd_ours_pride, "D", color_pride, "--", "Ours+PriDe")
     ax4.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax4.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax4.set_ylabel("Δ Recall std", fontsize=11)
@@ -263,7 +265,7 @@ def _plot_three_curves_acc_recall_std(
                 if not cobjs:
                     continue
                 entry = {}
-                for variant in ("th1/2", PRIMARY_OURS_LABEL, "online_sqrt_all"):
+                for variant in (LEGACY_OURS_PRIDE_LABEL,):
                     co, ac, rs, asd, rsd = agg_fn(cobjs, th1_fracs, variant)
                     entry[variant] = {
                         "p": [float(x) for x in th1_fracs],

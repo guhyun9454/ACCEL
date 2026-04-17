@@ -102,6 +102,8 @@ def parse_arguments():
                         help="OURS th1 curve (x-axis). Default+PRIDE도 동일 p 사용.")
     parser.add_argument("--plot_pride_prefix_fractions", type=str, default="0.5,1,2,5,10,20,30,40,50,60,70,80,90,100",
                         help="Ours+PRIDE에서 PriDe prefix(alpha) 값. 선택 가능한 α 목록.")
+    parser.add_argument("--rank_slot_summary_json", type=str, default=None,
+                        help="Path to multi_model_rank_slot_delta_summary.json used for swap-gaussian slot noise std lookup.")
 
     parser.add_argument("--verbose", action="store_true",
                         help="Print verbose logs (extra summaries).")
@@ -272,27 +274,34 @@ def prepare_eval(args, eval_name):
         full_permutation_disabled = (setting == 'full' and k_opts >= 5) or bool(getattr(args, 'skip_full', False))
 
         if setting in ['perm'] or (setting == 'full' and not full_permutation_disabled):
+            permuted_indices = list(sorted(permutations(range(len(option_ids_header)))))
             inputs = df.apply(lambda x: [
                 [
                     sys_msg.format(subject.replace('_', ' ')),
-                    create_user_prompt(x["Question"], permuted_options),
-                ] for permuted_options in permute_options([x[e] for e in option_ids_header])
+                    create_user_prompt(x["Question"], [x[e] for e in [option_ids_header[idx] for idx in perm_tup]]),
+                ] for perm_tup in permuted_indices
             ], axis=1).to_list()
+            perm_tuples = [list(permuted_indices) for _ in range(len(df))]
         elif setting in ['cyclic'] or (setting == 'full' and full_permutation_disabled):
+            cyc_indices = [tuple((i + s) % k_opts for i in range(k_opts)) for s in range(k_opts)]
             inputs = df.apply(lambda x: [
                 [
                     sys_msg.format(subject.replace('_', ' ')),
-                    create_user_prompt(x["Question"], cycled_options),
-                ] for cycled_options in cycle_options([x[e] for e in option_ids_header])
+                    create_user_prompt(x["Question"], [x[e] for e in [option_ids_header[idx] for idx in perm_tup]]),
+                ] for perm_tup in cyc_indices
             ], axis=1).to_list()
+            perm_tuples = [list(cyc_indices) for _ in range(len(df))]
         else:
             inputs = df.apply(lambda x: [
                 sys_msg.format(subject.replace('_', ' ')),
                 create_user_prompt(x["Question"], [x[e] for e in option_ids_header]),
             ], axis=1).to_list()
+            perm_tuples = None
         options = df.apply(lambda x: [str(x[e]) for e in option_ids_header], axis=1).to_list()
         ideals = df.apply(lambda x: option_ids[option_ids_header.index(x["Answer"])], axis=1).to_list()
-        return list(zip(inputs, options, ideals))
+        if perm_tuples is None:
+            return list(zip(inputs, options, ideals))
+        return list(zip(inputs, options, ideals, perm_tuples))
     
     
 
@@ -434,11 +443,22 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
     )
 
     def eval_fn(sample, rng: random.Random):
-        idx, (probing_inputs, options, ideal) = sample
+        idx, payload = sample
+        if len(payload) == 4:
+            probing_inputs, options, ideal, perm_tuples = payload
+        else:
+            probing_inputs, options, ideal = payload
+            perm_tuples = None
         # Allow either cyclic count (= #options) or full permutation count (= factorial(#options))
         num_options = len(option_ids)
         expected_counts = {num_options, math.factorial(num_options)}
         assert len(probing_inputs) in expected_counts
+        if perm_tuples is None:
+            if len(probing_inputs) == num_options:
+                perm_tuples = [tuple((i + s) % num_options for i in range(num_options)) for s in range(num_options)]
+            else:
+                perm_tuples = list(sorted(permutations(range(num_options))))
+        perm_tuples = [tuple(int(x) for x in p) for p in perm_tuples]
 
         input_texts = []
         for probing_input in probing_inputs:
@@ -484,6 +504,61 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
             probs = probs.reshape(input_ids.size(0), 2, len(option_ids)).sum(axis=1)
             all_probs.extend(probs.tolist())
 
+        identity_perm = tuple(range(num_options))
+        try:
+            identity_idx = perm_tuples.index(identity_perm)
+        except ValueError:
+            identity_idx = 0
+        base_probs = np.asarray(all_probs[identity_idx], dtype=np.float64)
+        top_order = np.argsort(base_probs)[::-1]
+        top1_slot = int(top_order[0]) if top_order.size > 0 else 0
+        top2_slot = int(top_order[1]) if top_order.size > 1 else int(top1_slot)
+        swap_perm = list(identity_perm)
+        swap_perm[top1_slot], swap_perm[top2_slot] = swap_perm[top2_slot], swap_perm[top1_slot]
+        swap_prompt = None
+        swap_probs = None
+        swap_sampled = None
+        if top1_slot != top2_slot:
+            swap_options = [options[idx] for idx in swap_perm]
+            if "Question: " in eval_sample and "\nOptions:\n" in eval_sample:
+                question_text = eval_sample.split("Question: ", 1)[1].split("\nOptions:\n", 1)[0]
+            else:
+                question_text = eval_sample
+            swap_prompt = [
+                sys_msg,
+                create_user_prompt(question_text, swap_options),
+            ]
+            swap_input_text = sys_msg + '\n\n'
+            if num_few_shot > 0:
+                for s in few_shot_samples[:num_few_shot]:
+                    swap_input_text += s + '\n\n'
+            swap_input_text += swap_prompt[1]
+            if not bpe_has_space_prefix:
+                swap_input_text += ' '
+            swap_input_ids = toker(swap_input_text, truncation=False, return_tensors="pt").input_ids.to(model.device)
+            swap_input_ids = swap_input_ids[..., -1536:]
+            with torch.no_grad():
+                if is_seq2seq:
+                    dec_ids = torch.full(
+                        (swap_input_ids.size(0), 1),
+                        decoder_start,
+                        dtype=torch.long,
+                        device=model.device,
+                    )
+                    swap_logits = model(input_ids=swap_input_ids, decoder_input_ids=dec_ids).logits[:, -1]
+                else:
+                    swap_logits = model(input_ids=swap_input_ids).logits[:, -1]
+            option_indices = (
+                [toker(f": {e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
+                + [toker(f":{e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
+            )
+            swap_probs_np = F.softmax(
+                swap_logits[..., option_indices], dim=-1,
+            ).detach().to(torch.float32).cpu().numpy()
+            swap_probs_np = swap_probs_np.reshape(swap_input_ids.size(0), 2, len(option_ids)).sum(axis=1)[0]
+            swap_probs = swap_probs_np.tolist()
+            swap_sampled = option_ids[int(np.argmax(swap_probs_np))]
+
         result = {
             'type': 'result',
             'data': {
@@ -492,9 +567,14 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
                 'prompts': input_texts,
                 'options': options,
                 'probs': all_probs,
+                'perm_tuples': [list(map(int, p)) for p in perm_tuples],
+                'swap_top12_perm': list(map(int, swap_perm)),
+                'swap_top12_slots': [int(top1_slot), int(top2_slot)],
+                'swap_top12_prompt': swap_prompt[1] if swap_prompt is not None else None,
+                'swap_top12_probs': swap_probs,
+                'swap_top12_sampled': swap_sampled,
                 'ideal': ideal,
             },
         }
         return result
     return eval_fn
-

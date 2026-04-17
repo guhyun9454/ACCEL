@@ -1,6 +1,7 @@
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import math
 
 
 def _recall_std(labels: List[int], preds: List[int], k: int) -> float:
@@ -24,6 +25,135 @@ def _recall_std(labels: List[int], preds: List[int], k: int) -> float:
     if len(recalls) == 0:
         return float("nan")
     return float(np.std(np.asarray(recalls, dtype=np.float64)))
+
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
+
+
+def _gaussian_swap_posterior_prob(
+    y1_base: float,
+    y1_swap: float,
+    std1_base: float,
+    std1_swap: float,
+    y2_base: float,
+    y2_swap: float,
+    std2_base: float,
+    std2_swap: float,
+) -> float:
+    eps = 1e-12
+    v11 = max(float(std1_base) ** 2, eps)
+    v12 = max(float(std1_swap) ** 2, eps)
+    v21 = max(float(std2_base) ** 2, eps)
+    v22 = max(float(std2_swap) ** 2, eps)
+
+    prec1 = (1.0 / v11) + (1.0 / v12)
+    prec2 = (1.0 / v21) + (1.0 / v22)
+    mu1 = ((float(y1_base) / v11) + (float(y1_swap) / v12)) / prec1
+    mu2 = ((float(y2_base) / v21) + (float(y2_swap) / v22)) / prec2
+    var1 = 1.0 / prec1
+    var2 = 1.0 / prec2
+    z_std = math.sqrt(max(var1 + var2, eps))
+    return float(_normal_cdf((mu1 - mu2) / z_std))
+
+
+def _run_online_swap_gaussian_policy_with_preds(
+    default_conf: np.ndarray,
+    swap_posterior_prob: np.ndarray,
+    cand1_pred_idx: List[int],
+    cand2_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+) -> Tuple[float, float, List[int]]:
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), []
+    dc = np.asarray(default_conf, dtype=np.float64)
+    pp = np.asarray(swap_posterior_prob, dtype=np.float64)
+    q = float(th1_percent) / 100.0
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    past_dc: List[float] = []
+    for i in range(N):
+        gap_i = float(dc[i])
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        if gap_i >= th1_val:
+            pred_i = int(cand1_pred_idx[i])
+            c_step = 1.0
+        else:
+            pred_i = int(cand1_pred_idx[i]) if float(pp[i]) >= 0.5 else int(cand2_pred_idx[i])
+            c_step = 2.0
+        preds.append(pred_i)
+        total_cost += float(c_step)
+        corrects += 1 if int(pred_i) == int(labels_idx[i]) else 0
+        past_dc.append(gap_i)
+    return total_cost / float(N), corrects / float(N), preds
+
+
+def _run_online_swap_gaussian_policy(
+    default_conf: np.ndarray,
+    swap_posterior_prob: np.ndarray,
+    cand1_correct: List[bool],
+    cand2_correct: List[bool],
+    k: int,
+    th1_percent: float,
+) -> Tuple[float, float]:
+    N = len(cand1_correct)
+    if N == 0:
+        return float("nan"), float("nan")
+    dc = np.asarray(default_conf, dtype=np.float64)
+    pp = np.asarray(swap_posterior_prob, dtype=np.float64)
+    q = float(th1_percent) / 100.0
+    total_cost = 0.0
+    corrects = 0
+    past_dc: List[float] = []
+    for i in range(N):
+        gap_i = float(dc[i])
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        if gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if bool(cand1_correct[i]) else 0
+        else:
+            total_cost += 2.0
+            corrects += 1 if (bool(cand1_correct[i]) if float(pp[i]) >= 0.5 else bool(cand2_correct[i])) else 0
+        past_dc.append(gap_i)
+    return total_cost / float(N), corrects / float(N)
+
+
+def _run_online_swap_gaussian_policy_with_stats(
+    default_conf: np.ndarray,
+    swap_posterior_prob: np.ndarray,
+    cand1_correct: List[bool],
+    cand2_correct: List[bool],
+    k: int,
+    th1_percent: float,
+) -> Tuple[float, float, Dict[str, int]]:
+    N = len(cand1_correct)
+    if N == 0:
+        return float("nan"), float("nan"), {"n_base": 0, "n_swap": 0}
+    dc = np.asarray(default_conf, dtype=np.float64)
+    pp = np.asarray(swap_posterior_prob, dtype=np.float64)
+    q = float(th1_percent) / 100.0
+    total_cost = 0.0
+    corrects = 0
+    n_base = 0
+    n_swap = 0
+    past_dc: List[float] = []
+    for i in range(N):
+        gap_i = float(dc[i])
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        if gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if bool(cand1_correct[i]) else 0
+            n_base += 1
+        else:
+            total_cost += 2.0
+            corrects += 1 if (bool(cand1_correct[i]) if float(pp[i]) >= 0.5 else bool(cand2_correct[i])) else 0
+            n_swap += 1
+        past_dc.append(gap_i)
+    return total_cost / float(N), corrects / float(N), {"n_base": int(n_base), "n_swap": int(n_swap)}
 
 
 def _run_online_avggap_policy_with_preds(
