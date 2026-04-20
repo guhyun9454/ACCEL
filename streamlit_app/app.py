@@ -45,31 +45,17 @@ CURVE_DEFS = {
     },
     "ours": {
         "x_key": "p",
-        "label": "Ours (th1/sqrt2, no PriDe)",
+        "label": "Ours (swap Gaussian)",
         "color": _PAL["blue"],
         "linestyle": "-.",
         "marker": "^",
     },
-    "ours_pride_primary": {
-        "x_key": "p",
-        "label": "Ours+PriDe (th1/sqrt2)",
-        "color": _PAL["reddish_purple"],
-        "linestyle": "-",
-        "marker": "D",
-    },
-    "ours_pride_th1_2": {
+    "ours_pride": {
         "x_key": "p",
         "label": "Ours+PriDe (th1/2 legacy)",
         "color": _PAL["vermillion"],
         "linestyle": "--",
         "marker": "*",
-    },
-    "ours_pride_online_sqrt": {
-        "x_key": "p",
-        "label": "Ours+PriDe (Online Sqrt)",
-        "color": _PAL["sky"],
-        "linestyle": "-.",
-        "marker": "D",
     },
 }
 
@@ -225,14 +211,14 @@ def _curve_series_from_payload(
     """
     Returns: x(p or fraction) -> {'cost': float, 'y': float}
     y_key: 'acc'|'recall_std'|'delta_acc'|'delta_recall_std'
-    ours_pride_alpha: for ours_pride*, which PriDe α (10,20,...,100). None = 첫 번째.
-    ours_pride_variant: 'th1/2'|'th1/sqrt2'|'online_sqrt_all' for ours_pride_* curves.
+    ours_pride_alpha: for ours_pride, which PriDe α (10,20,...,100). None = 첫 번째.
+    ours_pride_variant: legacy compatibility hook. Defaults to 'th1/2'.
     """
     if not isinstance(payload, dict):
         return {}
     curves = payload.get("curves", {}) or {}
     curve = curves.get(curve_key, {}) or {}
-    if curve_key in ("ours_pride_primary", "ours_pride_th1_2", "ours_pride_online_sqrt"):
+    if curve_key == "ours_pride":
         ours_pride_data = curves.get("ours_pride", {}) or {}
         by_alpha = ours_pride_data.get("by_alpha") or {}
         if by_alpha:
@@ -240,23 +226,11 @@ def _curve_series_from_payload(
             if alpha_key and alpha_key in by_alpha:
                 alpha_curves = by_alpha[alpha_key]
                 if isinstance(alpha_curves, dict):
-                    if ours_pride_variant is not None:
-                        variant = ours_pride_variant
-                    elif curve_key == "ours_pride_online_sqrt":
-                        variant = "online_sqrt_all"
-                    elif curve_key == "ours_pride_primary":
-                        variant = "th1/sqrt2"
-                    else:
-                        variant = "th1/2"
+                    variant = ours_pride_variant or "th1/2"
                     if variant in alpha_curves:
                         curve = alpha_curves[variant]
                     else:
-                        curve = (
-                            alpha_curves.get("th1/sqrt2")
-                            or alpha_curves.get("online_sqrt_all")
-                            or alpha_curves.get("th1/2")
-                            or alpha_curves
-                        )
+                        curve = alpha_curves.get("th1/2") or alpha_curves
                 else:
                     curve = alpha_curves
     x_key = CURVE_DEFS.get(curve_key, {}).get("x_key") or "p"
@@ -400,7 +374,7 @@ def _plot_groups(
     max_by = max_pct_by_curve or {}
     min_by = min_pct_by_curve or {}
 
-    _pride_keys = ("ours_pride_primary", "ours_pride_th1_2", "ours_pride_online_sqrt")
+    _pride_keys = ("ours_pride",)
     if plot_individual:
         for gname, payloads in group_payloads.items():
             if not payloads:
@@ -422,18 +396,9 @@ def _plot_groups(
                         if x.size == 0:
                             continue
                         cd = CURVE_DEFS[ck]
-                        base_offset = {"ours_pride_primary": 0, "ours_pride_th1_2": len(alphas), "ours_pride_online_sqrt": 2 * len(alphas)}
-                        color_idx = base_offset.get(ck, 0) + i
+                        color_idx = i
                         line_color = cd["color"] if len(alphas) == 1 else ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
                         base_lab = str(ours_pride_base_label or "Ours").strip()
-                        suffix_map = {
-                            "ours_pride_primary": "th1/sqrt2",
-                            "ours_pride_th1_2": "th1/2",
-                            "ours_pride_online_sqrt": "Online Sqrt",
-                        }
-                        suffix = suffix_map.get(ck)
-                        if suffix:
-                            base_lab = f"{base_lab} {suffix}"
                         if _show_alpha:
                             base_lab = f"{base_lab} (α={alpha})"
                         label = f"{gname} • {base_lab}" if (len(group_payloads) > 1 and (gname or "").strip()) else base_lab
@@ -486,18 +451,9 @@ def _plot_groups(
                     if x.size == 0:
                         continue
                     cd = CURVE_DEFS[ck]
-                    base_offset = {"ours_pride_primary": 0, "ours_pride_th1_2": len(alphas), "ours_pride_online_sqrt": 2 * len(alphas)}
-                    color_idx = base_offset.get(ck, 0) + i
+                    color_idx = i
                     line_color = cd["color"] if len(alphas) == 1 else ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
                     base_lab = str(ours_pride_base_label or "Ours").strip()
-                    suffix_map = {
-                        "ours_pride_primary": "th1/sqrt2",
-                        "ours_pride_th1_2": "th1/2",
-                        "ours_pride_online_sqrt": "Online Sqrt",
-                    }
-                    suffix = suffix_map.get(ck)
-                    if suffix:
-                        base_lab = f"{base_lab} {suffix}"
                     if _show_alpha:
                         base_lab = f"{base_lab} (α={alpha})"
                     if show_overall_band and ystd.size == y.size:
@@ -827,20 +783,20 @@ for rp in selected_runs:
     group_payloads[str(prefix)] = [payload]
 
 st.subheader("그래프 옵션")
-st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 현재 primary는 `ours`와 `ours_pride_primary`의 `th1/sqrt2`입니다.")
+st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 현재 메인 곡선은 `ours`(swap Gaussian)와 `ours_pride`(legacy th1/2 baseline)입니다.")
 
 curve_keys = st.multiselect(
     "그릴 곡선",
     options=list(CURVE_DEFS.keys()),
-    default=["cyclic", "default_pride", "ours", "ours_pride_primary"],
-    help="주로 `ours`와 `ours_pride_primary`를 보면 됩니다. `th1/2`는 legacy 비교용, `Online Sqrt`는 별도 adaptive heuristic입니다.",
+    default=["cyclic", "default_pride", "ours", "ours_pride"],
+    help="주로 `ours`와 `ours_pride`를 보면 됩니다.",
 )
 
 cyclic_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 pride_ours_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
 st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
-col_p1, col_p2, col_p3, col_p4, col_p5, col_p6 = st.columns(6)
+col_p1, col_p2, col_p3, col_p4 = st.columns(4)
 with col_p1:
     max_pct_cyclic = st.selectbox(
         "Cyclic 상한",
@@ -866,32 +822,16 @@ with col_p3:
         key="max_ours",
     )
 with col_p4:
-    max_pct_ours_pride_primary = st.selectbox(
-        "Ours+PRIDE sqrt2 상한",
+    max_pct_ours_pride = st.selectbox(
+        "Ours+PriDe 상한",
         options=pride_ours_options,
         index=len(pride_ours_options) - 1,
         format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
-        key="max_ours_pride_primary",
-    )
-with col_p5:
-    max_pct_ours_pride_th1_2 = st.selectbox(
-        "Ours+PRIDE th1/2 상한",
-        options=pride_ours_options,
-        index=len(pride_ours_options) - 1,
-        format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
-        key="max_ours_pride_th12",
-    )
-with col_p6:
-    max_pct_ours_pride_online_sqrt = st.selectbox(
-        "Ours+PRIDE Online Sqrt 상한",
-        options=pride_ours_options,
-        index=len(pride_ours_options) - 1,
-        format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
-        key="max_ours_pride_sqrt",
+        key="max_ours_pride",
     )
 
 st.caption("곡선별 퍼센타일 하한 (선택한 % 이상만 표시)")
-col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
+col_m1, col_m2, col_m3, col_m4 = st.columns(4)
 with col_m1:
     min_pct_cyclic = st.selectbox(
         "Cyclic 하한",
@@ -917,28 +857,12 @@ with col_m3:
         key="min_ours",
     )
 with col_m4:
-    min_pct_ours_pride_primary = st.selectbox(
-        "Ours+PRIDE sqrt2 하한",
+    min_pct_ours_pride = st.selectbox(
+        "Ours+PriDe 하한",
         options=pride_ours_options,
         index=0,
         format_func=lambda x: f"{x}%",
-        key="min_ours_pride_primary",
-    )
-with col_m5:
-    min_pct_ours_pride_th1_2 = st.selectbox(
-        "Ours+PRIDE th1/2 하한",
-        options=pride_ours_options,
-        index=0,
-        format_func=lambda x: f"{x}%",
-        key="min_ours_pride_th12",
-    )
-with col_m6:
-    min_pct_ours_pride_online_sqrt = st.selectbox(
-        "Ours+PRIDE Online Sqrt 하한",
-        options=pride_ours_options,
-        index=0,
-        format_func=lambda x: f"{x}%",
-        key="min_ours_pride_sqrt",
+        key="min_ours_pride",
     )
 
 pride_alpha_options = [0.5, 1.0, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
@@ -955,17 +879,13 @@ max_pct_by_curve = {
     "cyclic": float(max_pct_cyclic),
     "default_pride": float(max_pct_pride),
     "ours": float(max_pct_ours),
-    "ours_pride_primary": float(max_pct_ours_pride_primary),
-    "ours_pride_th1_2": float(max_pct_ours_pride_th1_2),
-    "ours_pride_online_sqrt": float(max_pct_ours_pride_online_sqrt),
+    "ours_pride": float(max_pct_ours_pride),
 }
 min_pct_by_curve = {
     "cyclic": float(min_pct_cyclic),
     "default_pride": float(min_pct_pride),
     "ours": float(min_pct_ours),
-    "ours_pride_primary": float(min_pct_ours_pride_primary),
-    "ours_pride_th1_2": float(min_pct_ours_pride_th1_2),
-    "ours_pride_online_sqrt": float(min_pct_ours_pride_online_sqrt),
+    "ours_pride": float(min_pct_ours_pride),
 }
 
 overall_mode = st.radio(
@@ -999,9 +919,7 @@ curve_label_overrides = {
     "cyclic": lab_cyclic,
     "default_pride": lab_pride,
     "ours": lab_ours,
-    "ours_pride_primary": lab_ours_pride,
-    "ours_pride_th1_2": lab_ours_pride,
-    "ours_pride_online_sqrt": lab_ours_pride,
+    "ours_pride": lab_ours_pride,
 }
 
 show_overall_band = st.checkbox(
