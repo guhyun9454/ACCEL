@@ -442,6 +442,29 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
         != toker(":A", add_special_tokens=False).input_ids[-1]
     )
 
+    def _rebuild_user_prompt_like(eval_sample_text: str, question_text: str, reordered_options: List[str]) -> str:
+        text = str(eval_sample_text or "")
+        use_option_labels = True
+        if "\nOptions:\n" in text:
+            try:
+                options_block = text.split("\nOptions:\n", 1)[1].split("\nAnswer:", 1)[0]
+                option_lines = [ln.strip() for ln in options_block.splitlines() if ln.strip()]
+                if option_lines:
+                    use_option_labels = all(
+                        any(ln.startswith(f"{oid}.") for oid in option_ids)
+                        for ln in option_lines[: min(len(option_ids), len(option_lines))]
+                    )
+            except Exception:
+                use_option_labels = True
+        if use_option_labels:
+            options_text = "\n".join(
+                f"{option_id}. {answer}".strip()
+                for option_id, answer in zip(option_ids, reordered_options)
+            )
+        else:
+            options_text = "\n".join(str(answer).strip() for answer in reordered_options)
+        return f"Question: {str(question_text).strip()}\nOptions:\n{options_text}\nAnswer:"
+
     def eval_fn(sample, rng: random.Random):
         idx, payload = sample
         if len(payload) == 4:
@@ -526,7 +549,7 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
                 question_text = eval_sample
             swap_prompt = [
                 sys_msg,
-                create_user_prompt(question_text, swap_options),
+                _rebuild_user_prompt_like(eval_sample, question_text, swap_options),
             ]
             swap_input_text = sys_msg + '\n\n'
             if num_few_shot > 0:
