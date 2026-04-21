@@ -1776,22 +1776,24 @@ def _compute_curves_for_one_percentile(
         labels_idx is not None
         and base_pred_idx is not None
         and cyclic_pred_idx is not None
-        and swap_posterior_prob is not None
-        and swap_cand1_pred_idx is not None
-        and swap_cand2_pred_idx is not None
     ):
         try:
-            _, _, preds_swap = _run_online_swap_gaussian_policy_with_preds(
-                default_conf,
-                swap_posterior_prob,
-                swap_cand1_pred_idx,
-                swap_cand2_pred_idx,
-                labels_idx,
-                k,
-                perc_value,
-                cyclic_pred_idx=cyclic_pred_idx,
-            )
-            curve_obj[f"{SWAP_GAUSSIAN_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap, k))
+            if (
+                swap_posterior_prob is not None
+                and swap_cand1_pred_idx is not None
+                and swap_cand2_pred_idx is not None
+            ):
+                _, _, preds_swap = _run_online_swap_gaussian_policy_with_preds(
+                    default_conf,
+                    swap_posterior_prob,
+                    swap_cand1_pred_idx,
+                    swap_cand2_pred_idx,
+                    labels_idx,
+                    k,
+                    perc_value,
+                    cyclic_pred_idx=cyclic_pred_idx,
+                )
+                curve_obj[f"{SWAP_GAUSSIAN_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap, k))
             # Default: prefix->cyclic, postfix->base (debias_pride.py와 동일)
             default_pred_idx = (
                 [cyclic_pred_idx[i] if i in forced_cyclic_ids else base_pred_idx[i] for i in range(N)]
