@@ -12,6 +12,7 @@ from utils import _purple
 logger = logging.getLogger(__name__)
 
 PRIMARY_OURS_LABEL = "swap_gaussian"
+SWAP_GAUSSIAN_SQRT_LABEL = "swap_gaussian_sqrt"
 LEGACY_OURS_PRIDE_LABEL = "th1/2"
 
 

@@ -31,6 +31,13 @@ def _normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
 
 
+def _swap_gaussian_th2_value(th1_val: float, mode: str = "half") -> float:
+    th1 = max(0.0, min(1.0, float(th1_val)))
+    if str(mode).lower() in {"sqrt", "root", "root_th1"}:
+        return float(math.sqrt(th1))
+    return float(th1 / 2.0)
+
+
 def _gaussian_swap_posterior_prob(
     y1_base: float,
     y1_swap: float,
@@ -66,6 +73,7 @@ def _run_online_swap_gaussian_policy_with_preds(
     k: int,
     th1_percent: float,
     cyclic_pred_idx: Optional[List[int]] = None,
+    th2_mode: str = "half",
 ) -> Tuple[float, float, List[int]]:
     N = len(labels_idx)
     if N == 0:
@@ -80,7 +88,7 @@ def _run_online_swap_gaussian_policy_with_preds(
     for i in range(N):
         gap_i = float(dc[i])
         th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
-        th2_val = max(0.0, min(1.0, th1_val / 2.0))
+        th2_val = _swap_gaussian_th2_value(th1_val, th2_mode)
         posterior_conf = 2.0 * abs(float(pp[i]) - 0.5)
         if gap_i >= th1_val:
             pred_i = int(cand1_pred_idx[i])
@@ -106,6 +114,7 @@ def _run_online_swap_gaussian_policy(
     k: int,
     th1_percent: float,
     cyclic_correct: Optional[List[bool]] = None,
+    th2_mode: str = "half",
 ) -> Tuple[float, float]:
     N = len(cand1_correct)
     if N == 0:
@@ -119,7 +128,7 @@ def _run_online_swap_gaussian_policy(
     for i in range(N):
         gap_i = float(dc[i])
         th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
-        th2_val = max(0.0, min(1.0, th1_val / 2.0))
+        th2_val = _swap_gaussian_th2_value(th1_val, th2_mode)
         posterior_conf = 2.0 * abs(float(pp[i]) - 0.5)
         if gap_i >= th1_val:
             total_cost += 1.0
@@ -142,6 +151,7 @@ def _run_online_swap_gaussian_policy_with_stats(
     k: int,
     th1_percent: float,
     cyclic_correct: Optional[List[bool]] = None,
+    th2_mode: str = "half",
 ) -> Tuple[float, float, Dict[str, int]]:
     N = len(cand1_correct)
     if N == 0:
@@ -158,7 +168,7 @@ def _run_online_swap_gaussian_policy_with_stats(
     for i in range(N):
         gap_i = float(dc[i])
         th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
-        th2_val = max(0.0, min(1.0, th1_val / 2.0))
+        th2_val = _swap_gaussian_th2_value(th1_val, th2_mode)
         posterior_conf = 2.0 * abs(float(pp[i]) - 0.5)
         if gap_i >= th1_val:
             total_cost += 1.0

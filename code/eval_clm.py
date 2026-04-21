@@ -83,6 +83,7 @@ logger = logging.getLogger(__name__)
 
 LEGACY_OURS_LABEL = "th1/2"
 SWAP_GAUSSIAN_LABEL = "swap_gaussian"
+SWAP_GAUSSIAN_SQRT_LABEL = "swap_gaussian_sqrt"
 PRIMARY_OURS_LABEL = SWAP_GAUSSIAN_LABEL
 
 
@@ -1708,6 +1709,9 @@ def _compute_curves_for_one_percentile(
     swap_cost = float("nan")
     swap_acc = float("nan")
     swap_stats: Dict[str, int] = {"n_base": 0, "n_swap": 0}
+    swap_sqrt_cost = float("nan")
+    swap_sqrt_acc = float("nan")
+    swap_sqrt_stats: Dict[str, int] = {"n_base": 0, "n_swap": 0, "n_cyclic": 0}
     if (
         swap_posterior_prob is not None
         and swap_cand1_correct is not None
@@ -1723,6 +1727,16 @@ def _compute_curves_for_one_percentile(
             k=k,
             th1_percent=perc_value,
             cyclic_correct=cyclic_correct_list,
+        )
+        swap_sqrt_cost, swap_sqrt_acc, swap_sqrt_stats = _run_online_swap_gaussian_policy_with_stats(
+            default_conf=default_conf,
+            swap_posterior_prob=swap_posterior_prob,
+            cand1_correct=swap_cand1_correct,
+            cand2_correct=swap_cand2_correct,
+            k=k,
+            th1_percent=perc_value,
+            cyclic_correct=cyclic_correct_list,
+            th2_mode="sqrt",
         )
 
     # Cyclic random fraction (for three-curves plot)
@@ -1770,6 +1784,7 @@ def _compute_curves_for_one_percentile(
         "cyclic": {"costs": [float(C_cyc)], "accuracies": [float(cyclic_acc_always)]},
         **{key: {"costs": [cyclic_random_costs[key]], "accuracies": [cyclic_random_accs[key]]} for key in cyclic_random_costs},
         SWAP_GAUSSIAN_LABEL: {"costs": [float(swap_cost)], "accuracies": [float(swap_acc)], "stats": dict(swap_stats)},
+        SWAP_GAUSSIAN_SQRT_LABEL: {"costs": [float(swap_sqrt_cost)], "accuracies": [float(swap_sqrt_acc)], "stats": dict(swap_sqrt_stats)},
     }
     # Optional: add recall_std when labels_idx and preds available
     if (
@@ -1794,6 +1809,18 @@ def _compute_curves_for_one_percentile(
                     cyclic_pred_idx=cyclic_pred_idx,
                 )
                 curve_obj[f"{SWAP_GAUSSIAN_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap, k))
+                _, _, preds_swap_sqrt = _run_online_swap_gaussian_policy_with_preds(
+                    default_conf,
+                    swap_posterior_prob,
+                    swap_cand1_pred_idx,
+                    swap_cand2_pred_idx,
+                    labels_idx,
+                    k,
+                    perc_value,
+                    cyclic_pred_idx=cyclic_pred_idx,
+                    th2_mode="sqrt",
+                )
+                curve_obj[f"{SWAP_GAUSSIAN_SQRT_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap_sqrt, k))
             # Default: prefix->cyclic, postfix->base (debias_pride.py와 동일)
             default_pred_idx = (
                 [cyclic_pred_idx[i] if i in forced_cyclic_ids else base_pred_idx[i] for i in range(N)]
@@ -2552,6 +2579,42 @@ def main():
                                         except Exception:
                                             pass
                                         cobj["heuristic_points"] = [hp_swap]
+                                        try:
+                                            c_swap_sqrt, a_swap_sqrt, st_swap_sqrt = _run_online_swap_gaussian_policy_with_stats(
+                                                default_conf=default_conf,
+                                                swap_posterior_prob=arr_swap_posterior,
+                                                cand1_correct=swap_cand1_correct_list,
+                                                cand2_correct=swap_cand2_correct_list,
+                                                k=k,
+                                                th1_percent=perc,
+                                                cyclic_correct=cyclic_correct_list,
+                                                th2_mode="sqrt",
+                                            )
+                                            hp_swap_sqrt = {
+                                                "label": SWAP_GAUSSIAN_SQRT_LABEL,
+                                                "cost": float(c_swap_sqrt),
+                                                "acc": float(a_swap_sqrt),
+                                                "marker": "P",
+                                                "color": "gray",
+                                                "n_base": int(st_swap_sqrt.get("n_base", 0)),
+                                                "n_swap": int(st_swap_sqrt.get("n_swap", 0)),
+                                                "n_cyclic": int(st_swap_sqrt.get("n_cyclic", 0)),
+                                            }
+                                            _, _, preds_swap_sqrt = _run_online_swap_gaussian_policy_with_preds(
+                                                default_conf,
+                                                arr_swap_posterior,
+                                                swap_cand1_pred_idx_list,
+                                                swap_cand2_pred_idx_list,
+                                                labels_idx_for_curves,
+                                                k,
+                                                perc,
+                                                cyclic_pred_idx=cyclic_pred_idx_list,
+                                                th2_mode="sqrt",
+                                            )
+                                            hp_swap_sqrt["recall_std"] = float(_recall_std(labels_idx_for_curves, preds_swap_sqrt, k))
+                                            cobj["heuristic_points"].append(hp_swap_sqrt)
+                                        except Exception:
+                                            pass
 
                                     # Ours (baseline) transition 기록
                                     try:
@@ -3138,6 +3201,8 @@ def main():
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], PRIMARY_OURS_LABEL)
                     p_str = f"{float(p):g}"
                     logger.info(f"ours_swap_gaussian_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_cyclic={nc:.0f}")
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], SWAP_GAUSSIAN_SQRT_LABEL)
+                    logger.info(f"ours_swap_gaussian_sqrt_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 4. cyclic
             logger.info("---- cyclic ----")
