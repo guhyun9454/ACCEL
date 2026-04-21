@@ -65,6 +65,7 @@ def _run_online_swap_gaussian_policy_with_preds(
     labels_idx: List[int],
     k: int,
     th1_percent: float,
+    cyclic_pred_idx: Optional[List[int]] = None,
 ) -> Tuple[float, float, List[int]]:
     N = len(labels_idx)
     if N == 0:
@@ -79,9 +80,14 @@ def _run_online_swap_gaussian_policy_with_preds(
     for i in range(N):
         gap_i = float(dc[i])
         th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        th2_val = max(0.0, min(1.0, th1_val / 2.0))
+        posterior_conf = 2.0 * abs(float(pp[i]) - 0.5)
         if gap_i >= th1_val:
             pred_i = int(cand1_pred_idx[i])
             c_step = 1.0
+        elif cyclic_pred_idx is not None and posterior_conf < th2_val:
+            pred_i = int(cyclic_pred_idx[i])
+            c_step = float(k)
         else:
             pred_i = int(cand1_pred_idx[i]) if float(pp[i]) >= 0.5 else int(cand2_pred_idx[i])
             c_step = 2.0
@@ -99,6 +105,7 @@ def _run_online_swap_gaussian_policy(
     cand2_correct: List[bool],
     k: int,
     th1_percent: float,
+    cyclic_correct: Optional[List[bool]] = None,
 ) -> Tuple[float, float]:
     N = len(cand1_correct)
     if N == 0:
@@ -112,9 +119,14 @@ def _run_online_swap_gaussian_policy(
     for i in range(N):
         gap_i = float(dc[i])
         th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        th2_val = max(0.0, min(1.0, th1_val / 2.0))
+        posterior_conf = 2.0 * abs(float(pp[i]) - 0.5)
         if gap_i >= th1_val:
             total_cost += 1.0
             corrects += 1 if bool(cand1_correct[i]) else 0
+        elif cyclic_correct is not None and posterior_conf < th2_val:
+            total_cost += float(k)
+            corrects += 1 if bool(cyclic_correct[i]) else 0
         else:
             total_cost += 2.0
             corrects += 1 if (bool(cand1_correct[i]) if float(pp[i]) >= 0.5 else bool(cand2_correct[i])) else 0
@@ -129,10 +141,11 @@ def _run_online_swap_gaussian_policy_with_stats(
     cand2_correct: List[bool],
     k: int,
     th1_percent: float,
+    cyclic_correct: Optional[List[bool]] = None,
 ) -> Tuple[float, float, Dict[str, int]]:
     N = len(cand1_correct)
     if N == 0:
-        return float("nan"), float("nan"), {"n_base": 0, "n_swap": 0}
+        return float("nan"), float("nan"), {"n_base": 0, "n_swap": 0, "n_cyclic": 0}
     dc = np.asarray(default_conf, dtype=np.float64)
     pp = np.asarray(swap_posterior_prob, dtype=np.float64)
     q = float(th1_percent) / 100.0
@@ -140,20 +153,27 @@ def _run_online_swap_gaussian_policy_with_stats(
     corrects = 0
     n_base = 0
     n_swap = 0
+    n_cyclic = 0
     past_dc: List[float] = []
     for i in range(N):
         gap_i = float(dc[i])
         th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        th2_val = max(0.0, min(1.0, th1_val / 2.0))
+        posterior_conf = 2.0 * abs(float(pp[i]) - 0.5)
         if gap_i >= th1_val:
             total_cost += 1.0
             corrects += 1 if bool(cand1_correct[i]) else 0
             n_base += 1
+        elif cyclic_correct is not None and posterior_conf < th2_val:
+            total_cost += float(k)
+            corrects += 1 if bool(cyclic_correct[i]) else 0
+            n_cyclic += 1
         else:
             total_cost += 2.0
             corrects += 1 if (bool(cand1_correct[i]) if float(pp[i]) >= 0.5 else bool(cand2_correct[i])) else 0
             n_swap += 1
         past_dc.append(gap_i)
-    return total_cost / float(N), corrects / float(N), {"n_base": int(n_base), "n_swap": int(n_swap)}
+    return total_cost / float(N), corrects / float(N), {"n_base": int(n_base), "n_swap": int(n_swap), "n_cyclic": int(n_cyclic)}
 
 
 def _run_online_avggap_policy_with_preds(

@@ -1526,7 +1526,7 @@ def _merge_curve_objs_over_runs(cobjs: List[dict]) -> Optional[dict]:
                 keys_seen.add(_hp_key(h))
         merged_hp = []
         for (lab, th1_p) in sorted(keys_seen, key=lambda k: (k[0], (k[1] if k[1] is not None else -1))):
-            costs, accs, rstds, nbs, np2s, ncs = [], [], [], [], [], []
+            costs, accs, rstds, nbs, np2s, nswaps, ncs = [], [], [], [], [], [], []
             marker_ref, color_ref = "o", "black"
             for c in cobjs:
                 for h in (c.get("heuristic_points") or []):
@@ -1546,6 +1546,8 @@ def _merge_curve_objs_over_runs(cobjs: List[dict]) -> Optional[dict]:
                         nbs.append(int(h.get("n_base", 0)))
                     if "n_probe2" in h:
                         np2s.append(int(h.get("n_probe2", 0)))
+                    if "n_swap" in h:
+                        nswaps.append(int(h.get("n_swap", 0)))
                     if "n_cyclic" in h:
                         ncs.append(int(h.get("n_cyclic", 0)))
                     marker_ref = str(h.get("marker", "o"))
@@ -1563,6 +1565,8 @@ def _merge_curve_objs_over_runs(cobjs: List[dict]) -> Optional[dict]:
                     entry["n_base"] = int(np.mean(nbs))
                 if np2s:
                     entry["n_probe2"] = int(np.mean(np2s))
+                if nswaps:
+                    entry["n_swap"] = int(np.mean(nswaps))
                 if ncs:
                     entry["n_cyclic"] = int(np.mean(ncs))
                 merged_hp.append(entry)
@@ -1718,6 +1722,7 @@ def _compute_curves_for_one_percentile(
             cand2_correct=swap_cand2_correct,
             k=k,
             th1_percent=perc_value,
+            cyclic_correct=cyclic_correct_list,
         )
 
     # Cyclic random fraction (for three-curves plot)
@@ -1784,6 +1789,7 @@ def _compute_curves_for_one_percentile(
                 labels_idx,
                 k,
                 perc_value,
+                cyclic_pred_idx=cyclic_pred_idx,
             )
             curve_obj[f"{SWAP_GAUSSIAN_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap, k))
             # Default: prefix->cyclic, postfix->base (debias_pride.py와 동일)
@@ -2518,6 +2524,7 @@ def main():
                                             cand2_correct=swap_cand2_correct_list,
                                             k=k,
                                             th1_percent=perc,
+                                            cyclic_correct=cyclic_correct_list,
                                         )
                                         hp_swap = {
                                             "label": PRIMARY_OURS_LABEL,
@@ -2537,6 +2544,7 @@ def main():
                                                 labels_idx_for_curves,
                                                 k,
                                                 perc,
+                                                cyclic_pred_idx=cyclic_pred_idx_list,
                                             )
                                             hp_swap["recall_std"] = float(_recall_std(labels_idx_for_curves, preds_swap, k))
                                         except Exception:
@@ -2553,6 +2561,7 @@ def main():
                                             labels_idx_for_curves,
                                             k,
                                             perc,
+                                            cyclic_pred_idx=cyclic_pred_idx_list,
                                         )
                                         rec = _make_transition_record_from_preds(
                                             base_correct_list, preds_ours, labels_idx_for_curves, default_conf, subject)
