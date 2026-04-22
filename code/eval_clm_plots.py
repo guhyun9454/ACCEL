@@ -39,6 +39,7 @@ def _plot_three_curves_acc_recall_std(
     color_cyclic = "#F39C12"
     color_pride = "#27AE60"
     color_ours = "#5DADE2"
+    color_ours_sqrt = "#8E44AD"
     n_subjects = len(next(iter(derived_records_by_p.values()), []))
     macro_note = f" (macro over {n_subjects} subjects)" if n_subjects > 1 else ""
 
@@ -139,6 +140,11 @@ def _plot_three_curves_acc_recall_std(
         cost_pride, acc_pride, rstd_pride, acc_std_pride, rstd_std_pride = _agg_pride_default(derived_records_pride_by_p, pride_ours_fractions) if derived_records_pride_by_p else _def5
 
     cost_ours, acc_ours, rstd_ours, acc_std_ours, rstd_std_ours = _agg_heur(derived_records_by_p, PRIMARY_OURS_LABEL, pride_ours_fractions)
+    cost_ours_sqrt, acc_ours_sqrt, rstd_ours_sqrt, acc_std_ours_sqrt, rstd_std_ours_sqrt = _agg_heur(
+        derived_records_by_p,
+        SWAP_GAUSSIAN_SQRT_LABEL,
+        pride_ours_fractions,
+    )
 
     if derived_records_pride_by_alpha:
         alpha_ours = pride_prefix_list[0] if pride_prefix_list else 10
@@ -153,11 +159,13 @@ def _plot_three_curves_acc_recall_std(
     delta_acc_cyc = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_cyc]
     delta_acc_pride = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_pride]
     delta_acc_ours = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours]
+    delta_acc_ours_sqrt = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours_sqrt]
     delta_acc_ours_pride = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours_pride]
 
     delta_rstd_cyc = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_cyc]
     delta_rstd_pride = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_pride]
     delta_rstd_ours = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours]
+    delta_rstd_ours_sqrt = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours_sqrt]
     delta_rstd_ours_pride = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours_pride]
 
     def _plot_curve(ax, costs, yvals, marker, color, linestyle, label):
@@ -173,6 +181,7 @@ def _plot_three_curves_acc_recall_std(
     _plot_curve(ax, cost_cyc, delta_acc_cyc, "o", color_cyclic, "-", "Cyclic")
     _plot_curve(ax, cost_pride, delta_acc_pride, "s", color_pride, "--", "PriDe")
     _plot_curve(ax, cost_ours, delta_acc_ours, "^", color_ours, "-.", "Ours")
+    _plot_curve(ax, cost_ours_sqrt, delta_acc_ours_sqrt, "P", color_ours_sqrt, ":", "Ours sqrt")
     ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax.set_ylabel("Δ Accuracy (%)", fontsize=11)
@@ -195,6 +204,7 @@ def _plot_three_curves_acc_recall_std(
     _plot_curve(ax2, cost_cyc, delta_rstd_cyc, "o", color_cyclic, "-", "Cyclic")
     _plot_curve(ax2, cost_pride, delta_rstd_pride, "s", color_pride, "--", "PriDe")
     _plot_curve(ax2, cost_ours, delta_rstd_ours, "^", color_ours, "-.", "Ours")
+    _plot_curve(ax2, cost_ours_sqrt, delta_rstd_ours_sqrt, "P", color_ours_sqrt, ":", "Ours sqrt")
     ax2.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax2.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax2.set_ylabel("Δ Recall std", fontsize=11)
@@ -338,6 +348,17 @@ def _plot_three_curves_acc_recall_std(
                     "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_ours],
                     "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_ours],
                     "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours],
+                },
+                "swap_gaussian_sqrt": {
+                    "label": SWAP_GAUSSIAN_SQRT_LABEL,
+                    "p": [float(x) for x in pride_ours_fractions],
+                    "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours_sqrt],
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours_sqrt],
+                    "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours_sqrt],
+                    "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_ours_sqrt],
+                    "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_ours_sqrt],
+                    "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_ours_sqrt],
+                    "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours_sqrt],
                 },
                 "ours_pride": _build_ours_pride_payload(
                     derived_records_pride_by_alpha,
