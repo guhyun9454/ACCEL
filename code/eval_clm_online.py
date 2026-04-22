@@ -64,6 +64,140 @@ def _gaussian_swap_posterior_prob(
     return float(_normal_cdf((mu1 - mu2) / z_std))
 
 
+def _gaussian_latin_posterior_from_views(
+    latin_probs: np.ndarray,
+    latin_perms: List[Tuple[int, ...]],
+    rank_map: Dict[int, int],
+    rank_slot_std_lookup: Dict[Tuple[int, str], float],
+    slot_labels: List[str],
+) -> Tuple[int, float, List[float], List[float]]:
+    """
+    Combine a Latin-square set of observations into per-content Gaussian
+    posterior means. Each content is observed once in every displayed slot.
+
+    Returns: (pred_content_idx, confidence_between_top2, posterior_means, posterior_vars)
+    """
+    probs = np.asarray(latin_probs, dtype=np.float64)
+    k = int(len(slot_labels))
+    eps = 1e-12
+    if probs.ndim != 2 or probs.shape[1] != k or len(latin_perms) != probs.shape[0]:
+        raise ValueError("invalid Latin probs/perms shape for Gaussian posterior")
+
+    weighted_sum = np.zeros(k, dtype=np.float64)
+    precision_sum = np.zeros(k, dtype=np.float64)
+    for row_idx, perm in enumerate(latin_perms):
+        if len(perm) != k:
+            raise ValueError("invalid Latin permutation length")
+        for slot_idx, content_idx_raw in enumerate(perm):
+            content_idx = int(content_idx_raw)
+            rank = int(rank_map[content_idx])
+            slot = str(slot_labels[int(slot_idx)])
+            std = float(rank_slot_std_lookup[(rank, slot)])
+            var = max(std * std, eps)
+            precision = 1.0 / var
+            weighted_sum[content_idx] += float(probs[row_idx, slot_idx]) * precision
+            precision_sum[content_idx] += precision
+
+    posterior_means = weighted_sum / np.maximum(precision_sum, eps)
+    posterior_vars = 1.0 / np.maximum(precision_sum, eps)
+    order = np.argsort(posterior_means)[::-1]
+    pred_idx = int(order[0]) if order.size > 0 else 0
+    if order.size <= 1:
+        return pred_idx, 1.0, posterior_means.tolist(), posterior_vars.tolist()
+    runner_up = int(order[1])
+    denom = math.sqrt(max(float(posterior_vars[pred_idx] + posterior_vars[runner_up]), eps))
+    p_top = _normal_cdf(float(posterior_means[pred_idx] - posterior_means[runner_up]) / denom)
+    confidence = float(2.0 * abs(p_top - 0.5))
+    return pred_idx, confidence, posterior_means.tolist(), posterior_vars.tolist()
+
+
+def _run_online_latin_gaussian_policy_with_preds(
+    default_conf: np.ndarray,
+    latin_confidence: np.ndarray,
+    latin_pred_idx: List[int],
+    base_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+    cyclic_pred_idx: Optional[List[int]] = None,
+    th2_mode: str = "half",
+) -> Tuple[float, float, List[int]]:
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), []
+    dc = np.asarray(default_conf, dtype=np.float64)
+    conf = np.asarray(latin_confidence, dtype=np.float64)
+    q = float(th1_percent) / 100.0
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    past_dc: List[float] = []
+    for i in range(N):
+        gap_i = float(dc[i])
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        th2_val = _swap_gaussian_th2_value(th1_val, th2_mode)
+        if gap_i >= th1_val:
+            pred_i = int(base_pred_idx[i])
+            c_step = 1.0
+        elif cyclic_pred_idx is not None and float(conf[i]) < th2_val:
+            pred_i = int(cyclic_pred_idx[i])
+            c_step = float(k)
+        else:
+            pred_i = int(latin_pred_idx[i])
+            c_step = float(k)
+        preds.append(pred_i)
+        total_cost += float(c_step)
+        corrects += 1 if int(pred_i) == int(labels_idx[i]) else 0
+        past_dc.append(gap_i)
+    return total_cost / float(N), corrects / float(N), preds
+
+
+def _run_online_latin_gaussian_policy_with_stats(
+    default_conf: np.ndarray,
+    latin_confidence: np.ndarray,
+    latin_correct: List[bool],
+    base_correct: List[bool],
+    k: int,
+    th1_percent: float,
+    cyclic_correct: Optional[List[bool]] = None,
+    th2_mode: str = "half",
+) -> Tuple[float, float, Dict[str, int]]:
+    N = len(base_correct)
+    if N == 0:
+        return float("nan"), float("nan"), {"n_base": 0, "n_latin": 0, "n_swap": 0, "n_cyclic": 0}
+    dc = np.asarray(default_conf, dtype=np.float64)
+    conf = np.asarray(latin_confidence, dtype=np.float64)
+    q = float(th1_percent) / 100.0
+    total_cost = 0.0
+    corrects = 0
+    n_base = 0
+    n_latin = 0
+    n_cyclic = 0
+    past_dc: List[float] = []
+    for i in range(N):
+        gap_i = float(dc[i])
+        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
+        th2_val = _swap_gaussian_th2_value(th1_val, th2_mode)
+        if gap_i >= th1_val:
+            total_cost += 1.0
+            corrects += 1 if bool(base_correct[i]) else 0
+            n_base += 1
+        elif cyclic_correct is not None and float(conf[i]) < th2_val:
+            total_cost += float(k)
+            corrects += 1 if bool(cyclic_correct[i]) else 0
+            n_cyclic += 1
+        else:
+            total_cost += float(k)
+            corrects += 1 if bool(latin_correct[i]) else 0
+            n_latin += 1
+        past_dc.append(gap_i)
+    return (
+        total_cost / float(N),
+        corrects / float(N),
+        {"n_base": int(n_base), "n_latin": int(n_latin), "n_swap": int(n_latin), "n_cyclic": int(n_cyclic)},
+    )
+
+
 def _run_online_swap_gaussian_policy_with_preds(
     default_conf: np.ndarray,
     swap_posterior_prob: np.ndarray,

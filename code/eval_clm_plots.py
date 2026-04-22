@@ -29,7 +29,7 @@ def _plot_three_curves_acc_recall_std(
     wandb_run: Any = None,
 ):
     """
-    Three curves: (1) Cyclic, (2) PriDe, (3) Ours (swap Gaussian), plus
+    Three curves: (1) Cyclic, (2) PriDe, (3) Ours (Latin Gaussian), plus
     the companion Ours vs Ours+PriDe comparison panels.
     X=Cost, Y=Accuracy or Recall_std. Fractions configurable via args.
     """

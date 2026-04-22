@@ -45,14 +45,14 @@ CURVE_DEFS = {
     },
     "ours": {
         "x_key": "p",
-        "label": "Ours (swap Gaussian)",
+        "label": "Ours (Latin Gaussian)",
         "color": _PAL["blue"],
         "linestyle": "-.",
         "marker": "^",
     },
     "ours_sqrt": {
         "x_key": "p",
-        "label": "Ours (swap Gaussian, th2=sqrt(th1))",
+        "label": "Ours (Latin Gaussian, th2=sqrt(th1))",
         "color": _PAL["sky"],
         "linestyle": ":",
         "marker": "P",
@@ -792,7 +792,7 @@ for rp in selected_runs:
     group_payloads[str(prefix)] = [payload]
 
 st.subheader("그래프 옵션")
-st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 현재 메인 곡선은 `ours`(swap Gaussian)와 `ours_pride`(legacy th1/2 baseline)입니다.")
+st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 현재 메인 곡선은 `ours`(Latin Gaussian)와 `ours_pride`(legacy th1/2 baseline)입니다.")
 
 curve_keys = st.multiselect(
     "그릴 곡선",

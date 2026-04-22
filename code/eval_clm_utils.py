@@ -7,8 +7,9 @@ import json
 import argparse
 import logging
 from tqdm import tqdm
-from typing import List
+from typing import List, Tuple
 from functools import partial
+from itertools import permutations
 
 import numpy as np
 import pandas as pd
@@ -27,6 +28,87 @@ from utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_toprank_latin_rank_rows(first_rank_by_slot: List[int]) -> List[Tuple[int, ...]]:
+    """
+    Build a small Latin-square schedule in rank space.
+
+    The first row is the base displayed rank order. The second row swaps rank1
+    and rank2 positions, then rotates the remaining ranks so no slot keeps the
+    same rank. Remaining rows are filled by deterministic backtracking.
+    """
+    first = tuple(int(x) for x in first_rank_by_slot)
+    k = len(first)
+    if k <= 1:
+        return [first]
+    if sorted(first) != list(range(k)):
+        raise ValueError(f"invalid rank row for Latin schedule: {first}")
+
+    pos_r1 = first.index(0)
+    pos_r2 = first.index(1)
+    second = list(first)
+    second[pos_r1] = 1
+    second[pos_r2] = 0
+    remaining_positions = [j for j in range(k) if j not in {pos_r1, pos_r2}]
+    remaining_ranks = [first[j] for j in remaining_positions]
+    if len(remaining_ranks) > 1:
+        remaining_ranks = remaining_ranks[1:] + remaining_ranks[:1]
+    for j, rank in zip(remaining_positions, remaining_ranks):
+        second[j] = int(rank)
+    seed_rows = [first, tuple(second)]
+
+    all_rows = list(permutations(range(k)))
+    rows: List[Tuple[int, ...]] = []
+    used_by_col = [set() for _ in range(k)]
+
+    def _add_row(row: Tuple[int, ...]) -> None:
+        rows.append(row)
+        for col, symbol in enumerate(row):
+            used_by_col[col].add(symbol)
+
+    for row in seed_rows:
+        if row in rows:
+            continue
+        if any(row[col] in used_by_col[col] for col in range(k)):
+            continue
+        _add_row(row)
+
+    def _search() -> bool:
+        if len(rows) >= k:
+            return True
+        for cand in all_rows:
+            if cand in rows:
+                continue
+            if any(cand[col] in used_by_col[col] for col in range(k)):
+                continue
+            _add_row(cand)
+            if _search():
+                return True
+            removed = rows.pop()
+            for col, symbol in enumerate(removed):
+                used_by_col[col].remove(symbol)
+        return False
+
+    if _search() and len(rows) == k:
+        return rows
+
+    # Conservative fallback: a standard cyclic Latin square anchored to first.
+    return [tuple(first[(col + shift) % k] for col in range(k)) for shift in range(k)]
+
+
+def _build_toprank_latin_perms(base_probs: np.ndarray, k: int) -> List[Tuple[int, ...]]:
+    """
+    Return displayed-slot -> content-index permutations for a base-rank Latin
+    schedule. Row 0 is identity; every base-rank content appears once per slot.
+    """
+    bp = np.asarray(base_probs, dtype=np.float64)
+    rank_order = np.argsort(bp)[::-1].tolist()
+    rank_of_content = {int(content_idx): int(rank) for rank, content_idx in enumerate(rank_order)}
+    rank_to_content = {int(rank): int(content_idx) for rank, content_idx in enumerate(rank_order)}
+    first_rank_by_slot = [rank_of_content[int(slot)] for slot in range(int(k))]
+    rank_rows = _build_toprank_latin_rank_rows(first_rank_by_slot)
+    return [tuple(rank_to_content[int(rank)] for rank in row) for row in rank_rows]
 
 
 def parse_arguments():
@@ -103,7 +185,7 @@ def parse_arguments():
     parser.add_argument("--plot_pride_prefix_fractions", type=str, default="0.5,1,2,5,10,20,30,40,50,60,70,80,90,100",
                         help="Ours+PRIDE에서 PriDe prefix(alpha) 값. 선택 가능한 α 목록.")
     parser.add_argument("--rank_slot_summary_json", type=str, default=None,
-                        help="Path to multi_model_rank_slot_delta_summary.json used for swap-gaussian slot noise std lookup.")
+                        help="Path to multi_model_rank_slot_delta_summary.json used for Latin-Gaussian slot noise std lookup.")
 
     parser.add_argument("--verbose", action="store_true",
                         help="Print verbose logs (extra summaries).")
@@ -501,8 +583,12 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
             cfg = getattr(model, "config", None)
             decoder_start = getattr(cfg, "decoder_start_token_id", None) or getattr(cfg, "pad_token_id", 0)
 
-        all_probs = []
-        for input_text in input_texts:
+        option_indices = (
+            [toker(f": {e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
+            + [toker(f":{e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
+        )
+
+        def _score_input_text(input_text: str) -> List[float]:
             input_ids = toker(input_text, truncation=False, return_tensors="pt").input_ids.to(model.device)
             input_ids = input_ids[..., -1536:]
             with torch.no_grad():
@@ -516,16 +602,15 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
                     logits = model(input_ids=input_ids, decoder_input_ids=dec_ids).logits[:, -1]
                 else:
                     logits = model(input_ids=input_ids).logits[:, -1]
-
-            option_indices = (
-                [toker(f": {e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
-                + [toker(f":{e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
-            )
             probs = F.softmax(
                 logits[..., option_indices], dim=-1,
             ).detach().to(torch.float32).cpu().numpy()
-            probs = probs.reshape(input_ids.size(0), 2, len(option_ids)).sum(axis=1)
-            all_probs.extend(probs.tolist())
+            probs = probs.reshape(input_ids.size(0), 2, len(option_ids)).sum(axis=1)[0]
+            return probs.tolist()
+
+        all_probs = []
+        for input_text in input_texts:
+            all_probs.append(_score_input_text(input_text))
 
         identity_perm = tuple(range(num_options))
         try:
@@ -558,29 +643,39 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
             swap_input_text += swap_prompt[1]
             if not bpe_has_space_prefix:
                 swap_input_text += ' '
-            swap_input_ids = toker(swap_input_text, truncation=False, return_tensors="pt").input_ids.to(model.device)
-            swap_input_ids = swap_input_ids[..., -1536:]
-            with torch.no_grad():
-                if is_seq2seq:
-                    dec_ids = torch.full(
-                        (swap_input_ids.size(0), 1),
-                        decoder_start,
-                        dtype=torch.long,
-                        device=model.device,
-                    )
-                    swap_logits = model(input_ids=swap_input_ids, decoder_input_ids=dec_ids).logits[:, -1]
-                else:
-                    swap_logits = model(input_ids=swap_input_ids).logits[:, -1]
-            option_indices = (
-                [toker(f": {e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
-                + [toker(f":{e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
-            )
-            swap_probs_np = F.softmax(
-                swap_logits[..., option_indices], dim=-1,
-            ).detach().to(torch.float32).cpu().numpy()
-            swap_probs_np = swap_probs_np.reshape(swap_input_ids.size(0), 2, len(option_ids)).sum(axis=1)[0]
-            swap_probs = swap_probs_np.tolist()
-            swap_sampled = option_ids[int(np.argmax(swap_probs_np))]
+            # The production method now uses the Latin-square schedule below.
+            # Keep the exact top1/top2 swap metadata for compatibility, but
+            # avoid spending an extra forward pass that is no longer consumed.
+
+        if "Question: " in eval_sample and "\nOptions:\n" in eval_sample:
+            question_text = eval_sample.split("Question: ", 1)[1].split("\nOptions:\n", 1)[0]
+        else:
+            question_text = eval_sample
+        latin_perms = _build_toprank_latin_perms(base_probs, num_options)
+        latin_probs = []
+        latin_prompts = []
+        perm_to_existing_idx = {tuple(p): idx for idx, p in enumerate(perm_tuples)}
+        for latin_perm in latin_perms:
+            latin_perm = tuple(int(x) for x in latin_perm)
+            existing_idx = perm_to_existing_idx.get(latin_perm)
+            if existing_idx is not None:
+                latin_probs.append(all_probs[existing_idx])
+                latin_prompts.append(None)
+                continue
+            latin_options = [options[idx] for idx in latin_perm]
+            latin_prompt = [
+                sys_msg,
+                _rebuild_user_prompt_like(eval_sample, question_text, latin_options),
+            ]
+            latin_input_text = sys_msg + '\n\n'
+            if num_few_shot > 0:
+                for s in few_shot_samples[:num_few_shot]:
+                    latin_input_text += s + '\n\n'
+            latin_input_text += latin_prompt[1]
+            if not bpe_has_space_prefix:
+                latin_input_text += ' '
+            latin_probs.append(_score_input_text(latin_input_text))
+            latin_prompts.append(latin_prompt[1])
 
         result = {
             'type': 'result',
@@ -596,6 +691,9 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
                 'swap_top12_prompt': swap_prompt[1] if swap_prompt is not None else None,
                 'swap_top12_probs': swap_probs,
                 'swap_top12_sampled': swap_sampled,
+                'latin_toprank_perms': [list(map(int, p)) for p in latin_perms],
+                'latin_toprank_probs': latin_probs,
+                'latin_toprank_prompts': latin_prompts,
                 'ideal': ideal,
             },
         }

@@ -26,12 +26,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from eval_clm_utils import (
+    _build_toprank_latin_perms,
     parse_arguments,
     prepare_eval,
 )
 from eval_clm_online import (
     _recall_std,
-    _gaussian_swap_posterior_prob,
+    _gaussian_latin_posterior_from_views,
+    _run_online_latin_gaussian_policy_with_preds,
+    _run_online_latin_gaussian_policy_with_stats,
     _run_cyclic_random_fraction,
     _run_cyclic_random_fraction_with_preds,
     _run_online_avggap_policy,
@@ -43,9 +46,6 @@ from eval_clm_online import (
     _run_online_sqrt_policy_with_stats,
     _run_online_switch_cyclic_with_preds,
     _run_online_switch_cyclic_with_stats,
-    _run_online_swap_gaussian_policy,
-    _run_online_swap_gaussian_policy_with_preds,
-    _run_online_swap_gaussian_policy_with_stats,
     _run_online_th1_quantile_th2_from_th1_rule,
     _run_online_th1_quantile_th2_from_th1_rule_with_preds,
     _run_online_th1_quantile_th2_from_th1_rule_with_stats,
@@ -1547,7 +1547,9 @@ def _merge_curve_objs_over_runs(cobjs: List[dict]) -> Optional[dict]:
                         nbs.append(int(h.get("n_base", 0)))
                     if "n_probe2" in h:
                         np2s.append(int(h.get("n_probe2", 0)))
-                    if "n_swap" in h:
+                    if "n_latin" in h:
+                        nswaps.append(int(h.get("n_latin", 0)))
+                    elif "n_swap" in h:
                         nswaps.append(int(h.get("n_swap", 0)))
                     if "n_cyclic" in h:
                         ncs.append(int(h.get("n_cyclic", 0)))
@@ -1568,6 +1570,7 @@ def _merge_curve_objs_over_runs(cobjs: List[dict]) -> Optional[dict]:
                     entry["n_probe2"] = int(np.mean(np2s))
                 if nswaps:
                     entry["n_swap"] = int(np.mean(nswaps))
+                    entry["n_latin"] = int(np.mean(nswaps))
                 if ncs:
                     entry["n_cyclic"] = int(np.mean(ncs))
                 merged_hp.append(entry)
@@ -1608,6 +1611,9 @@ def _compute_curves_for_one_percentile(
     swap_cand2_correct: Optional[List[bool]] = None,
     swap_cand1_pred_idx: Optional[List[int]] = None,
     swap_cand2_pred_idx: Optional[List[int]] = None,
+    latin_gaussian_confidence: Optional[np.ndarray] = None,
+    latin_gaussian_correct: Optional[List[bool]] = None,
+    latin_gaussian_pred_idx: Optional[List[int]] = None,
     full_pred_idx: Optional[List[int]] = None,
     cyclic_fractions: Optional[List[float]] = None,
     run_seed_offset: int = 0,
@@ -1705,34 +1711,32 @@ def _compute_curves_for_one_percentile(
     switch_full_cost = (total_cost_sf / float(N)) if (full_enabled and len(full_correct_list) == N) else float("nan")
     switch_full_acc = (corrects_sf / float(N)) if (full_enabled and len(full_correct_list) == N) else float("nan")
 
-    # 2) new production rule: exact top1-top2 swap + Gaussian posterior
+    # 2) production rule: base-rank Latin square + Gaussian posterior
     swap_cost = float("nan")
     swap_acc = float("nan")
-    swap_stats: Dict[str, int] = {"n_base": 0, "n_swap": 0}
+    swap_stats: Dict[str, int] = {"n_base": 0, "n_latin": 0, "n_swap": 0, "n_cyclic": 0}
     swap_sqrt_cost = float("nan")
     swap_sqrt_acc = float("nan")
-    swap_sqrt_stats: Dict[str, int] = {"n_base": 0, "n_swap": 0, "n_cyclic": 0}
+    swap_sqrt_stats: Dict[str, int] = {"n_base": 0, "n_latin": 0, "n_swap": 0, "n_cyclic": 0}
     if (
-        swap_posterior_prob is not None
-        and swap_cand1_correct is not None
-        and swap_cand2_correct is not None
-        and len(swap_cand1_correct) == N
-        and len(swap_cand2_correct) == N
+        latin_gaussian_confidence is not None
+        and latin_gaussian_correct is not None
+        and len(latin_gaussian_correct) == N
     ):
-        swap_cost, swap_acc, swap_stats = _run_online_swap_gaussian_policy_with_stats(
+        swap_cost, swap_acc, swap_stats = _run_online_latin_gaussian_policy_with_stats(
             default_conf=default_conf,
-            swap_posterior_prob=swap_posterior_prob,
-            cand1_correct=swap_cand1_correct,
-            cand2_correct=swap_cand2_correct,
+            latin_confidence=latin_gaussian_confidence,
+            latin_correct=latin_gaussian_correct,
+            base_correct=base_correct_list,
             k=k,
             th1_percent=perc_value,
             cyclic_correct=cyclic_correct_list,
         )
-        swap_sqrt_cost, swap_sqrt_acc, swap_sqrt_stats = _run_online_swap_gaussian_policy_with_stats(
+        swap_sqrt_cost, swap_sqrt_acc, swap_sqrt_stats = _run_online_latin_gaussian_policy_with_stats(
             default_conf=default_conf,
-            swap_posterior_prob=swap_posterior_prob,
-            cand1_correct=swap_cand1_correct,
-            cand2_correct=swap_cand2_correct,
+            latin_confidence=latin_gaussian_confidence,
+            latin_correct=latin_gaussian_correct,
+            base_correct=base_correct_list,
             k=k,
             th1_percent=perc_value,
             cyclic_correct=cyclic_correct_list,
@@ -1794,26 +1798,25 @@ def _compute_curves_for_one_percentile(
     ):
         try:
             if (
-                swap_posterior_prob is not None
-                and swap_cand1_pred_idx is not None
-                and swap_cand2_pred_idx is not None
+                latin_gaussian_confidence is not None
+                and latin_gaussian_pred_idx is not None
             ):
-                _, _, preds_swap = _run_online_swap_gaussian_policy_with_preds(
+                _, _, preds_swap = _run_online_latin_gaussian_policy_with_preds(
                     default_conf,
-                    swap_posterior_prob,
-                    swap_cand1_pred_idx,
-                    swap_cand2_pred_idx,
+                    latin_gaussian_confidence,
+                    latin_gaussian_pred_idx,
+                    base_pred_idx,
                     labels_idx,
                     k,
                     perc_value,
                     cyclic_pred_idx=cyclic_pred_idx,
                 )
                 curve_obj[f"{SWAP_GAUSSIAN_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap, k))
-                _, _, preds_swap_sqrt = _run_online_swap_gaussian_policy_with_preds(
+                _, _, preds_swap_sqrt = _run_online_latin_gaussian_policy_with_preds(
                     default_conf,
-                    swap_posterior_prob,
-                    swap_cand1_pred_idx,
-                    swap_cand2_pred_idx,
+                    latin_gaussian_confidence,
+                    latin_gaussian_pred_idx,
+                    base_pred_idx,
                     labels_idx,
                     k,
                     perc_value,
@@ -2287,6 +2290,9 @@ def main():
                         swap_cand2_pred_idx_list = []
                         swap_cand1_correct_list = []
                         swap_cand2_correct_list = []
+                        latin_gaussian_confidence_list = []
+                        latin_gaussian_pred_idx_list = []
+                        latin_gaussian_correct_list = []
 
                         for r in results:
                             if r.get('type') != 'result':
@@ -2336,41 +2342,39 @@ def main():
                             swap_cand1_correct_list.append(int(cand1_idx) == int(option_ids.index(str(data['ideal']))))
                             swap_cand2_correct_list.append(int(cand2_idx) == int(option_ids.index(str(data['ideal']))))
 
-                            swap_perm = list(range(k))
-                            swap_perm[cand1_idx], swap_perm[cand2_idx] = swap_perm[cand2_idx], swap_perm[cand1_idx]
-                            swap_probs = data.get("swap_top12_probs", None)
-                            if not isinstance(swap_probs, list):
-                                if full_enabled:
-                                    try:
-                                        swap_idx = perm_list.index(tuple(int(x) for x in swap_perm))
-                                        swap_probs = probs_seq_np[swap_idx].tolist()
-                                    except ValueError:
-                                        swap_probs = None
-                                if not isinstance(swap_probs, list):
-                                    raise ValueError(
-                                        f"Sample idx={data.get('idx')} missing swap_top12_probs; "
-                                        f"rerun eval_clm.py with updated cache generation or provide full permutations."
-                                    )
-                            swap_probs_np = np.asarray(swap_probs, dtype=np.float64)
                             rank_order = np.argsort(np.asarray(agg_cyc, dtype=np.float64))[::-1].tolist()
                             rank_map = {int(content_idx): int(pos + 1) for pos, content_idx in enumerate(rank_order)}
-                            rank1 = rank_map[int(cand1_idx)]
-                            rank2 = rank_map[int(cand2_idx)]
-                            slot1_base = str(slot_labels[int(cand1_idx)])
-                            slot1_swap = str(slot_labels[int(cand2_idx)])
-                            slot2_base = str(slot_labels[int(cand2_idx)])
-                            slot2_swap = str(slot_labels[int(cand1_idx)])
-                            p_swap = _gaussian_swap_posterior_prob(
-                                y1_base=float(base_probs[int(cand1_idx)]),
-                                y1_swap=float(swap_probs_np[int(cand2_idx)]),
-                                std1_base=float(rank_slot_std_lookup[(int(rank1), slot1_base)]),
-                                std1_swap=float(rank_slot_std_lookup[(int(rank1), slot1_swap)]),
-                                y2_base=float(base_probs[int(cand2_idx)]),
-                                y2_swap=float(swap_probs_np[int(cand1_idx)]),
-                                std2_base=float(rank_slot_std_lookup[(int(rank2), slot2_base)]),
-                                std2_swap=float(rank_slot_std_lookup[(int(rank2), slot2_swap)]),
+                            latin_perms = data.get("latin_toprank_perms", None)
+                            latin_probs = data.get("latin_toprank_probs", None)
+                            if not (
+                                isinstance(latin_perms, list)
+                                and isinstance(latin_probs, list)
+                                and len(latin_perms) == int(k)
+                                and len(latin_probs) == int(k)
+                            ):
+                                latin_perms = _build_toprank_latin_perms(base_probs, int(k))
+                                latin_probs = []
+                                for latin_perm in latin_perms:
+                                    try:
+                                        latin_idx = perm_list.index(tuple(int(x) for x in latin_perm))
+                                    except ValueError:
+                                        raise ValueError(
+                                            f"Sample idx={data.get('idx')} missing latin_toprank_probs; "
+                                            f"rerun eval_clm.py with updated cache generation or provide full permutations."
+                                        )
+                                    latin_probs.append(probs_seq_np[latin_idx].tolist())
+                            latin_perms_t = [tuple(int(x) for x in p) for p in latin_perms]
+                            latin_probs_np = np.asarray(latin_probs, dtype=np.float64)
+                            pred_latin_idx, conf_latin, _, _ = _gaussian_latin_posterior_from_views(
+                                latin_probs=latin_probs_np,
+                                latin_perms=latin_perms_t,
+                                rank_map=rank_map,
+                                rank_slot_std_lookup=rank_slot_std_lookup,
+                                slot_labels=slot_labels,
                             )
-                            swap_posterior_prob_list.append(float(p_swap))
+                            latin_gaussian_pred_idx_list.append(int(pred_latin_idx))
+                            latin_gaussian_confidence_list.append(float(conf_latin))
+                            latin_gaussian_correct_list.append(int(pred_latin_idx) == int(option_ids.index(str(data['ideal']))))
                             base_results.append({
                                 'type': 'result',
                                 'data': {
@@ -2449,6 +2453,7 @@ def main():
                         arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
                         arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
                         arr_swap_posterior = np.asarray(swap_posterior_prob_list, dtype=np.float64)
+                        arr_latin_gaussian_confidence = np.asarray(latin_gaussian_confidence_list, dtype=np.float64)
                         cyclic_gap_mean = np.asarray(cyclic_gap_mean_list, dtype=np.float64)
                         cyclic_gap_std = np.asarray(cyclic_gap_std_list, dtype=np.float64)
                         sigma_analysis_baseline_records.append(
@@ -2539,6 +2544,9 @@ def main():
                                     swap_cand2_correct=swap_cand2_correct_list,
                                     swap_cand1_pred_idx=swap_cand1_pred_idx_list,
                                     swap_cand2_pred_idx=swap_cand2_pred_idx_list,
+                                    latin_gaussian_confidence=arr_latin_gaussian_confidence,
+                                    latin_gaussian_correct=latin_gaussian_correct_list,
+                                    latin_gaussian_pred_idx=latin_gaussian_pred_idx_list,
                                     full_pred_idx=full_pred_idx_list if full_enabled and len(full_pred_idx_list) == len(ideals) else None,
                                     cyclic_fractions=cyclic_fracs_run, run_seed_offset=run_idx_inner,
                                 )
@@ -2546,11 +2554,11 @@ def main():
                                 if cobj:
                                     by_perc_baseline[perc].append(cobj)
                                     if "heuristic_points" not in cobj:
-                                        c_swap, a_swap, st_swap = _run_online_swap_gaussian_policy_with_stats(
+                                        c_swap, a_swap, st_swap = _run_online_latin_gaussian_policy_with_stats(
                                             default_conf=default_conf,
-                                            swap_posterior_prob=arr_swap_posterior,
-                                            cand1_correct=swap_cand1_correct_list,
-                                            cand2_correct=swap_cand2_correct_list,
+                                            latin_confidence=arr_latin_gaussian_confidence,
+                                            latin_correct=latin_gaussian_correct_list,
+                                            base_correct=base_correct_list,
                                             k=k,
                                             th1_percent=perc,
                                             cyclic_correct=cyclic_correct_list,
@@ -2563,13 +2571,15 @@ def main():
                                             "color": "gray",
                                             "n_base": int(st_swap.get("n_base", 0)),
                                             "n_swap": int(st_swap.get("n_swap", 0)),
+                                            "n_latin": int(st_swap.get("n_latin", st_swap.get("n_swap", 0))),
+                                            "n_cyclic": int(st_swap.get("n_cyclic", 0)),
                                         }
                                         try:
-                                            _, _, preds_swap = _run_online_swap_gaussian_policy_with_preds(
+                                            _, _, preds_swap = _run_online_latin_gaussian_policy_with_preds(
                                                 default_conf,
-                                                arr_swap_posterior,
-                                                swap_cand1_pred_idx_list,
-                                                swap_cand2_pred_idx_list,
+                                                arr_latin_gaussian_confidence,
+                                                latin_gaussian_pred_idx_list,
+                                                base_pred_idx_list,
                                                 labels_idx_for_curves,
                                                 k,
                                                 perc,
@@ -2580,11 +2590,11 @@ def main():
                                             pass
                                         cobj["heuristic_points"] = [hp_swap]
                                         try:
-                                            c_swap_sqrt, a_swap_sqrt, st_swap_sqrt = _run_online_swap_gaussian_policy_with_stats(
+                                            c_swap_sqrt, a_swap_sqrt, st_swap_sqrt = _run_online_latin_gaussian_policy_with_stats(
                                                 default_conf=default_conf,
-                                                swap_posterior_prob=arr_swap_posterior,
-                                                cand1_correct=swap_cand1_correct_list,
-                                                cand2_correct=swap_cand2_correct_list,
+                                                latin_confidence=arr_latin_gaussian_confidence,
+                                                latin_correct=latin_gaussian_correct_list,
+                                                base_correct=base_correct_list,
                                                 k=k,
                                                 th1_percent=perc,
                                                 cyclic_correct=cyclic_correct_list,
@@ -2598,13 +2608,14 @@ def main():
                                                 "color": "gray",
                                                 "n_base": int(st_swap_sqrt.get("n_base", 0)),
                                                 "n_swap": int(st_swap_sqrt.get("n_swap", 0)),
+                                                "n_latin": int(st_swap_sqrt.get("n_latin", st_swap_sqrt.get("n_swap", 0))),
                                                 "n_cyclic": int(st_swap_sqrt.get("n_cyclic", 0)),
                                             }
-                                            _, _, preds_swap_sqrt = _run_online_swap_gaussian_policy_with_preds(
+                                            _, _, preds_swap_sqrt = _run_online_latin_gaussian_policy_with_preds(
                                                 default_conf,
-                                                arr_swap_posterior,
-                                                swap_cand1_pred_idx_list,
-                                                swap_cand2_pred_idx_list,
+                                                arr_latin_gaussian_confidence,
+                                                latin_gaussian_pred_idx_list,
+                                                base_pred_idx_list,
                                                 labels_idx_for_curves,
                                                 k,
                                                 perc,
@@ -2618,11 +2629,11 @@ def main():
 
                                     # Ours (baseline) transition 기록
                                     try:
-                                        _, _, preds_ours = _run_online_swap_gaussian_policy_with_preds(
+                                        _, _, preds_ours = _run_online_latin_gaussian_policy_with_preds(
                                             default_conf,
-                                            arr_swap_posterior,
-                                            swap_cand1_pred_idx_list,
-                                            swap_cand2_pred_idx_list,
+                                            arr_latin_gaussian_confidence,
+                                            latin_gaussian_pred_idx_list,
+                                            base_pred_idx_list,
                                             labels_idx_for_curves,
                                             k,
                                             perc,
@@ -3122,7 +3133,9 @@ def main():
                             rstds.append(h["recall_std"])
                         if "n_base" in h:
                             nb.append(h["n_base"])
-                        if "n_swap" in h:
+                        if "n_latin" in h:
+                            naux.append(h["n_latin"])
+                        elif "n_swap" in h:
                             naux.append(h["n_swap"])
                         elif "n_probe2" in h:
                             naux.append(h["n_probe2"])
@@ -3200,9 +3213,9 @@ def main():
                 if float(p) in derived_records_by_p:
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], PRIMARY_OURS_LABEL)
                     p_str = f"{float(p):g}"
-                    logger.info(f"ours_swap_gaussian_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_cyclic={nc:.0f}")
+                    logger.info(f"ours_latin_gaussian_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_latin={np2:.0f}, n_cyclic={nc:.0f}")
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], SWAP_GAUSSIAN_SQRT_LABEL)
-                    logger.info(f"ours_swap_gaussian_sqrt_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_cyclic={nc:.0f}")
+                    logger.info(f"ours_latin_gaussian_sqrt_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_latin={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 4. cyclic
             logger.info("---- cyclic ----")
