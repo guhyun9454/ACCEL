@@ -91,6 +91,17 @@ def _summarize_rank_bucket(bucket: Dict[str, List[float]], k: int) -> Dict[str, 
     return {f"rank{r}": _summary((bucket or {}).get(f"rank{r}", [])) for r in range(1, int(k) + 1)}
 
 
+def _collapse_rank_slot_bucket_to_rank(bucket: Dict[str, Dict[str, List[float]]], k: int) -> Dict[str, List[float]]:
+    out = _rank_bucket(k)
+    for r in range(1, int(k) + 1):
+        rank_key = f"rank{r}"
+        vals: List[float] = []
+        for slot_vals in ((bucket.get(rank_key, {}) or {}).values()):
+            vals.extend(float(x) for x in (slot_vals or []))
+        out[rank_key] = vals
+    return out
+
+
 def _identity_perm_index(perm_list: Sequence[Sequence[int]], k: int) -> Optional[int]:
     identity = tuple(range(int(k)))
     for idx, perm in enumerate(perm_list):
@@ -309,16 +320,22 @@ def _run_multi(
     print("==== Original-Rank Cyclic Adoption Analysis ====")
     for k in sorted(adoption_by_k.keys()):
         adoption_summary = _summarize_rank_slot_bucket(adoption_by_k[int(k)], int(k))
+        adoption_overall_summary = _summarize_rank_bucket(_collapse_rank_slot_bucket_to_rank(adoption_by_k[int(k)], int(k)), int(k))
         prob_summary = _summarize_rank_slot_bucket(prob_by_k[int(k)], int(k))
+        prob_overall_summary = _summarize_rank_bucket(_collapse_rank_slot_bucket_to_rank(prob_by_k[int(k)], int(k)), int(k))
         original_prob_summary = _summarize_rank_bucket(original_prob_by_k[int(k)], int(k))
         output["by_k"][str(int(k))] = {
             "adoption_rate": adoption_summary,
+            "adoption_rate_overall": adoption_overall_summary,
             "cyclic_content_prob": prob_summary,
+            "cyclic_content_prob_overall": prob_overall_summary,
             "original_rank_prob": original_prob_summary,
         }
         print(f"--- k={int(k)} ---")
         _print_rank_block("original-order rank probs:", original_prob_summary, int(k))
+        _print_rank_block("cyclic adoption rate by original rank (all slots pooled):", adoption_overall_summary, int(k))
         _print_rank_slot_block("cyclic adoption rate by original rank/slot:", adoption_summary, int(k))
+        _print_rank_block("cyclic content prob by original rank (all slots pooled):", prob_overall_summary, int(k))
         _print_rank_slot_block("cyclic content prob by original rank/slot:", prob_summary, int(k))
 
         if save_plots:
@@ -340,6 +357,18 @@ def _run_multi(
                     out_path=os.path.join(aggregate_out_dir, f"multi_model_original_rank_prob_k{int(k)}.png"),
                     value_key="mean",
                     title=f"Multi-model original-order rank probability (k={int(k)})",
+                ),
+                _save_rank_bar(
+                    summary=adoption_overall_summary,
+                    out_path=os.path.join(aggregate_out_dir, f"multi_model_original_rank_cyclic_adoption_rate_overall_k{int(k)}.png"),
+                    value_key="mean",
+                    title=f"Multi-model cyclic adoption rate by original rank, all slots pooled (k={int(k)})",
+                ),
+                _save_rank_bar(
+                    summary=prob_overall_summary,
+                    out_path=os.path.join(aggregate_out_dir, f"multi_model_original_rank_cyclic_content_prob_overall_k{int(k)}.png"),
+                    value_key="mean",
+                    title=f"Multi-model cyclic probability by original rank, all slots pooled (k={int(k)})",
                 ),
             ]
             for path in paths:
@@ -389,16 +418,22 @@ def _run_single(
     print(f"cache_dir: {cache_dir}")
     for k in sorted(adoption_by_k.keys()):
         adoption_summary = _summarize_rank_slot_bucket(adoption_by_k[int(k)], int(k))
+        adoption_overall_summary = _summarize_rank_bucket(_collapse_rank_slot_bucket_to_rank(adoption_by_k[int(k)], int(k)), int(k))
         prob_summary = _summarize_rank_slot_bucket(prob_by_k[int(k)], int(k))
+        prob_overall_summary = _summarize_rank_bucket(_collapse_rank_slot_bucket_to_rank(prob_by_k[int(k)], int(k)), int(k))
         original_prob_summary = _summarize_rank_bucket(original_prob_by_k[int(k)], int(k))
         output["by_k"][str(int(k))] = {
             "adoption_rate": adoption_summary,
+            "adoption_rate_overall": adoption_overall_summary,
             "cyclic_content_prob": prob_summary,
+            "cyclic_content_prob_overall": prob_overall_summary,
             "original_rank_prob": original_prob_summary,
         }
         print(f"--- k={int(k)} ---")
         _print_rank_block("original-order rank probs:", original_prob_summary, int(k))
+        _print_rank_block("cyclic adoption rate by original rank (all slots pooled):", adoption_overall_summary, int(k))
         _print_rank_slot_block("cyclic adoption rate by original rank/slot:", adoption_summary, int(k))
+        _print_rank_block("cyclic content prob by original rank (all slots pooled):", prob_overall_summary, int(k))
         _print_rank_slot_block("cyclic content prob by original rank/slot:", prob_summary, int(k))
 
         if save_plots:
@@ -420,6 +455,18 @@ def _run_single(
                     out_path=os.path.join(cache_dir, f"original_rank_prob_k{int(k)}.png"),
                     value_key="mean",
                     title=f"Original-order rank probability (k={int(k)})",
+                ),
+                _save_rank_bar(
+                    summary=adoption_overall_summary,
+                    out_path=os.path.join(cache_dir, f"original_rank_cyclic_adoption_rate_overall_k{int(k)}.png"),
+                    value_key="mean",
+                    title=f"Cyclic adoption rate by original rank, all slots pooled (k={int(k)})",
+                ),
+                _save_rank_bar(
+                    summary=prob_overall_summary,
+                    out_path=os.path.join(cache_dir, f"original_rank_cyclic_content_prob_overall_k{int(k)}.png"),
+                    value_key="mean",
+                    title=f"Cyclic probability by original rank, all slots pooled (k={int(k)})",
                 ),
             ]
             for path in paths:
