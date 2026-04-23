@@ -84,6 +84,7 @@ logger = logging.getLogger(__name__)
 LEGACY_OURS_LABEL = "th1/2"
 SWAP_GAUSSIAN_LABEL = "swap_gaussian"
 SWAP_GAUSSIAN_SQRT_LABEL = "swap_gaussian_sqrt"
+SWAP_GAUSSIAN_SAME_LABEL = "swap_gaussian_same"
 PRIMARY_OURS_LABEL = SWAP_GAUSSIAN_LABEL
 
 
@@ -1718,6 +1719,9 @@ def _compute_curves_for_one_percentile(
     swap_sqrt_cost = float("nan")
     swap_sqrt_acc = float("nan")
     swap_sqrt_stats: Dict[str, int] = {"n_base": 0, "n_latin": 0, "n_swap": 0, "n_cyclic": 0}
+    swap_same_cost = float("nan")
+    swap_same_acc = float("nan")
+    swap_same_stats: Dict[str, int] = {"n_base": 0, "n_latin": 0, "n_swap": 0, "n_cyclic": 0}
     if (
         latin_gaussian_confidence is not None
         and latin_gaussian_correct is not None
@@ -1741,6 +1745,16 @@ def _compute_curves_for_one_percentile(
             th1_percent=perc_value,
             cyclic_correct=cyclic_correct_list,
             th2_mode="sqrt",
+        )
+        swap_same_cost, swap_same_acc, swap_same_stats = _run_online_latin_gaussian_policy_with_stats(
+            default_conf=default_conf,
+            latin_confidence=latin_gaussian_confidence,
+            latin_correct=latin_gaussian_correct,
+            base_correct=base_correct_list,
+            k=k,
+            th1_percent=perc_value,
+            cyclic_correct=cyclic_correct_list,
+            th2_mode="same",
         )
 
     # Cyclic random fraction (for three-curves plot)
@@ -1789,6 +1803,7 @@ def _compute_curves_for_one_percentile(
         **{key: {"costs": [cyclic_random_costs[key]], "accuracies": [cyclic_random_accs[key]]} for key in cyclic_random_costs},
         SWAP_GAUSSIAN_LABEL: {"costs": [float(swap_cost)], "accuracies": [float(swap_acc)], "stats": dict(swap_stats)},
         SWAP_GAUSSIAN_SQRT_LABEL: {"costs": [float(swap_sqrt_cost)], "accuracies": [float(swap_sqrt_acc)], "stats": dict(swap_sqrt_stats)},
+        SWAP_GAUSSIAN_SAME_LABEL: {"costs": [float(swap_same_cost)], "accuracies": [float(swap_same_acc)], "stats": dict(swap_same_stats)},
     }
     # Optional: add recall_std when labels_idx and preds available
     if (
@@ -1824,6 +1839,18 @@ def _compute_curves_for_one_percentile(
                     th2_mode="sqrt",
                 )
                 curve_obj[f"{SWAP_GAUSSIAN_SQRT_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap_sqrt, k))
+                _, _, preds_swap_same = _run_online_latin_gaussian_policy_with_preds(
+                    default_conf,
+                    latin_gaussian_confidence,
+                    latin_gaussian_pred_idx,
+                    base_pred_idx,
+                    labels_idx,
+                    k,
+                    perc_value,
+                    cyclic_pred_idx=cyclic_pred_idx,
+                    th2_mode="same",
+                )
+                curve_obj[f"{SWAP_GAUSSIAN_SAME_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap_same, k))
             # Default: prefix->cyclic, postfix->base (debias_pride.py와 동일)
             default_pred_idx = (
                 [cyclic_pred_idx[i] if i in forced_cyclic_ids else base_pred_idx[i] for i in range(N)]
@@ -2626,6 +2653,43 @@ def main():
                                             cobj["heuristic_points"].append(hp_swap_sqrt)
                                         except Exception:
                                             pass
+                                        try:
+                                            c_swap_same, a_swap_same, st_swap_same = _run_online_latin_gaussian_policy_with_stats(
+                                                default_conf=default_conf,
+                                                latin_confidence=arr_latin_gaussian_confidence,
+                                                latin_correct=latin_gaussian_correct_list,
+                                                base_correct=base_correct_list,
+                                                k=k,
+                                                th1_percent=perc,
+                                                cyclic_correct=cyclic_correct_list,
+                                                th2_mode="same",
+                                            )
+                                            hp_swap_same = {
+                                                "label": SWAP_GAUSSIAN_SAME_LABEL,
+                                                "cost": float(c_swap_same),
+                                                "acc": float(a_swap_same),
+                                                "marker": "X",
+                                                "color": "gray",
+                                                "n_base": int(st_swap_same.get("n_base", 0)),
+                                                "n_swap": int(st_swap_same.get("n_swap", 0)),
+                                                "n_latin": int(st_swap_same.get("n_latin", st_swap_same.get("n_swap", 0))),
+                                                "n_cyclic": int(st_swap_same.get("n_cyclic", 0)),
+                                            }
+                                            _, _, preds_swap_same = _run_online_latin_gaussian_policy_with_preds(
+                                                default_conf,
+                                                arr_latin_gaussian_confidence,
+                                                latin_gaussian_pred_idx_list,
+                                                base_pred_idx_list,
+                                                labels_idx_for_curves,
+                                                k,
+                                                perc,
+                                                cyclic_pred_idx=cyclic_pred_idx_list,
+                                                th2_mode="same",
+                                            )
+                                            hp_swap_same["recall_std"] = float(_recall_std(labels_idx_for_curves, preds_swap_same, k))
+                                            cobj["heuristic_points"].append(hp_swap_same)
+                                        except Exception:
+                                            pass
 
                                     # Ours (baseline) transition 기록
                                     try:
@@ -3216,6 +3280,8 @@ def main():
                     logger.info(f"ours_latin_gaussian_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_latin={np2:.0f}, n_cyclic={nc:.0f}")
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], SWAP_GAUSSIAN_SQRT_LABEL)
                     logger.info(f"ours_latin_gaussian_sqrt_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_latin={np2:.0f}, n_cyclic={nc:.0f}")
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], SWAP_GAUSSIAN_SAME_LABEL)
+                    logger.info(f"ours_latin_gaussian_same_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_latin={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 4. cyclic
             logger.info("---- cyclic ----")

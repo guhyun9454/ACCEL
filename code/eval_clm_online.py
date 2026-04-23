@@ -33,8 +33,11 @@ def _normal_cdf(x: float) -> float:
 
 def _swap_gaussian_th2_value(th1_val: float, mode: str = "half") -> float:
     th1 = max(0.0, min(1.0, float(th1_val)))
-    if str(mode).lower() in {"sqrt", "root", "root_th1"}:
+    mode_norm = str(mode).lower()
+    if mode_norm in {"sqrt", "root", "root_th1"}:
         return float(math.sqrt(th1))
+    if mode_norm in {"same", "equal", "identity", "th1"}:
+        return float(th1)
     return float(th1 / 2.0)
 
 
