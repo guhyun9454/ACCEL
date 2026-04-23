@@ -22,6 +22,7 @@ def _plot_three_curves_acc_recall_std(
     derived_records_pride_by_p: Dict[float, List[dict]],
     derived_records_pride_by_alpha: Dict[float, List[dict]],
     derived_records_posterior_by_conf: Dict[float, List[dict]],
+    derived_records_posterior_latin_by_conf: Dict[float, List[dict]],
     out_dir: str,
     task: str,
     cyclic_fractions: List[int],
@@ -43,6 +44,7 @@ def _plot_three_curves_acc_recall_std(
     color_ours = "#5DADE2"
     color_ours_sqrt = "#8E44AD"
     color_ours_posterior = "#CC79A7"
+    color_ours_posterior_latin = "#7F3C8D"
     n_subjects = len(next(iter(derived_records_by_p.values()), []))
     macro_note = f" (macro over {n_subjects} subjects)" if n_subjects > 1 else ""
 
@@ -166,6 +168,9 @@ def _plot_three_curves_acc_recall_std(
     posterior_conf_levels, cost_ours_posterior, acc_ours_posterior, rstd_ours_posterior, acc_std_ours_posterior, rstd_std_ours_posterior = _agg_posterior_conf(
         derived_records_posterior_by_conf or {}
     )
+    posterior_latin_conf_levels, cost_ours_posterior_latin, acc_ours_posterior_latin, rstd_ours_posterior_latin, acc_std_ours_posterior_latin, rstd_std_ours_posterior_latin = _agg_posterior_conf(
+        derived_records_posterior_latin_by_conf or {}
+    )
 
     if derived_records_pride_by_alpha:
         alpha_ours = pride_prefix_list[0] if pride_prefix_list else 10
@@ -182,6 +187,7 @@ def _plot_three_curves_acc_recall_std(
     delta_acc_ours = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours]
     delta_acc_ours_sqrt = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours_sqrt]
     delta_acc_ours_posterior = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours_posterior]
+    delta_acc_ours_posterior_latin = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours_posterior_latin]
     delta_acc_ours_pride = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours_pride]
 
     delta_rstd_cyc = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_cyc]
@@ -189,6 +195,7 @@ def _plot_three_curves_acc_recall_std(
     delta_rstd_ours = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours]
     delta_rstd_ours_sqrt = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours_sqrt]
     delta_rstd_ours_posterior = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours_posterior]
+    delta_rstd_ours_posterior_latin = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours_posterior_latin]
     delta_rstd_ours_pride = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours_pride]
 
     def _plot_curve(ax, costs, yvals, marker, color, linestyle, label):
@@ -206,6 +213,7 @@ def _plot_three_curves_acc_recall_std(
     _plot_curve(ax, cost_ours, delta_acc_ours, "^", color_ours, "-.", "Ours")
     _plot_curve(ax, cost_ours_sqrt, delta_acc_ours_sqrt, "P", color_ours_sqrt, ":", "Ours sqrt")
     _plot_curve(ax, cost_ours_posterior, delta_acc_ours_posterior, "X", color_ours_posterior, "--", "Ours posterior")
+    _plot_curve(ax, cost_ours_posterior_latin, delta_acc_ours_posterior_latin, "D", color_ours_posterior_latin, "-.", "Ours posterior latin")
     ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax.set_ylabel("Δ Accuracy (%)", fontsize=11)
@@ -230,6 +238,7 @@ def _plot_three_curves_acc_recall_std(
     _plot_curve(ax2, cost_ours, delta_rstd_ours, "^", color_ours, "-.", "Ours")
     _plot_curve(ax2, cost_ours_sqrt, delta_rstd_ours_sqrt, "P", color_ours_sqrt, ":", "Ours sqrt")
     _plot_curve(ax2, cost_ours_posterior, delta_rstd_ours_posterior, "X", color_ours_posterior, "--", "Ours posterior")
+    _plot_curve(ax2, cost_ours_posterior_latin, delta_rstd_ours_posterior_latin, "D", color_ours_posterior_latin, "-.", "Ours posterior latin")
     ax2.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax2.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax2.set_ylabel("Δ Recall std", fontsize=11)
@@ -343,6 +352,7 @@ def _plot_three_curves_acc_recall_std(
             "cyclic_fractions": [int(x) for x in cyclic_fractions],
             "pride_ours_fractions": [float(x) for x in pride_ours_fractions],
             "posterior_conf_levels": [float(x) for x in posterior_conf_levels],
+            "posterior_latin_conf_levels": [float(x) for x in posterior_latin_conf_levels],
             "curves": {
                 "cyclic": {
                     "fraction": [int(x) for x in cyclic_fractions],
@@ -396,6 +406,17 @@ def _plot_three_curves_acc_recall_std(
                     "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_ours_posterior],
                     "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_ours_posterior],
                     "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours_posterior],
+                },
+                "swap_gaussian_posterior_latin": {
+                    "label": "swap_gaussian_posterior_latin",
+                    "conf": [float(x) for x in posterior_latin_conf_levels],
+                    "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours_posterior_latin],
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours_posterior_latin],
+                    "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours_posterior_latin],
+                    "delta_acc": [float(x) if np.isfinite(x) else float("nan") for x in delta_acc_ours_posterior_latin],
+                    "delta_recall_std": [float(x) if np.isfinite(x) else float("nan") for x in delta_rstd_ours_posterior_latin],
+                    "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in acc_std_ours_posterior_latin],
+                    "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours_posterior_latin],
                 },
                 "ours_pride": _build_ours_pride_payload(
                     derived_records_pride_by_alpha,

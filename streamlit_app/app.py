@@ -64,6 +64,13 @@ CURVE_DEFS = {
         "linestyle": "--",
         "marker": "X",
     },
+    "ours_posterior_latin": {
+        "x_key": "conf",
+        "label": "Ours (posterior + Latin fallback)",
+        "color": "#7F3C8D",
+        "linestyle": "-.",
+        "marker": "D",
+    },
     "ours_pride": {
         "x_key": "p",
         "label": "Ours+PriDe (th1/2 legacy)",
@@ -236,6 +243,8 @@ def _curve_series_from_payload(
         curve = curves.get("swap_gaussian_sqrt", {}) or {}
     if curve_key == "ours_posterior":
         curve = curves.get("swap_gaussian_posterior", {}) or {}
+    if curve_key == "ours_posterior_latin":
+        curve = curves.get("swap_gaussian_posterior_latin", {}) or {}
     if curve_key == "ours_pride":
         ours_pride_data = curves.get("ours_pride", {}) or {}
         by_alpha = ours_pride_data.get("by_alpha") or {}
@@ -806,7 +815,7 @@ st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X�
 curve_keys = st.multiselect(
     "그릴 곡선",
     options=list(CURVE_DEFS.keys()),
-    default=["cyclic", "default_pride", "ours", "ours_sqrt", "ours_posterior", "ours_pride"],
+    default=["cyclic", "default_pride", "ours", "ours_sqrt", "ours_posterior", "ours_posterior_latin", "ours_pride"],
     help="주로 `ours`와 `ours_pride`를 보면 됩니다.",
 )
 
@@ -958,7 +967,7 @@ overall_mode_key = "flatten_equal_run_weight" if display_mode in ("each_plus_mea
 st.subheader("라벨(범례) 설정")
 st.caption("범례에 표시되는 곡선 이름/Overall 이름을 원하는 대로 바꿀 수 있어요.")
 
-col_a, col_b, col_c, col_d, col_e, col_f, col_g = st.columns([1, 1, 1, 1, 1, 1, 1])
+col_a, col_b, col_c, col_d, col_e, col_f, col_g, col_h = st.columns([1, 1, 1, 1, 1, 1, 1, 1])
 with col_a:
     overall_label = st.text_input("Overall 라벨", value="Overall mean")
 with col_b:
@@ -972,6 +981,8 @@ with col_e:
 with col_f:
     lab_ours_posterior = st.text_input("OURS posterior 라벨", value=CURVE_DEFS["ours_posterior"]["label"])
 with col_g:
+    lab_ours_posterior_latin = st.text_input("OURS posterior latin 라벨", value=CURVE_DEFS["ours_posterior_latin"]["label"])
+with col_h:
     lab_ours_pride = st.text_input("Ours (PriDe 붙은 곡선) 라벨", value="Ours")
 
 curve_label_overrides = {
@@ -980,6 +991,7 @@ curve_label_overrides = {
     "ours": lab_ours,
     "ours_sqrt": lab_ours_sqrt,
     "ours_posterior": lab_ours_posterior,
+    "ours_posterior_latin": lab_ours_posterior_latin,
     "ours_pride": lab_ours_pride,
 }
 

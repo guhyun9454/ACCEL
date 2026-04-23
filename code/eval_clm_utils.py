@@ -6,8 +6,9 @@ import copy
 import json
 import argparse
 import logging
+from itertools import permutations
 from tqdm import tqdm
-from typing import List
+from typing import List, Tuple
 from functools import partial
 
 import numpy as np
@@ -27,6 +28,65 @@ from utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _latin_second_row_from_swap(num_options: int, top1_slot: int, top2_slot: int) -> Tuple[int, ...]:
+    first = list(range(int(num_options)))
+    second = [-1] * int(num_options)
+    a = int(top1_slot)
+    b = int(top2_slot)
+    second[a] = b
+    second[b] = a
+    remaining_positions = [i for i in range(int(num_options)) if i not in {a, b}]
+    remaining_contents = [i for i in range(int(num_options)) if i not in {a, b}]
+    if remaining_positions:
+        shift = 1 % len(remaining_contents)
+        rotated = remaining_contents[shift:] + remaining_contents[:shift]
+        for pos, content in zip(remaining_positions, rotated):
+            second[int(pos)] = int(content)
+    return tuple(int(x) for x in second)
+
+
+def _build_latin_square_rows_with_swap(num_options: int, top1_slot: int, top2_slot: int) -> List[Tuple[int, ...]]:
+    k = int(num_options)
+    if k <= 1:
+        return [tuple(range(k))]
+    first = tuple(range(k))
+    second = _latin_second_row_from_swap(k, int(top1_slot), int(top2_slot))
+    rows: List[Tuple[int, ...]] = [first]
+    if second != first:
+        rows.append(second)
+    else:
+        rows.append(tuple((i + 1) % k for i in range(k)))
+
+    candidates = [tuple(int(x) for x in p) for p in permutations(range(k))]
+    used = set(rows)
+    col_used = [set([rows[0][c], rows[1][c]]) for c in range(k)]
+
+    def _backtrack() -> bool:
+        if len(rows) == k:
+            return True
+        for cand in candidates:
+            if cand in used:
+                continue
+            if any(int(cand[c]) in col_used[c] for c in range(k)):
+                continue
+            rows.append(cand)
+            used.add(cand)
+            for c in range(k):
+                col_used[c].add(int(cand[c]))
+            if _backtrack():
+                return True
+            rows.pop()
+            used.remove(cand)
+            for c in range(k):
+                col_used[c].remove(int(cand[c]))
+        return False
+
+    ok = _backtrack()
+    if not ok:
+        raise ValueError(f"Failed to build Latin-square permutation set for k={k}, top1={top1_slot}, top2={top2_slot}")
+    return [tuple(int(x) for x in row) for row in rows]
 
 
 def parse_arguments():
@@ -508,9 +568,12 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
         if is_seq2seq:
             cfg = getattr(model, "config", None)
             decoder_start = getattr(cfg, "decoder_start_token_id", None) or getattr(cfg, "pad_token_id", 0)
+        option_indices = (
+            [toker(f": {e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
+            + [toker(f":{e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
+        )
 
-        all_probs = []
-        for input_text in input_texts:
+        def _predict_probs_from_input_text(input_text: str) -> np.ndarray:
             input_ids = toker(input_text, truncation=False, return_tensors="pt").input_ids.to(model.device)
             input_ids = input_ids[..., -1536:]
             with torch.no_grad():
@@ -524,16 +587,25 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
                     logits = model(input_ids=input_ids, decoder_input_ids=dec_ids).logits[:, -1]
                 else:
                     logits = model(input_ids=input_ids).logits[:, -1]
-
-            option_indices = (
-                [toker(f": {e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
-                + [toker(f":{e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
-            )
             probs = F.softmax(
                 logits[..., option_indices], dim=-1,
             ).detach().to(torch.float32).cpu().numpy()
-            probs = probs.reshape(input_ids.size(0), 2, len(option_ids)).sum(axis=1)
-            all_probs.extend(probs.tolist())
+            probs = probs.reshape(input_ids.size(0), 2, len(option_ids)).sum(axis=1)[0]
+            return np.asarray(probs, dtype=np.float64)
+
+        def _predict_probs_from_user_prompt(sys_text: str, user_prompt_text: str) -> np.ndarray:
+            input_text = sys_text + '\n\n'
+            if num_few_shot > 0:
+                for s in few_shot_samples[:num_few_shot]:
+                    input_text += s + '\n\n'
+            input_text += user_prompt_text
+            if not bpe_has_space_prefix:
+                input_text += ' '
+            return _predict_probs_from_input_text(input_text)
+
+        all_probs = []
+        for input_text in input_texts:
+            all_probs.append(_predict_probs_from_input_text(input_text).tolist())
 
         identity_perm = tuple(range(num_options))
         try:
@@ -549,46 +621,36 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
         swap_prompt = None
         swap_probs = None
         swap_sampled = None
+        latin_perm_tuples = _build_latin_square_rows_with_swap(num_options, top1_slot, top2_slot)
+        latin_probs: List[List[float]] = []
+        latin_sampled: List[str] = []
+        if "Question: " in eval_sample and "\nOptions:\n" in eval_sample:
+            question_text = eval_sample.split("Question: ", 1)[1].split("\nOptions:\n", 1)[0]
+        else:
+            question_text = eval_sample
         if top1_slot != top2_slot:
             swap_options = [options[idx] for idx in swap_perm]
-            if "Question: " in eval_sample and "\nOptions:\n" in eval_sample:
-                question_text = eval_sample.split("Question: ", 1)[1].split("\nOptions:\n", 1)[0]
-            else:
-                question_text = eval_sample
             swap_prompt = [
                 sys_msg,
                 _rebuild_user_prompt_like(eval_sample, question_text, swap_options),
             ]
-            swap_input_text = sys_msg + '\n\n'
-            if num_few_shot > 0:
-                for s in few_shot_samples[:num_few_shot]:
-                    swap_input_text += s + '\n\n'
-            swap_input_text += swap_prompt[1]
-            if not bpe_has_space_prefix:
-                swap_input_text += ' '
-            swap_input_ids = toker(swap_input_text, truncation=False, return_tensors="pt").input_ids.to(model.device)
-            swap_input_ids = swap_input_ids[..., -1536:]
-            with torch.no_grad():
-                if is_seq2seq:
-                    dec_ids = torch.full(
-                        (swap_input_ids.size(0), 1),
-                        decoder_start,
-                        dtype=torch.long,
-                        device=model.device,
-                    )
-                    swap_logits = model(input_ids=swap_input_ids, decoder_input_ids=dec_ids).logits[:, -1]
-                else:
-                    swap_logits = model(input_ids=swap_input_ids).logits[:, -1]
-            option_indices = (
-                [toker(f": {e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
-                + [toker(f":{e}", add_special_tokens=False).input_ids[-1] for e in option_ids]
-            )
-            swap_probs_np = F.softmax(
-                swap_logits[..., option_indices], dim=-1,
-            ).detach().to(torch.float32).cpu().numpy()
-            swap_probs_np = swap_probs_np.reshape(swap_input_ids.size(0), 2, len(option_ids)).sum(axis=1)[0]
+            swap_probs_np = _predict_probs_from_user_prompt(sys_msg, swap_prompt[1])
             swap_probs = swap_probs_np.tolist()
             swap_sampled = option_ids[int(np.argmax(swap_probs_np))]
+        perm_prob_map = {tuple(int(x) for x in perm): list(all_probs[i]) for i, perm in enumerate(perm_tuples)}
+        if isinstance(swap_probs, list):
+            perm_prob_map[tuple(int(x) for x in swap_perm)] = list(swap_probs)
+        for latin_perm in latin_perm_tuples:
+            latin_perm = tuple(int(x) for x in latin_perm)
+            cur_probs = perm_prob_map.get(latin_perm)
+            if not isinstance(cur_probs, list):
+                latin_options = [options[idx] for idx in latin_perm]
+                latin_prompt = _rebuild_user_prompt_like(eval_sample, question_text, latin_options)
+                latin_probs_np = _predict_probs_from_user_prompt(sys_msg, latin_prompt)
+                cur_probs = latin_probs_np.tolist()
+                perm_prob_map[latin_perm] = list(cur_probs)
+            latin_probs.append(list(cur_probs))
+            latin_sampled.append(option_ids[int(np.argmax(np.asarray(cur_probs, dtype=np.float64)))])
 
         result = {
             'type': 'result',
@@ -604,6 +666,9 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
                 'swap_top12_prompt': swap_prompt[1] if swap_prompt is not None else None,
                 'swap_top12_probs': swap_probs,
                 'swap_top12_sampled': swap_sampled,
+                'latin_top12_perm_tuples': [list(map(int, p)) for p in latin_perm_tuples],
+                'latin_top12_probs': latin_probs,
+                'latin_top12_sampled': latin_sampled,
                 'ideal': ideal,
             },
         }

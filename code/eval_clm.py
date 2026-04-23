@@ -89,6 +89,7 @@ LEGACY_OURS_LABEL = "th1/2"
 SWAP_GAUSSIAN_LABEL = "swap_gaussian"
 SWAP_GAUSSIAN_SQRT_LABEL = "swap_gaussian_sqrt"
 SWAP_GAUSSIAN_POSTERIOR_LABEL = "swap_gaussian_posterior"
+SWAP_GAUSSIAN_POSTERIOR_LATIN_LABEL = "swap_gaussian_posterior_latin"
 PRIMARY_OURS_LABEL = SWAP_GAUSSIAN_LABEL
 
 
@@ -2078,6 +2079,7 @@ def main():
                     derived_records_pride_by_p,
                     derived_records_pride_by_alpha,
                     {},
+                    {},
                     out_dir,
                     args.task,
                     cyclic_fractions=cyclic_fracs,
@@ -2164,6 +2166,7 @@ def main():
         rank_slot_std_lookup_cache: Dict[int, Dict[Tuple[int, str], float]] = {}
         slot_gaussian_stats_cache: Dict[Tuple[int, str, str], Dict[str, Dict[str, float]]] = {}
         swap_posterior_conf_records: Dict[float, List[dict]] = {}
+        swap_posterior_latin_conf_records: Dict[float, List[dict]] = {}
 
         def _make_transition_record_from_preds(base_correct, pred_idx, labels_idx, conf_arr, subject):
             """base_correct: List[bool], pred_idx: List[int], labels_idx: List[int], conf_arr: np.ndarray"""
@@ -2357,6 +2360,8 @@ def main():
                         cyclic_correct_list = []
                         full_correct_list = []
                         full_pred_idx_list = []  # argmax(agg_full) for recall_std when full_enabled
+                        latin_correct_list = []
+                        latin_pred_idx_list = []
 
                         base_probs_list = []  # identity row (letter-space)
                         base_pred_idx_list = []     # argmax(base_probs) as index
@@ -2430,6 +2435,21 @@ def main():
                             cyclic_correct_list.append(corr_cyc)
                             cyclic_corrects += 1 if corr_cyc else 0
                             cyclic_total += 1
+
+                            latin_perm_rows = [tuple(int(x) for x in p) for p in (data.get("latin_top12_perm_tuples") or [])]
+                            latin_probs_rows = data.get("latin_top12_probs") or []
+                            if (
+                                isinstance(latin_probs_rows, list)
+                                and len(latin_perm_rows) == int(k)
+                                and len(latin_probs_rows) == len(latin_perm_rows)
+                            ):
+                                agg_latin = _aggregate_probs_over_permutations(latin_probs_rows, latin_perm_rows, k)
+                            else:
+                                agg_latin = np.asarray(agg_cyc, dtype=np.float64)
+                            pred_latin_idx = int(np.argmax(agg_latin))
+                            pred_latin = option_ids[pred_latin_idx]
+                            latin_pred_idx_list.append(pred_latin_idx)
+                            latin_correct_list.append(pred_latin == data["ideal"])
 
                             # base (identity only)
                             base_probs = np.asarray(probs_seq_np[identity_idx], dtype=np.float64)
@@ -2634,6 +2654,34 @@ def main():
                                     "n_base": int(sp_stats.get("n_base", 0)),
                                     "n_swap": int(sp_stats.get("n_swap", 0)),
                                     "n_cyclic": int(sp_stats.get("n_cyclic", 0)),
+                                })
+                                sp_l_cost, sp_l_acc, sp_l_stats = _run_online_swap_posterior_conf_policy_with_stats(
+                                    base_posterior_prob=arr_base_posterior,
+                                    swap_posterior_prob=arr_swap_slot_posterior,
+                                    cand1_correct=swap_cand1_correct_list,
+                                    cand2_correct=swap_cand2_correct_list,
+                                    k=k,
+                                    conf_percent=float(conf_level),
+                                    cyclic_correct=latin_correct_list,
+                                )
+                                _, _, sp_l_preds = _run_online_swap_posterior_conf_policy_with_preds(
+                                    base_posterior_prob=arr_base_posterior,
+                                    swap_posterior_prob=arr_swap_slot_posterior,
+                                    cand1_pred_idx=swap_cand1_pred_idx_list,
+                                    cand2_pred_idx=swap_cand2_pred_idx_list,
+                                    labels_idx=[option_ids.index(str(x)) for x in ideals],
+                                    k=k,
+                                    conf_percent=float(conf_level),
+                                    cyclic_pred_idx=latin_pred_idx_list,
+                                )
+                                swap_posterior_latin_conf_records.setdefault(float(conf_level), []).append({
+                                    "subject": str(subject),
+                                    "cost": float(sp_l_cost),
+                                    "acc": float(sp_l_acc),
+                                    "recall_std": float(_recall_std([option_ids.index(str(x)) for x in ideals], sp_l_preds, k)),
+                                    "n_base": int(sp_l_stats.get("n_base", 0)),
+                                    "n_swap": int(sp_l_stats.get("n_swap", 0)),
+                                    "n_cyclic": int(sp_l_stats.get("n_cyclic", 0)),
                                 })
                             except Exception:
                                 pass
@@ -3225,6 +3273,7 @@ def main():
                     derived_records_pride_by_p if len(derived_records_pride_by_p) > 0 else {},
                     derived_records_pride_by_alpha if len(derived_records_pride_by_alpha) > 0 else {},
                     swap_posterior_conf_records if len(swap_posterior_conf_records) > 0 else {},
+                    swap_posterior_latin_conf_records if len(swap_posterior_latin_conf_records) > 0 else {},
                     out_dir,
                     args.task,
                     cyclic_fractions=cyclic_fracs or [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
@@ -3401,6 +3450,26 @@ def main():
                         f"cost={_fmt(mean_c, std_c)}, acc={_fmt4(mean_a, std_a)}, "
                         f"recall_std={_fmt4(mean_r, std_r)}, "
                         f"n_base={mean_nb:.0f}, n_swap={mean_ns:.0f}, n_cyclic={mean_nc:.0f}"
+                    )
+            if swap_posterior_latin_conf_records:
+                logger.info("---- ours posterior confidence (latin fallback) ----")
+                for conf_level in sorted(swap_posterior_latin_conf_records.keys()):
+                    rows = swap_posterior_latin_conf_records[float(conf_level)]
+                    costs = [float(r.get("cost", float("nan"))) for r in rows if np.isfinite(float(r.get("cost", float("nan"))))]
+                    accs = [float(r.get("acc", float("nan"))) for r in rows if np.isfinite(float(r.get("acc", float("nan"))))]
+                    rstds = [float(r.get("recall_std", float("nan"))) for r in rows if np.isfinite(float(r.get("recall_std", float("nan"))))]
+                    mean_c, std_c = _macro_mean_std_over_runs(costs, n_subjects, n_runs)
+                    mean_a, std_a = _macro_mean_std_over_runs(accs, n_subjects, n_runs)
+                    mean_r, std_r = _macro_mean_std_over_runs(rstds, n_subjects, n_runs)
+                    mean_nb = float(np.mean([float(r.get("n_base", 0)) for r in rows])) if rows else 0.0
+                    mean_ns = float(np.mean([float(r.get("n_swap", 0)) for r in rows])) if rows else 0.0
+                    mean_nc = float(np.mean([float(r.get("n_cyclic", 0)) for r in rows])) if rows else 0.0
+                    conf_str = f"{float(conf_level):g}"
+                    logger.info(
+                        f"ours_swap_gaussian_posterior_latin_{conf_str}% : "
+                        f"cost={_fmt(mean_c, std_c)}, acc={_fmt4(mean_a, std_a)}, "
+                        f"recall_std={_fmt4(mean_r, std_r)}, "
+                        f"n_base={mean_nb:.0f}, n_swap={mean_ns:.0f}, n_latin={mean_nc:.0f}"
                     )
 
             # 4. cyclic
