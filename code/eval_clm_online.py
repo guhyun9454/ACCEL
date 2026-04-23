@@ -71,8 +71,9 @@ def _gaussian_latin_posterior_from_views(
     latin_probs: np.ndarray,
     latin_perms: List[Tuple[int, ...]],
     rank_map: Dict[int, int],
-    rank_slot_std_lookup: Dict[Tuple[int, str], float],
+    rank_slot_noise_lookup: Dict[Tuple[int, str], Tuple[float, float]],
     slot_labels: List[str],
+    candidate_indices: Optional[List[int]] = None,
 ) -> Tuple[int, float, List[float], List[float]]:
     """
     Combine a Latin-square set of observations into per-content Gaussian
@@ -95,15 +96,20 @@ def _gaussian_latin_posterior_from_views(
             content_idx = int(content_idx_raw)
             rank = int(rank_map[content_idx])
             slot = str(slot_labels[int(slot_idx)])
-            std = float(rank_slot_std_lookup[(rank, slot)])
+            mean, std = rank_slot_noise_lookup[(rank, slot)]
             var = max(std * std, eps)
             precision = 1.0 / var
-            weighted_sum[content_idx] += float(probs[row_idx, slot_idx]) * precision
+            weighted_sum[content_idx] += (float(probs[row_idx, slot_idx]) - float(mean)) * precision
             precision_sum[content_idx] += precision
 
     posterior_means = weighted_sum / np.maximum(precision_sum, eps)
     posterior_vars = 1.0 / np.maximum(precision_sum, eps)
-    order = np.argsort(posterior_means)[::-1]
+    if candidate_indices:
+        cand = [int(x) for x in candidate_indices]
+        order = sorted(cand, key=lambda idx: float(posterior_means[idx]), reverse=True)
+        order = np.asarray(order, dtype=np.int64)
+    else:
+        order = np.argsort(posterior_means)[::-1]
     pred_idx = int(order[0]) if order.size > 0 else 0
     if order.size <= 1:
         return pred_idx, 1.0, posterior_means.tolist(), posterior_vars.tolist()
@@ -115,11 +121,11 @@ def _gaussian_latin_posterior_from_views(
 
 
 def _run_online_latin_gaussian_policy_with_preds(
-    default_conf: np.ndarray,
+    base_confidence: np.ndarray,
     flip_confidence: np.ndarray,
+    base_pred_idx: List[int],
     flip_pred_idx: List[int],
     latin_pred_idx: List[int],
-    base_pred_idx: List[int],
     labels_idx: List[int],
     k: int,
     th1_percent: float,
@@ -128,18 +134,15 @@ def _run_online_latin_gaussian_policy_with_preds(
     N = len(labels_idx)
     if N == 0:
         return float("nan"), float("nan"), []
-    dc = np.asarray(default_conf, dtype=np.float64)
+    bc = np.asarray(base_confidence, dtype=np.float64)
     conf = np.asarray(flip_confidence, dtype=np.float64)
-    q = float(th1_percent) / 100.0
+    th1_val = max(0.0, min(1.0, float(th1_percent) / 100.0))
+    th2_val = _swap_gaussian_th2_value(th1_val, th2_mode)
     total_cost = 0.0
     corrects = 0
     preds: List[int] = []
-    past_dc: List[float] = []
     for i in range(N):
-        gap_i = float(dc[i])
-        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
-        th2_val = _swap_gaussian_th2_value(th1_val, th2_mode)
-        if gap_i >= th1_val:
+        if float(bc[i]) >= th1_val:
             pred_i = int(base_pred_idx[i])
             c_step = 1.0
         elif float(conf[i]) >= th2_val:
@@ -151,16 +154,15 @@ def _run_online_latin_gaussian_policy_with_preds(
         preds.append(pred_i)
         total_cost += float(c_step)
         corrects += 1 if int(pred_i) == int(labels_idx[i]) else 0
-        past_dc.append(gap_i)
     return total_cost / float(N), corrects / float(N), preds
 
 
 def _run_online_latin_gaussian_policy_with_stats(
-    default_conf: np.ndarray,
+    base_confidence: np.ndarray,
     flip_confidence: np.ndarray,
+    base_correct: List[bool],
     flip_correct: List[bool],
     latin_correct: List[bool],
-    base_correct: List[bool],
     k: int,
     th1_percent: float,
     th2_mode: str = "half",
@@ -168,20 +170,17 @@ def _run_online_latin_gaussian_policy_with_stats(
     N = len(base_correct)
     if N == 0:
         return float("nan"), float("nan"), {"n_base": 0, "n_flip": 0, "n_latin": 0, "n_swap": 0, "n_cyclic": 0}
-    dc = np.asarray(default_conf, dtype=np.float64)
+    bc = np.asarray(base_confidence, dtype=np.float64)
     conf = np.asarray(flip_confidence, dtype=np.float64)
-    q = float(th1_percent) / 100.0
+    th1_val = max(0.0, min(1.0, float(th1_percent) / 100.0))
+    th2_val = _swap_gaussian_th2_value(th1_val, th2_mode)
     total_cost = 0.0
     corrects = 0
     n_base = 0
     n_flip = 0
     n_latin = 0
-    past_dc: List[float] = []
     for i in range(N):
-        gap_i = float(dc[i])
-        th1_val = float(np.quantile(np.asarray(past_dc, dtype=np.float64), q)) if len(past_dc) > 0 else 0.0
-        th2_val = _swap_gaussian_th2_value(th1_val, th2_mode)
-        if gap_i >= th1_val:
+        if float(bc[i]) >= th1_val:
             total_cost += 1.0
             corrects += 1 if bool(base_correct[i]) else 0
             n_base += 1
@@ -193,7 +192,6 @@ def _run_online_latin_gaussian_policy_with_stats(
             total_cost += float(k)
             corrects += 1 if bool(latin_correct[i]) else 0
             n_latin += 1
-        past_dc.append(gap_i)
     return (
         total_cost / float(N),
         corrects / float(N),

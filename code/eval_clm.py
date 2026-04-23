@@ -368,7 +368,7 @@ def _slot_labels_for_k(k: int) -> List[str]:
     return [str(i) for i in range(int(k))]
 
 
-def _load_rank_slot_std_lookup(summary_path: str, k: int) -> Dict[Tuple[int, str], float]:
+def _load_rank_slot_noise_lookup(summary_path: str, k: int) -> Dict[Tuple[int, str], Tuple[float, float]]:
     if not summary_path or not os.path.exists(summary_path):
         raise FileNotFoundError(
             f"rank-slot summary json not found: {summary_path}. "
@@ -382,7 +382,7 @@ def _load_rank_slot_std_lookup(summary_path: str, k: int) -> Dict[Tuple[int, str
         raise ValueError(f"rank-slot summary missing by_k[{k}] in {summary_path}")
     raw = k_obj.get("raw", {}) or {}
     labels = _slot_labels_for_k(int(k))
-    lookup: Dict[Tuple[int, str], float] = {}
+    lookup: Dict[Tuple[int, str], Tuple[float, float]] = {}
     for r in range(1, int(k) + 1):
         rank_key = f"rank{r}"
         slot_map = raw.get(rank_key)
@@ -390,10 +390,13 @@ def _load_rank_slot_std_lookup(summary_path: str, k: int) -> Dict[Tuple[int, str
             raise ValueError(f"rank-slot summary missing raw[{rank_key}] in {summary_path}")
         for slot in labels:
             fit = slot_map.get(slot, {}) or {}
+            mean_val = float(fit.get("mean", float("nan")))
             std_val = float(fit.get("std", float("nan")))
+            if not np.isfinite(mean_val):
+                raise ValueError(f"invalid mean for ({rank_key},{slot}) in {summary_path}: {mean_val}")
             if not np.isfinite(std_val) or std_val <= 0.0:
                 raise ValueError(f"invalid std for ({rank_key},{slot}) in {summary_path}: {std_val}")
-            lookup[(int(r), str(slot))] = std_val
+            lookup[(int(r), str(slot))] = (mean_val, std_val)
     return lookup
 
 
@@ -1612,6 +1615,9 @@ def _compute_curves_for_one_percentile(
     swap_cand2_correct: Optional[List[bool]] = None,
     swap_cand1_pred_idx: Optional[List[int]] = None,
     swap_cand2_pred_idx: Optional[List[int]] = None,
+    latin_base_confidence: Optional[np.ndarray] = None,
+    latin_base_correct: Optional[List[bool]] = None,
+    latin_base_pred_idx: Optional[List[int]] = None,
     latin_flip_confidence: Optional[np.ndarray] = None,
     latin_flip_correct: Optional[List[bool]] = None,
     latin_flip_pred_idx: Optional[List[int]] = None,
@@ -1725,37 +1731,40 @@ def _compute_curves_for_one_percentile(
     swap_same_acc = float("nan")
     swap_same_stats: Dict[str, int] = {"n_base": 0, "n_latin": 0, "n_swap": 0, "n_cyclic": 0}
     if (
-        latin_flip_confidence is not None
+        latin_base_confidence is not None
+        and latin_base_correct is not None
+        and latin_flip_confidence is not None
         and latin_flip_correct is not None
         and latin_gaussian_correct is not None
+        and len(latin_base_correct) == N
         and len(latin_flip_correct) == N
         and len(latin_gaussian_correct) == N
     ):
         swap_cost, swap_acc, swap_stats = _run_online_latin_gaussian_policy_with_stats(
-            default_conf=default_conf,
+            base_confidence=latin_base_confidence,
+            base_correct=latin_base_correct,
             flip_confidence=latin_flip_confidence,
             flip_correct=latin_flip_correct,
             latin_correct=latin_gaussian_correct,
-            base_correct=base_correct_list,
             k=k,
             th1_percent=perc_value,
         )
         swap_sqrt_cost, swap_sqrt_acc, swap_sqrt_stats = _run_online_latin_gaussian_policy_with_stats(
-            default_conf=default_conf,
+            base_confidence=latin_base_confidence,
+            base_correct=latin_base_correct,
             flip_confidence=latin_flip_confidence,
             flip_correct=latin_flip_correct,
             latin_correct=latin_gaussian_correct,
-            base_correct=base_correct_list,
             k=k,
             th1_percent=perc_value,
             th2_mode="sqrt",
         )
         swap_same_cost, swap_same_acc, swap_same_stats = _run_online_latin_gaussian_policy_with_stats(
-            default_conf=default_conf,
+            base_confidence=latin_base_confidence,
+            base_correct=latin_base_correct,
             flip_confidence=latin_flip_confidence,
             flip_correct=latin_flip_correct,
             latin_correct=latin_gaussian_correct,
-            base_correct=base_correct_list,
             k=k,
             th1_percent=perc_value,
             th2_mode="same",
@@ -1817,27 +1826,29 @@ def _compute_curves_for_one_percentile(
     ):
         try:
             if (
-                latin_flip_confidence is not None
+                latin_base_confidence is not None
+                and latin_base_pred_idx is not None
+                and latin_flip_confidence is not None
                 and latin_flip_pred_idx is not None
                 and latin_gaussian_pred_idx is not None
             ):
                 _, _, preds_swap = _run_online_latin_gaussian_policy_with_preds(
-                    default_conf,
+                    latin_base_confidence,
                     latin_flip_confidence,
+                    latin_base_pred_idx,
                     latin_flip_pred_idx,
                     latin_gaussian_pred_idx,
-                    base_pred_idx,
                     labels_idx,
                     k,
                     perc_value,
                 )
                 curve_obj[f"{SWAP_GAUSSIAN_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap, k))
                 _, _, preds_swap_sqrt = _run_online_latin_gaussian_policy_with_preds(
-                    default_conf,
+                    latin_base_confidence,
                     latin_flip_confidence,
+                    latin_base_pred_idx,
                     latin_flip_pred_idx,
                     latin_gaussian_pred_idx,
-                    base_pred_idx,
                     labels_idx,
                     k,
                     perc_value,
@@ -1845,11 +1856,11 @@ def _compute_curves_for_one_percentile(
                 )
                 curve_obj[f"{SWAP_GAUSSIAN_SQRT_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap_sqrt, k))
                 _, _, preds_swap_same = _run_online_latin_gaussian_policy_with_preds(
-                    default_conf,
+                    latin_base_confidence,
                     latin_flip_confidence,
+                    latin_base_pred_idx,
                     latin_flip_pred_idx,
                     latin_gaussian_pred_idx,
-                    base_pred_idx,
                     labels_idx,
                     k,
                     perc_value,
@@ -2103,7 +2114,7 @@ def main():
         transition_records_ours_by_p: Dict[float, List[dict]] = {}
         sigma_analysis_baseline_records: List[dict] = []
         sigma_analysis_pride_by_alpha: Dict[float, List[dict]] = {}
-        rank_slot_std_lookup_cache: Dict[int, Dict[Tuple[int, str], float]] = {}
+        rank_slot_noise_lookup_cache: Dict[int, Dict[Tuple[int, str], Tuple[float, float]]] = {}
 
         def _make_transition_record_from_preds(base_correct, pred_idx, labels_idx, conf_arr, subject):
             """base_correct: List[bool], pred_idx: List[int], labels_idx: List[int], conf_arr: np.ndarray"""
@@ -2310,11 +2321,11 @@ def main():
                         full_corrects = 0
                         cyclic_total = 0
                         cyclic_corrects = 0
-                        if int(k) not in rank_slot_std_lookup_cache:
-                            rank_slot_std_lookup_cache[int(k)] = _load_rank_slot_std_lookup(
+                        if int(k) not in rank_slot_noise_lookup_cache:
+                            rank_slot_noise_lookup_cache[int(k)] = _load_rank_slot_noise_lookup(
                                 getattr(args, "rank_slot_summary_json", None), int(k)
                             )
-                        rank_slot_std_lookup = rank_slot_std_lookup_cache[int(k)]
+                        rank_slot_noise_lookup = rank_slot_noise_lookup_cache[int(k)]
                         slot_labels = _slot_labels_for_k(int(k))
 
                         swap_posterior_prob_list = []
@@ -2322,6 +2333,9 @@ def main():
                         swap_cand2_pred_idx_list = []
                         swap_cand1_correct_list = []
                         swap_cand2_correct_list = []
+                        latin_base_confidence_list = []
+                        latin_base_pred_idx_list = []
+                        latin_base_correct_list = []
                         latin_flip_confidence_list = []
                         latin_flip_pred_idx_list = []
                         latin_flip_correct_list = []
@@ -2400,21 +2414,35 @@ def main():
                                     latin_probs.append(probs_seq_np[latin_idx].tolist())
                             latin_perms_t = [tuple(int(x) for x in p) for p in latin_perms]
                             latin_probs_np = np.asarray(latin_probs, dtype=np.float64)
+                            candidate_pair = [int(cand1_idx), int(cand2_idx)]
+                            pred_base_post_idx, conf_base_post, _, _ = _gaussian_latin_posterior_from_views(
+                                latin_probs=latin_probs_np[:1],
+                                latin_perms=latin_perms_t[:1],
+                                rank_map=rank_map,
+                                rank_slot_noise_lookup=rank_slot_noise_lookup,
+                                slot_labels=slot_labels,
+                                candidate_indices=candidate_pair,
+                            )
                             flip_rows = min(2, int(latin_probs_np.shape[0]))
                             pred_flip_idx, conf_flip, _, _ = _gaussian_latin_posterior_from_views(
                                 latin_probs=latin_probs_np[:flip_rows],
                                 latin_perms=latin_perms_t[:flip_rows],
                                 rank_map=rank_map,
-                                rank_slot_std_lookup=rank_slot_std_lookup,
+                                rank_slot_noise_lookup=rank_slot_noise_lookup,
                                 slot_labels=slot_labels,
+                                candidate_indices=candidate_pair,
                             )
                             pred_latin_idx, conf_latin, _, _ = _gaussian_latin_posterior_from_views(
                                 latin_probs=latin_probs_np,
                                 latin_perms=latin_perms_t,
                                 rank_map=rank_map,
-                                rank_slot_std_lookup=rank_slot_std_lookup,
+                                rank_slot_noise_lookup=rank_slot_noise_lookup,
                                 slot_labels=slot_labels,
+                                candidate_indices=candidate_pair,
                             )
+                            latin_base_pred_idx_list.append(int(pred_base_post_idx))
+                            latin_base_confidence_list.append(float(conf_base_post))
+                            latin_base_correct_list.append(int(pred_base_post_idx) == int(option_ids.index(str(data['ideal']))))
                             latin_flip_pred_idx_list.append(int(pred_flip_idx))
                             latin_flip_confidence_list.append(float(conf_flip))
                             latin_flip_correct_list.append(int(pred_flip_idx) == int(option_ids.index(str(data['ideal']))))
@@ -2499,6 +2527,7 @@ def main():
                         arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
                         arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
                         arr_swap_posterior = np.asarray(swap_posterior_prob_list, dtype=np.float64)
+                        arr_latin_base_confidence = np.asarray(latin_base_confidence_list, dtype=np.float64)
                         arr_latin_flip_confidence = np.asarray(latin_flip_confidence_list, dtype=np.float64)
                         arr_latin_gaussian_confidence = np.asarray(latin_gaussian_confidence_list, dtype=np.float64)
                         cyclic_gap_mean = np.asarray(cyclic_gap_mean_list, dtype=np.float64)
@@ -2591,6 +2620,9 @@ def main():
                                     swap_cand2_correct=swap_cand2_correct_list,
                                     swap_cand1_pred_idx=swap_cand1_pred_idx_list,
                                     swap_cand2_pred_idx=swap_cand2_pred_idx_list,
+                                    latin_base_confidence=arr_latin_base_confidence,
+                                    latin_base_correct=latin_base_correct_list,
+                                    latin_base_pred_idx=latin_base_pred_idx_list,
                                     latin_flip_confidence=arr_latin_flip_confidence,
                                     latin_flip_correct=latin_flip_correct_list,
                                     latin_flip_pred_idx=latin_flip_pred_idx_list,
@@ -2604,11 +2636,11 @@ def main():
                                     by_perc_baseline[perc].append(cobj)
                                     if "heuristic_points" not in cobj:
                                         c_swap, a_swap, st_swap = _run_online_latin_gaussian_policy_with_stats(
-                                            default_conf=default_conf,
+                                            base_confidence=arr_latin_base_confidence,
+                                            base_correct=latin_base_correct_list,
                                             flip_confidence=arr_latin_flip_confidence,
                                             flip_correct=latin_flip_correct_list,
                                             latin_correct=latin_gaussian_correct_list,
-                                            base_correct=base_correct_list,
                                             k=k,
                                             th1_percent=perc,
                                         )
@@ -2625,11 +2657,11 @@ def main():
                                         }
                                         try:
                                             _, _, preds_swap = _run_online_latin_gaussian_policy_with_preds(
-                                                default_conf,
+                                                arr_latin_base_confidence,
                                                 arr_latin_flip_confidence,
+                                                latin_base_pred_idx_list,
                                                 latin_flip_pred_idx_list,
                                                 latin_gaussian_pred_idx_list,
-                                                base_pred_idx_list,
                                                 labels_idx_for_curves,
                                                 k,
                                                 perc,
@@ -2640,11 +2672,11 @@ def main():
                                         cobj["heuristic_points"] = [hp_swap]
                                         try:
                                             c_swap_sqrt, a_swap_sqrt, st_swap_sqrt = _run_online_latin_gaussian_policy_with_stats(
-                                                default_conf=default_conf,
+                                                base_confidence=arr_latin_base_confidence,
+                                                base_correct=latin_base_correct_list,
                                                 flip_confidence=arr_latin_flip_confidence,
                                                 flip_correct=latin_flip_correct_list,
                                                 latin_correct=latin_gaussian_correct_list,
-                                                base_correct=base_correct_list,
                                                 k=k,
                                                 th1_percent=perc,
                                                 th2_mode="sqrt",
@@ -2661,11 +2693,11 @@ def main():
                                                 "n_cyclic": int(st_swap_sqrt.get("n_cyclic", 0)),
                                             }
                                             _, _, preds_swap_sqrt = _run_online_latin_gaussian_policy_with_preds(
-                                                default_conf,
+                                                arr_latin_base_confidence,
                                                 arr_latin_flip_confidence,
+                                                latin_base_pred_idx_list,
                                                 latin_flip_pred_idx_list,
                                                 latin_gaussian_pred_idx_list,
-                                                base_pred_idx_list,
                                                 labels_idx_for_curves,
                                                 k,
                                                 perc,
@@ -2677,11 +2709,11 @@ def main():
                                             pass
                                         try:
                                             c_swap_same, a_swap_same, st_swap_same = _run_online_latin_gaussian_policy_with_stats(
-                                                default_conf=default_conf,
+                                                base_confidence=arr_latin_base_confidence,
+                                                base_correct=latin_base_correct_list,
                                                 flip_confidence=arr_latin_flip_confidence,
                                                 flip_correct=latin_flip_correct_list,
                                                 latin_correct=latin_gaussian_correct_list,
-                                                base_correct=base_correct_list,
                                                 k=k,
                                                 th1_percent=perc,
                                                 th2_mode="same",
@@ -2698,11 +2730,11 @@ def main():
                                                 "n_cyclic": int(st_swap_same.get("n_cyclic", 0)),
                                             }
                                             _, _, preds_swap_same = _run_online_latin_gaussian_policy_with_preds(
-                                                default_conf,
+                                                arr_latin_base_confidence,
                                                 arr_latin_flip_confidence,
+                                                latin_base_pred_idx_list,
                                                 latin_flip_pred_idx_list,
                                                 latin_gaussian_pred_idx_list,
-                                                base_pred_idx_list,
                                                 labels_idx_for_curves,
                                                 k,
                                                 perc,
@@ -2716,11 +2748,11 @@ def main():
                                     # Ours (baseline) transition 기록
                                     try:
                                         _, _, preds_ours = _run_online_latin_gaussian_policy_with_preds(
-                                            default_conf,
+                                            arr_latin_base_confidence,
                                             arr_latin_flip_confidence,
+                                            latin_base_pred_idx_list,
                                             latin_flip_pred_idx_list,
                                             latin_gaussian_pred_idx_list,
-                                            base_pred_idx_list,
                                             labels_idx_for_curves,
                                             k,
                                             perc,
