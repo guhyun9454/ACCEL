@@ -1725,37 +1725,39 @@ def _compute_curves_for_one_percentile(
     swap_same_acc = float("nan")
     swap_same_stats: Dict[str, int] = {"n_base": 0, "n_latin": 0, "n_swap": 0, "n_cyclic": 0}
     if (
-        latin_gaussian_confidence is not None
+        latin_flip_confidence is not None
+        and latin_flip_correct is not None
         and latin_gaussian_correct is not None
+        and len(latin_flip_correct) == N
         and len(latin_gaussian_correct) == N
     ):
         swap_cost, swap_acc, swap_stats = _run_online_latin_gaussian_policy_with_stats(
             default_conf=default_conf,
-            latin_confidence=latin_gaussian_confidence,
+            flip_confidence=latin_flip_confidence,
+            flip_correct=latin_flip_correct,
             latin_correct=latin_gaussian_correct,
             base_correct=base_correct_list,
             k=k,
             th1_percent=perc_value,
-            cyclic_correct=cyclic_correct_list,
         )
         swap_sqrt_cost, swap_sqrt_acc, swap_sqrt_stats = _run_online_latin_gaussian_policy_with_stats(
             default_conf=default_conf,
-            latin_confidence=latin_gaussian_confidence,
+            flip_confidence=latin_flip_confidence,
+            flip_correct=latin_flip_correct,
             latin_correct=latin_gaussian_correct,
             base_correct=base_correct_list,
             k=k,
             th1_percent=perc_value,
-            cyclic_correct=cyclic_correct_list,
             th2_mode="sqrt",
         )
         swap_same_cost, swap_same_acc, swap_same_stats = _run_online_latin_gaussian_policy_with_stats(
             default_conf=default_conf,
-            latin_confidence=latin_gaussian_confidence,
+            flip_confidence=latin_flip_confidence,
+            flip_correct=latin_flip_correct,
             latin_correct=latin_gaussian_correct,
             base_correct=base_correct_list,
             k=k,
             th1_percent=perc_value,
-            cyclic_correct=cyclic_correct_list,
             th2_mode="same",
         )
 
@@ -1815,41 +1817,42 @@ def _compute_curves_for_one_percentile(
     ):
         try:
             if (
-                latin_gaussian_confidence is not None
+                latin_flip_confidence is not None
+                and latin_flip_pred_idx is not None
                 and latin_gaussian_pred_idx is not None
             ):
                 _, _, preds_swap = _run_online_latin_gaussian_policy_with_preds(
                     default_conf,
-                    latin_gaussian_confidence,
+                    latin_flip_confidence,
+                    latin_flip_pred_idx,
                     latin_gaussian_pred_idx,
                     base_pred_idx,
                     labels_idx,
                     k,
                     perc_value,
-                    cyclic_pred_idx=cyclic_pred_idx,
                 )
                 curve_obj[f"{SWAP_GAUSSIAN_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap, k))
                 _, _, preds_swap_sqrt = _run_online_latin_gaussian_policy_with_preds(
                     default_conf,
-                    latin_gaussian_confidence,
+                    latin_flip_confidence,
+                    latin_flip_pred_idx,
                     latin_gaussian_pred_idx,
                     base_pred_idx,
                     labels_idx,
                     k,
                     perc_value,
-                    cyclic_pred_idx=cyclic_pred_idx,
                     th2_mode="sqrt",
                 )
                 curve_obj[f"{SWAP_GAUSSIAN_SQRT_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap_sqrt, k))
                 _, _, preds_swap_same = _run_online_latin_gaussian_policy_with_preds(
                     default_conf,
-                    latin_gaussian_confidence,
+                    latin_flip_confidence,
+                    latin_flip_pred_idx,
                     latin_gaussian_pred_idx,
                     base_pred_idx,
                     labels_idx,
                     k,
                     perc_value,
-                    cyclic_pred_idx=cyclic_pred_idx,
                     th2_mode="same",
                 )
                 curve_obj[f"{SWAP_GAUSSIAN_SAME_LABEL}_recall_std"] = float(_recall_std(labels_idx, preds_swap_same, k))
@@ -2319,6 +2322,9 @@ def main():
                         swap_cand2_pred_idx_list = []
                         swap_cand1_correct_list = []
                         swap_cand2_correct_list = []
+                        latin_flip_confidence_list = []
+                        latin_flip_pred_idx_list = []
+                        latin_flip_correct_list = []
                         latin_gaussian_confidence_list = []
                         latin_gaussian_pred_idx_list = []
                         latin_gaussian_correct_list = []
@@ -2394,6 +2400,14 @@ def main():
                                     latin_probs.append(probs_seq_np[latin_idx].tolist())
                             latin_perms_t = [tuple(int(x) for x in p) for p in latin_perms]
                             latin_probs_np = np.asarray(latin_probs, dtype=np.float64)
+                            flip_rows = min(2, int(latin_probs_np.shape[0]))
+                            pred_flip_idx, conf_flip, _, _ = _gaussian_latin_posterior_from_views(
+                                latin_probs=latin_probs_np[:flip_rows],
+                                latin_perms=latin_perms_t[:flip_rows],
+                                rank_map=rank_map,
+                                rank_slot_std_lookup=rank_slot_std_lookup,
+                                slot_labels=slot_labels,
+                            )
                             pred_latin_idx, conf_latin, _, _ = _gaussian_latin_posterior_from_views(
                                 latin_probs=latin_probs_np,
                                 latin_perms=latin_perms_t,
@@ -2401,6 +2415,9 @@ def main():
                                 rank_slot_std_lookup=rank_slot_std_lookup,
                                 slot_labels=slot_labels,
                             )
+                            latin_flip_pred_idx_list.append(int(pred_flip_idx))
+                            latin_flip_confidence_list.append(float(conf_flip))
+                            latin_flip_correct_list.append(int(pred_flip_idx) == int(option_ids.index(str(data['ideal']))))
                             latin_gaussian_pred_idx_list.append(int(pred_latin_idx))
                             latin_gaussian_confidence_list.append(float(conf_latin))
                             latin_gaussian_correct_list.append(int(pred_latin_idx) == int(option_ids.index(str(data['ideal']))))
@@ -2482,6 +2499,7 @@ def main():
                         arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
                         arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
                         arr_swap_posterior = np.asarray(swap_posterior_prob_list, dtype=np.float64)
+                        arr_latin_flip_confidence = np.asarray(latin_flip_confidence_list, dtype=np.float64)
                         arr_latin_gaussian_confidence = np.asarray(latin_gaussian_confidence_list, dtype=np.float64)
                         cyclic_gap_mean = np.asarray(cyclic_gap_mean_list, dtype=np.float64)
                         cyclic_gap_std = np.asarray(cyclic_gap_std_list, dtype=np.float64)
@@ -2573,7 +2591,9 @@ def main():
                                     swap_cand2_correct=swap_cand2_correct_list,
                                     swap_cand1_pred_idx=swap_cand1_pred_idx_list,
                                     swap_cand2_pred_idx=swap_cand2_pred_idx_list,
-                                    latin_gaussian_confidence=arr_latin_gaussian_confidence,
+                                    latin_flip_confidence=arr_latin_flip_confidence,
+                                    latin_flip_correct=latin_flip_correct_list,
+                                    latin_flip_pred_idx=latin_flip_pred_idx_list,
                                     latin_gaussian_correct=latin_gaussian_correct_list,
                                     latin_gaussian_pred_idx=latin_gaussian_pred_idx_list,
                                     full_pred_idx=full_pred_idx_list if full_enabled and len(full_pred_idx_list) == len(ideals) else None,
@@ -2585,12 +2605,12 @@ def main():
                                     if "heuristic_points" not in cobj:
                                         c_swap, a_swap, st_swap = _run_online_latin_gaussian_policy_with_stats(
                                             default_conf=default_conf,
-                                            latin_confidence=arr_latin_gaussian_confidence,
+                                            flip_confidence=arr_latin_flip_confidence,
+                                            flip_correct=latin_flip_correct_list,
                                             latin_correct=latin_gaussian_correct_list,
                                             base_correct=base_correct_list,
                                             k=k,
                                             th1_percent=perc,
-                                            cyclic_correct=cyclic_correct_list,
                                         )
                                         hp_swap = {
                                             "label": PRIMARY_OURS_LABEL,
@@ -2606,13 +2626,13 @@ def main():
                                         try:
                                             _, _, preds_swap = _run_online_latin_gaussian_policy_with_preds(
                                                 default_conf,
-                                                arr_latin_gaussian_confidence,
+                                                arr_latin_flip_confidence,
+                                                latin_flip_pred_idx_list,
                                                 latin_gaussian_pred_idx_list,
                                                 base_pred_idx_list,
                                                 labels_idx_for_curves,
                                                 k,
                                                 perc,
-                                                cyclic_pred_idx=cyclic_pred_idx_list,
                                             )
                                             hp_swap["recall_std"] = float(_recall_std(labels_idx_for_curves, preds_swap, k))
                                         except Exception:
@@ -2621,12 +2641,12 @@ def main():
                                         try:
                                             c_swap_sqrt, a_swap_sqrt, st_swap_sqrt = _run_online_latin_gaussian_policy_with_stats(
                                                 default_conf=default_conf,
-                                                latin_confidence=arr_latin_gaussian_confidence,
+                                                flip_confidence=arr_latin_flip_confidence,
+                                                flip_correct=latin_flip_correct_list,
                                                 latin_correct=latin_gaussian_correct_list,
                                                 base_correct=base_correct_list,
                                                 k=k,
                                                 th1_percent=perc,
-                                                cyclic_correct=cyclic_correct_list,
                                                 th2_mode="sqrt",
                                             )
                                             hp_swap_sqrt = {
@@ -2642,13 +2662,13 @@ def main():
                                             }
                                             _, _, preds_swap_sqrt = _run_online_latin_gaussian_policy_with_preds(
                                                 default_conf,
-                                                arr_latin_gaussian_confidence,
+                                                arr_latin_flip_confidence,
+                                                latin_flip_pred_idx_list,
                                                 latin_gaussian_pred_idx_list,
                                                 base_pred_idx_list,
                                                 labels_idx_for_curves,
                                                 k,
                                                 perc,
-                                                cyclic_pred_idx=cyclic_pred_idx_list,
                                                 th2_mode="sqrt",
                                             )
                                             hp_swap_sqrt["recall_std"] = float(_recall_std(labels_idx_for_curves, preds_swap_sqrt, k))
@@ -2658,12 +2678,12 @@ def main():
                                         try:
                                             c_swap_same, a_swap_same, st_swap_same = _run_online_latin_gaussian_policy_with_stats(
                                                 default_conf=default_conf,
-                                                latin_confidence=arr_latin_gaussian_confidence,
+                                                flip_confidence=arr_latin_flip_confidence,
+                                                flip_correct=latin_flip_correct_list,
                                                 latin_correct=latin_gaussian_correct_list,
                                                 base_correct=base_correct_list,
                                                 k=k,
                                                 th1_percent=perc,
-                                                cyclic_correct=cyclic_correct_list,
                                                 th2_mode="same",
                                             )
                                             hp_swap_same = {
@@ -2679,13 +2699,13 @@ def main():
                                             }
                                             _, _, preds_swap_same = _run_online_latin_gaussian_policy_with_preds(
                                                 default_conf,
-                                                arr_latin_gaussian_confidence,
+                                                arr_latin_flip_confidence,
+                                                latin_flip_pred_idx_list,
                                                 latin_gaussian_pred_idx_list,
                                                 base_pred_idx_list,
                                                 labels_idx_for_curves,
                                                 k,
                                                 perc,
-                                                cyclic_pred_idx=cyclic_pred_idx_list,
                                                 th2_mode="same",
                                             )
                                             hp_swap_same["recall_std"] = float(_recall_std(labels_idx_for_curves, preds_swap_same, k))
@@ -2697,13 +2717,13 @@ def main():
                                     try:
                                         _, _, preds_ours = _run_online_latin_gaussian_policy_with_preds(
                                             default_conf,
-                                            arr_latin_gaussian_confidence,
+                                            arr_latin_flip_confidence,
+                                            latin_flip_pred_idx_list,
                                             latin_gaussian_pred_idx_list,
                                             base_pred_idx_list,
                                             labels_idx_for_curves,
                                             k,
                                             perc,
-                                            cyclic_pred_idx=cyclic_pred_idx_list,
                                         )
                                         rec = _make_transition_record_from_preds(
                                             base_correct_list, preds_ours, labels_idx_for_curves, default_conf, subject)
