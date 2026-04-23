@@ -116,20 +116,20 @@ def _gaussian_latin_posterior_from_views(
 
 def _run_online_latin_gaussian_policy_with_preds(
     default_conf: np.ndarray,
-    latin_confidence: np.ndarray,
+    flip_confidence: np.ndarray,
+    flip_pred_idx: List[int],
     latin_pred_idx: List[int],
     base_pred_idx: List[int],
     labels_idx: List[int],
     k: int,
     th1_percent: float,
-    cyclic_pred_idx: Optional[List[int]] = None,
     th2_mode: str = "half",
 ) -> Tuple[float, float, List[int]]:
     N = len(labels_idx)
     if N == 0:
         return float("nan"), float("nan"), []
     dc = np.asarray(default_conf, dtype=np.float64)
-    conf = np.asarray(latin_confidence, dtype=np.float64)
+    conf = np.asarray(flip_confidence, dtype=np.float64)
     q = float(th1_percent) / 100.0
     total_cost = 0.0
     corrects = 0
@@ -142,9 +142,9 @@ def _run_online_latin_gaussian_policy_with_preds(
         if gap_i >= th1_val:
             pred_i = int(base_pred_idx[i])
             c_step = 1.0
-        elif cyclic_pred_idx is not None and float(conf[i]) < th2_val:
-            pred_i = int(cyclic_pred_idx[i])
-            c_step = float(k)
+        elif float(conf[i]) >= th2_val:
+            pred_i = int(flip_pred_idx[i])
+            c_step = 2.0
         else:
             pred_i = int(latin_pred_idx[i])
             c_step = float(k)
@@ -157,25 +157,25 @@ def _run_online_latin_gaussian_policy_with_preds(
 
 def _run_online_latin_gaussian_policy_with_stats(
     default_conf: np.ndarray,
-    latin_confidence: np.ndarray,
+    flip_confidence: np.ndarray,
+    flip_correct: List[bool],
     latin_correct: List[bool],
     base_correct: List[bool],
     k: int,
     th1_percent: float,
-    cyclic_correct: Optional[List[bool]] = None,
     th2_mode: str = "half",
 ) -> Tuple[float, float, Dict[str, int]]:
     N = len(base_correct)
     if N == 0:
-        return float("nan"), float("nan"), {"n_base": 0, "n_latin": 0, "n_swap": 0, "n_cyclic": 0}
+        return float("nan"), float("nan"), {"n_base": 0, "n_flip": 0, "n_latin": 0, "n_swap": 0, "n_cyclic": 0}
     dc = np.asarray(default_conf, dtype=np.float64)
-    conf = np.asarray(latin_confidence, dtype=np.float64)
+    conf = np.asarray(flip_confidence, dtype=np.float64)
     q = float(th1_percent) / 100.0
     total_cost = 0.0
     corrects = 0
     n_base = 0
+    n_flip = 0
     n_latin = 0
-    n_cyclic = 0
     past_dc: List[float] = []
     for i in range(N):
         gap_i = float(dc[i])
@@ -185,10 +185,10 @@ def _run_online_latin_gaussian_policy_with_stats(
             total_cost += 1.0
             corrects += 1 if bool(base_correct[i]) else 0
             n_base += 1
-        elif cyclic_correct is not None and float(conf[i]) < th2_val:
-            total_cost += float(k)
-            corrects += 1 if bool(cyclic_correct[i]) else 0
-            n_cyclic += 1
+        elif float(conf[i]) >= th2_val:
+            total_cost += 2.0
+            corrects += 1 if bool(flip_correct[i]) else 0
+            n_flip += 1
         else:
             total_cost += float(k)
             corrects += 1 if bool(latin_correct[i]) else 0
@@ -197,7 +197,13 @@ def _run_online_latin_gaussian_policy_with_stats(
     return (
         total_cost / float(N),
         corrects / float(N),
-        {"n_base": int(n_base), "n_latin": int(n_latin), "n_swap": int(n_latin), "n_cyclic": int(n_cyclic)},
+        {
+            "n_base": int(n_base),
+            "n_flip": int(n_flip),
+            "n_latin": int(n_latin),
+            "n_swap": int(n_flip),
+            "n_cyclic": 0,
+        },
     )
 
 
