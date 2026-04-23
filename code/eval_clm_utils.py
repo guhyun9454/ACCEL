@@ -186,6 +186,9 @@ def parse_arguments():
                         help="Ours+PRIDE에서 PriDe prefix(alpha) 값. 선택 가능한 α 목록.")
     parser.add_argument("--rank_slot_summary_json", type=str, default=None,
                         help="Path to multi_model_rank_slot_delta_summary.json used for Latin-Gaussian slot noise std lookup.")
+    parser.add_argument("--rank_slot_noise_source", type=str, default="empirical",
+                        choices=["empirical", "gaussian_fit"],
+                        help="Noise parameters for Latin-Gaussian posterior: empirical raw mean/std or gaussian_fit mean/std.")
 
     parser.add_argument("--verbose", action="store_true",
                         help="Print verbose logs (extra summaries).")

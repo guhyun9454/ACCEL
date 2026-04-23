@@ -368,7 +368,11 @@ def _slot_labels_for_k(k: int) -> List[str]:
     return [str(i) for i in range(int(k))]
 
 
-def _load_rank_slot_noise_lookup(summary_path: str, k: int) -> Dict[Tuple[int, str], Tuple[float, float]]:
+def _load_rank_slot_noise_lookup(
+    summary_path: str,
+    k: int,
+    source: str = "empirical",
+) -> Dict[Tuple[int, str], Tuple[float, float]]:
     if not summary_path or not os.path.exists(summary_path):
         raise FileNotFoundError(
             f"rank-slot summary json not found: {summary_path}. "
@@ -382,6 +386,9 @@ def _load_rank_slot_noise_lookup(summary_path: str, k: int) -> Dict[Tuple[int, s
         raise ValueError(f"rank-slot summary missing by_k[{k}] in {summary_path}")
     raw = k_obj.get("raw", {}) or {}
     labels = _slot_labels_for_k(int(k))
+    source_norm = str(source or "empirical").strip().lower()
+    if source_norm not in {"empirical", "gaussian_fit"}:
+        raise ValueError(f"unsupported rank-slot noise source: {source}")
     lookup: Dict[Tuple[int, str], Tuple[float, float]] = {}
     for r in range(1, int(k) + 1):
         rank_key = f"rank{r}"
@@ -390,12 +397,13 @@ def _load_rank_slot_noise_lookup(summary_path: str, k: int) -> Dict[Tuple[int, s
             raise ValueError(f"rank-slot summary missing raw[{rank_key}] in {summary_path}")
         for slot in labels:
             fit = slot_map.get(slot, {}) or {}
-            mean_val = float(fit.get("mean", float("nan")))
-            std_val = float(fit.get("std", float("nan")))
+            param_src = (fit.get("gaussian_fit", {}) or {}) if source_norm == "gaussian_fit" else fit
+            mean_val = float(param_src.get("mean", float("nan")))
+            std_val = float(param_src.get("std", float("nan")))
             if not np.isfinite(mean_val):
-                raise ValueError(f"invalid mean for ({rank_key},{slot}) in {summary_path}: {mean_val}")
+                raise ValueError(f"invalid {source_norm} mean for ({rank_key},{slot}) in {summary_path}: {mean_val}")
             if not np.isfinite(std_val) or std_val <= 0.0:
-                raise ValueError(f"invalid std for ({rank_key},{slot}) in {summary_path}: {std_val}")
+                raise ValueError(f"invalid {source_norm} std for ({rank_key},{slot}) in {summary_path}: {std_val}")
             lookup[(int(r), str(slot))] = (mean_val, std_val)
     return lookup
 
@@ -2114,7 +2122,7 @@ def main():
         transition_records_ours_by_p: Dict[float, List[dict]] = {}
         sigma_analysis_baseline_records: List[dict] = []
         sigma_analysis_pride_by_alpha: Dict[float, List[dict]] = {}
-        rank_slot_noise_lookup_cache: Dict[int, Dict[Tuple[int, str], Tuple[float, float]]] = {}
+        rank_slot_noise_lookup_cache: Dict[Tuple[int, str], Dict[Tuple[int, str], Tuple[float, float]]] = {}
 
         def _make_transition_record_from_preds(base_correct, pred_idx, labels_idx, conf_arr, subject):
             """base_correct: List[bool], pred_idx: List[int], labels_idx: List[int], conf_arr: np.ndarray"""
@@ -2321,11 +2329,13 @@ def main():
                         full_corrects = 0
                         cyclic_total = 0
                         cyclic_corrects = 0
-                        if int(k) not in rank_slot_noise_lookup_cache:
-                            rank_slot_noise_lookup_cache[int(k)] = _load_rank_slot_noise_lookup(
-                                getattr(args, "rank_slot_summary_json", None), int(k)
+                        noise_source = str(getattr(args, "rank_slot_noise_source", "empirical") or "empirical")
+                        noise_cache_key = (int(k), noise_source)
+                        if noise_cache_key not in rank_slot_noise_lookup_cache:
+                            rank_slot_noise_lookup_cache[noise_cache_key] = _load_rank_slot_noise_lookup(
+                                getattr(args, "rank_slot_summary_json", None), int(k), source=noise_source
                             )
-                        rank_slot_noise_lookup = rank_slot_noise_lookup_cache[int(k)]
+                        rank_slot_noise_lookup = rank_slot_noise_lookup_cache[noise_cache_key]
                         slot_labels = _slot_labels_for_k(int(k))
 
                         swap_posterior_prob_list = []
