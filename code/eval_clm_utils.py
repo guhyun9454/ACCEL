@@ -104,6 +104,14 @@ def parse_arguments():
                         help="Ours+PRIDE에서 PriDe prefix(alpha) 값. 선택 가능한 α 목록.")
     parser.add_argument("--rank_slot_summary_json", type=str, default=None,
                         help="Path to multi_model_rank_slot_delta_summary.json used for swap-gaussian slot noise std lookup.")
+    parser.add_argument("--swap_posterior_conf_levels", type=str, default="80,90,95",
+                        help="Confidence levels (%) for calibrated Gaussian posterior routing, e.g. '80,90,95'.")
+    parser.add_argument("--swap_posterior_stat_source", type=str, default="empirical",
+                        choices=["empirical", "gaussian_fit"],
+                        help="Which mean/std source to read from rank-slot summary for calibrated Gaussian posterior routing.")
+    parser.add_argument("--swap_posterior_rank_mode", type=str, default="rank12_pooled",
+                        choices=["rank1", "rank2", "rank12_pooled"],
+                        help="How to pool rank information when building slot Gaussian stats for calibrated routing.")
 
     parser.add_argument("--verbose", action="store_true",
                         help="Print verbose logs (extra summaries).")

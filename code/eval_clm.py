@@ -31,6 +31,7 @@ from eval_clm_utils import (
 )
 from eval_clm_online import (
     _recall_std,
+    _gaussian_base_posterior_prob,
     _gaussian_swap_posterior_prob,
     _run_cyclic_random_fraction,
     _run_cyclic_random_fraction_with_preds,
@@ -43,6 +44,9 @@ from eval_clm_online import (
     _run_online_sqrt_policy_with_stats,
     _run_online_switch_cyclic_with_preds,
     _run_online_switch_cyclic_with_stats,
+    _run_online_swap_posterior_conf_policy,
+    _run_online_swap_posterior_conf_policy_with_preds,
+    _run_online_swap_posterior_conf_policy_with_stats,
     _run_online_swap_gaussian_policy,
     _run_online_swap_gaussian_policy_with_preds,
     _run_online_swap_gaussian_policy_with_stats,
@@ -84,6 +88,7 @@ logger = logging.getLogger(__name__)
 LEGACY_OURS_LABEL = "th1/2"
 SWAP_GAUSSIAN_LABEL = "swap_gaussian"
 SWAP_GAUSSIAN_SQRT_LABEL = "swap_gaussian_sqrt"
+SWAP_GAUSSIAN_POSTERIOR_LABEL = "swap_gaussian_posterior"
 PRIMARY_OURS_LABEL = SWAP_GAUSSIAN_LABEL
 
 
@@ -393,6 +398,93 @@ def _load_rank_slot_std_lookup(summary_path: str, k: int) -> Dict[Tuple[int, str
             if not np.isfinite(std_val) or std_val <= 0.0:
                 raise ValueError(f"invalid std for ({rank_key},{slot}) in {summary_path}: {std_val}")
             lookup[(int(r), str(slot))] = std_val
+    return lookup
+
+
+def _load_rank_slot_summary_obj(summary_path: str, k: int) -> Dict[str, Any]:
+    if not summary_path or not os.path.exists(summary_path):
+        raise FileNotFoundError(
+            f"rank-slot summary json not found: {summary_path}. "
+            f"Please provide --rank_slot_summary_json."
+        )
+    with open(summary_path, "r", encoding="utf-8") as f:
+        obj = json.load(f)
+    by_k = obj.get("by_k", {}) or {}
+    k_obj = by_k.get(str(int(k)))
+    if not isinstance(k_obj, dict):
+        raise ValueError(f"rank-slot summary missing by_k[{k}] in {summary_path}")
+    raw = k_obj.get("raw", {}) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"rank-slot summary missing by_k[{k}]['raw'] in {summary_path}")
+    return raw
+
+
+def _rank_slot_stat_from_entry(entry: Dict[str, Any], stat_source: str = "empirical") -> Dict[str, float]:
+    src = str(stat_source).lower().strip()
+    if src in {"fit", "gaussian", "gaussian_fit"}:
+        fit = (entry.get("gaussian_fit", {}) or {})
+        mean_val = float(fit.get("mean", float("nan")))
+        std_val = float(fit.get("std", float("nan")))
+    else:
+        mean_val = float(entry.get("mean", float("nan")))
+        std_val = float(entry.get("std", float("nan")))
+    n_val = int(entry.get("n", 0))
+    return {"n": n_val, "mean": mean_val, "std": std_val}
+
+
+def _combine_gaussian_stats(stats: List[Dict[str, float]]) -> Dict[str, float]:
+    valid = []
+    for st in (stats or []):
+        n = int(st.get("n", 0))
+        mean = float(st.get("mean", float("nan")))
+        std = float(st.get("std", float("nan")))
+        if n > 0 and np.isfinite(mean) and np.isfinite(std) and std >= 0.0:
+            valid.append({"n": n, "mean": mean, "std": std})
+    if not valid:
+        return {"n": 0, "mean": float("nan"), "std": float("nan")}
+    n_total = int(sum(int(st["n"]) for st in valid))
+    if n_total <= 0:
+        return {"n": 0, "mean": float("nan"), "std": float("nan")}
+    mean_total = float(sum(float(st["n"]) * float(st["mean"]) for st in valid) / float(n_total))
+    second_moment = float(
+        sum(
+            float(st["n"]) * ((float(st["std"]) ** 2) + (float(st["mean"]) ** 2))
+            for st in valid
+        ) / float(n_total)
+    )
+    var_total = max(0.0, second_moment - mean_total ** 2)
+    return {"n": int(n_total), "mean": float(mean_total), "std": float(math.sqrt(var_total))}
+
+
+def _load_slot_gaussian_stats_lookup(
+    summary_path: str,
+    k: int,
+    *,
+    stat_source: str = "empirical",
+    rank_mode: str = "rank12_pooled",
+) -> Dict[str, Dict[str, float]]:
+    raw = _load_rank_slot_summary_obj(summary_path, int(k))
+    labels = _slot_labels_for_k(int(k))
+    rank_mode_norm = str(rank_mode).lower().strip()
+    if rank_mode_norm not in {"rank1", "rank2", "rank12", "rank12_pooled"}:
+        raise ValueError(f"Unsupported rank_mode={rank_mode}. Expected one of rank1/rank2/rank12_pooled.")
+
+    lookup: Dict[str, Dict[str, float]] = {}
+    for slot in labels:
+        stats_to_merge: List[Dict[str, float]] = []
+        if rank_mode_norm == "rank1":
+            stats_to_merge.append(_rank_slot_stat_from_entry((raw.get("rank1", {}) or {}).get(slot, {}) or {}, stat_source))
+        elif rank_mode_norm == "rank2":
+            stats_to_merge.append(_rank_slot_stat_from_entry((raw.get("rank2", {}) or {}).get(slot, {}) or {}, stat_source))
+        else:
+            stats_to_merge.append(_rank_slot_stat_from_entry((raw.get("rank1", {}) or {}).get(slot, {}) or {}, stat_source))
+            stats_to_merge.append(_rank_slot_stat_from_entry((raw.get("rank2", {}) or {}).get(slot, {}) or {}, stat_source))
+        combined = _combine_gaussian_stats(stats_to_merge)
+        if not np.isfinite(float(combined.get("mean", float("nan")))):
+            raise ValueError(f"Invalid pooled mean for slot={slot} in {summary_path}")
+        if not np.isfinite(float(combined.get("std", float("nan")))) or float(combined.get("std", 0.0)) <= 0.0:
+            raise ValueError(f"Invalid pooled std for slot={slot} in {summary_path}")
+        lookup[str(slot)] = combined
     return lookup
 
 
@@ -1985,6 +2077,7 @@ def main():
                     derived_records_by_p,
                     derived_records_pride_by_p,
                     derived_records_pride_by_alpha,
+                    {},
                     out_dir,
                     args.task,
                     cyclic_fractions=cyclic_fracs,
@@ -2069,6 +2162,8 @@ def main():
         sigma_analysis_baseline_records: List[dict] = []
         sigma_analysis_pride_by_alpha: Dict[float, List[dict]] = {}
         rank_slot_std_lookup_cache: Dict[int, Dict[Tuple[int, str], float]] = {}
+        slot_gaussian_stats_cache: Dict[Tuple[int, str, str], Dict[str, Dict[str, float]]] = {}
+        swap_posterior_conf_records: Dict[float, List[dict]] = {}
 
         def _make_transition_record_from_preds(base_correct, pred_idx, labels_idx, conf_arr, subject):
             """base_correct: List[bool], pred_idx: List[int], labels_idx: List[int], conf_arr: np.ndarray"""
@@ -2280,9 +2375,24 @@ def main():
                                 getattr(args, "rank_slot_summary_json", None), int(k)
                             )
                         rank_slot_std_lookup = rank_slot_std_lookup_cache[int(k)]
+                        slot_gaussian_cache_key = (
+                            int(k),
+                            str(getattr(args, "swap_posterior_stat_source", "empirical")),
+                            str(getattr(args, "swap_posterior_rank_mode", "rank12_pooled")),
+                        )
+                        if slot_gaussian_cache_key not in slot_gaussian_stats_cache:
+                            slot_gaussian_stats_cache[slot_gaussian_cache_key] = _load_slot_gaussian_stats_lookup(
+                                getattr(args, "rank_slot_summary_json", None),
+                                int(k),
+                                stat_source=str(getattr(args, "swap_posterior_stat_source", "empirical")),
+                                rank_mode=str(getattr(args, "swap_posterior_rank_mode", "rank12_pooled")),
+                            )
+                        slot_gaussian_stats = slot_gaussian_stats_cache[slot_gaussian_cache_key]
                         slot_labels = _slot_labels_for_k(int(k))
 
                         swap_posterior_prob_list = []
+                        base_posterior_prob_list = []
+                        swap_slot_posterior_prob_list = []
                         swap_cand1_pred_idx_list = []
                         swap_cand2_pred_idx_list = []
                         swap_cand1_correct_list = []
@@ -2360,6 +2470,18 @@ def main():
                             slot1_swap = str(slot_labels[int(cand2_idx)])
                             slot2_base = str(slot_labels[int(cand2_idx)])
                             slot2_swap = str(slot_labels[int(cand1_idx)])
+                            base_slot_stat_1 = slot_gaussian_stats[slot1_base]
+                            base_slot_stat_2 = slot_gaussian_stats[slot2_base]
+                            swap_slot_stat_1 = slot_gaussian_stats[slot1_swap]
+                            swap_slot_stat_2 = slot_gaussian_stats[slot2_swap]
+                            p_base = _gaussian_base_posterior_prob(
+                                y1=float(base_probs[int(cand1_idx)]),
+                                mean1=float(base_slot_stat_1["mean"]),
+                                std1=float(base_slot_stat_1["std"]),
+                                y2=float(base_probs[int(cand2_idx)]),
+                                mean2=float(base_slot_stat_2["mean"]),
+                                std2=float(base_slot_stat_2["std"]),
+                            )
                             p_swap = _gaussian_swap_posterior_prob(
                                 y1_base=float(base_probs[int(cand1_idx)]),
                                 y1_swap=float(swap_probs_np[int(cand2_idx)]),
@@ -2370,7 +2492,19 @@ def main():
                                 std2_base=float(rank_slot_std_lookup[(int(rank2), slot2_base)]),
                                 std2_swap=float(rank_slot_std_lookup[(int(rank2), slot2_swap)]),
                             )
+                            p_swap_slot = _gaussian_swap_posterior_prob(
+                                y1_base=float(base_probs[int(cand1_idx)]),
+                                y1_swap=float(swap_probs_np[int(cand2_idx)]),
+                                std1_base=float(base_slot_stat_1["std"]),
+                                std1_swap=float(swap_slot_stat_1["std"]),
+                                y2_base=float(base_probs[int(cand2_idx)]),
+                                y2_swap=float(swap_probs_np[int(cand1_idx)]),
+                                std2_base=float(base_slot_stat_2["std"]),
+                                std2_swap=float(swap_slot_stat_2["std"]),
+                            )
+                            base_posterior_prob_list.append(float(p_base))
                             swap_posterior_prob_list.append(float(p_swap))
+                            swap_slot_posterior_prob_list.append(float(p_swap_slot))
                             base_results.append({
                                 'type': 'result',
                                 'data': {
@@ -2448,7 +2582,9 @@ def main():
                         mean_conf = np.asarray(mean_gap_list, dtype=np.float64)
                         arr_flip_trigger = np.asarray(flip_trigger_mask, dtype=bool)
                         arr_probe2_correct = np.asarray(probe2_correct_list, dtype=bool)
+                        arr_base_posterior = np.asarray(base_posterior_prob_list, dtype=np.float64)
                         arr_swap_posterior = np.asarray(swap_posterior_prob_list, dtype=np.float64)
+                        arr_swap_slot_posterior = np.asarray(swap_slot_posterior_prob_list, dtype=np.float64)
                         cyclic_gap_mean = np.asarray(cyclic_gap_mean_list, dtype=np.float64)
                         cyclic_gap_std = np.asarray(cyclic_gap_std_list, dtype=np.float64)
                         sigma_analysis_baseline_records.append(
@@ -2461,6 +2597,46 @@ def main():
                                 flip_mask=arr_flip_trigger,
                             )
                         )
+                        try:
+                            conf_levels = [
+                                float(x)
+                                for x in _parse_percent_value_list(getattr(args, "swap_posterior_conf_levels", "80,90,95"))
+                                if 50.0 <= float(x) <= 100.0
+                            ]
+                        except Exception:
+                            conf_levels = [80.0, 90.0, 95.0]
+                        for conf_level in conf_levels:
+                            try:
+                                sp_cost, sp_acc, sp_stats = _run_online_swap_posterior_conf_policy_with_stats(
+                                    base_posterior_prob=arr_base_posterior,
+                                    swap_posterior_prob=arr_swap_slot_posterior,
+                                    cand1_correct=swap_cand1_correct_list,
+                                    cand2_correct=swap_cand2_correct_list,
+                                    k=k,
+                                    conf_percent=float(conf_level),
+                                    cyclic_correct=cyclic_correct_list,
+                                )
+                                _, _, sp_preds = _run_online_swap_posterior_conf_policy_with_preds(
+                                    base_posterior_prob=arr_base_posterior,
+                                    swap_posterior_prob=arr_swap_slot_posterior,
+                                    cand1_pred_idx=swap_cand1_pred_idx_list,
+                                    cand2_pred_idx=swap_cand2_pred_idx_list,
+                                    labels_idx=[option_ids.index(str(x)) for x in ideals],
+                                    k=k,
+                                    conf_percent=float(conf_level),
+                                    cyclic_pred_idx=cyclic_pred_idx_list,
+                                )
+                                swap_posterior_conf_records.setdefault(float(conf_level), []).append({
+                                    "subject": str(subject),
+                                    "cost": float(sp_cost),
+                                    "acc": float(sp_acc),
+                                    "recall_std": float(_recall_std([option_ids.index(str(x)) for x in ideals], sp_preds, k)),
+                                    "n_base": int(sp_stats.get("n_base", 0)),
+                                    "n_swap": int(sp_stats.get("n_swap", 0)),
+                                    "n_cyclic": int(sp_stats.get("n_cyclic", 0)),
+                                })
+                            except Exception:
+                                pass
 
                         # Base T/F 그룹별 Gap 및 트랜지션 카운트 수집 (Cyclic & Full)
                         base_t_gaps_cyc, base_f_gaps_cyc = [], []
@@ -3048,6 +3224,7 @@ def main():
                     derived_records_by_p,
                     derived_records_pride_by_p if len(derived_records_pride_by_p) > 0 else {},
                     derived_records_pride_by_alpha if len(derived_records_pride_by_alpha) > 0 else {},
+                    swap_posterior_conf_records if len(swap_posterior_conf_records) > 0 else {},
                     out_dir,
                     args.task,
                     cyclic_fractions=cyclic_fracs or [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
@@ -3203,6 +3380,28 @@ def main():
                     logger.info(f"ours_swap_gaussian_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_cyclic={nc:.0f}")
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], SWAP_GAUSSIAN_SQRT_LABEL)
                     logger.info(f"ours_swap_gaussian_sqrt_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_cyclic={nc:.0f}")
+
+            # 3.5 calibrated Gaussian posterior routing
+            if swap_posterior_conf_records:
+                logger.info("---- ours posterior confidence ----")
+                for conf_level in sorted(swap_posterior_conf_records.keys()):
+                    rows = swap_posterior_conf_records[float(conf_level)]
+                    costs = [float(r.get("cost", float("nan"))) for r in rows if np.isfinite(float(r.get("cost", float("nan"))))]
+                    accs = [float(r.get("acc", float("nan"))) for r in rows if np.isfinite(float(r.get("acc", float("nan"))))]
+                    rstds = [float(r.get("recall_std", float("nan"))) for r in rows if np.isfinite(float(r.get("recall_std", float("nan"))))]
+                    mean_c, std_c = _macro_mean_std_over_runs(costs, n_subjects, n_runs)
+                    mean_a, std_a = _macro_mean_std_over_runs(accs, n_subjects, n_runs)
+                    mean_r, std_r = _macro_mean_std_over_runs(rstds, n_subjects, n_runs)
+                    mean_nb = float(np.mean([float(r.get("n_base", 0)) for r in rows])) if rows else 0.0
+                    mean_ns = float(np.mean([float(r.get("n_swap", 0)) for r in rows])) if rows else 0.0
+                    mean_nc = float(np.mean([float(r.get("n_cyclic", 0)) for r in rows])) if rows else 0.0
+                    conf_str = f"{float(conf_level):g}"
+                    logger.info(
+                        f"ours_swap_gaussian_posterior_{conf_str}% : "
+                        f"cost={_fmt(mean_c, std_c)}, acc={_fmt4(mean_a, std_a)}, "
+                        f"recall_std={_fmt4(mean_r, std_r)}, "
+                        f"n_base={mean_nb:.0f}, n_swap={mean_ns:.0f}, n_cyclic={mean_nc:.0f}"
+                    )
 
             # 4. cyclic
             logger.info("---- cyclic ----")

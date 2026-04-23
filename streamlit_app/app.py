@@ -57,6 +57,13 @@ CURVE_DEFS = {
         "linestyle": ":",
         "marker": "P",
     },
+    "ours_posterior": {
+        "x_key": "conf",
+        "label": "Ours (posterior-calibrated)",
+        "color": _PAL["reddish_purple"],
+        "linestyle": "--",
+        "marker": "X",
+    },
     "ours_pride": {
         "x_key": "p",
         "label": "Ours+PriDe (th1/2 legacy)",
@@ -227,6 +234,8 @@ def _curve_series_from_payload(
     curve = curves.get(curve_key, {}) or {}
     if curve_key == "ours_sqrt":
         curve = curves.get("swap_gaussian_sqrt", {}) or {}
+    if curve_key == "ours_posterior":
+        curve = curves.get("swap_gaussian_posterior", {}) or {}
     if curve_key == "ours_pride":
         ours_pride_data = curves.get("ours_pride", {}) or {}
         by_alpha = ours_pride_data.get("by_alpha") or {}
@@ -797,15 +806,16 @@ st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X�
 curve_keys = st.multiselect(
     "그릴 곡선",
     options=list(CURVE_DEFS.keys()),
-    default=["cyclic", "default_pride", "ours", "ours_sqrt", "ours_pride"],
+    default=["cyclic", "default_pride", "ours", "ours_sqrt", "ours_posterior", "ours_pride"],
     help="주로 `ours`와 `ours_pride`를 보면 됩니다.",
 )
 
 cyclic_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 pride_ours_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+posterior_conf_options = [50, 60, 70, 80, 90, 95, 99, 100]
 
 st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
-col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
+col_p1, col_p2, col_p3, col_p4, col_p5, col_p6 = st.columns(6)
 with col_p1:
     max_pct_cyclic = st.selectbox(
         "Cyclic 상한",
@@ -839,6 +849,14 @@ with col_p4:
         key="max_ours_sqrt",
     )
 with col_p5:
+    max_pct_ours_posterior = st.selectbox(
+        "Ours posterior 상한",
+        options=posterior_conf_options,
+        index=len(posterior_conf_options) - 1,
+        format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
+        key="max_ours_posterior",
+    )
+with col_p6:
     max_pct_ours_pride = st.selectbox(
         "Ours+PriDe 상한",
         options=pride_ours_options,
@@ -848,7 +866,7 @@ with col_p5:
     )
 
 st.caption("곡선별 퍼센타일 하한 (선택한 % 이상만 표시)")
-col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
 with col_m1:
     min_pct_cyclic = st.selectbox(
         "Cyclic 하한",
@@ -882,6 +900,14 @@ with col_m4:
         key="min_ours_sqrt",
     )
 with col_m5:
+    min_pct_ours_posterior = st.selectbox(
+        "Ours posterior 하한",
+        options=posterior_conf_options,
+        index=0,
+        format_func=lambda x: f"{x}%",
+        key="min_ours_posterior",
+    )
+with col_m6:
     min_pct_ours_pride = st.selectbox(
         "Ours+PriDe 하한",
         options=pride_ours_options,
@@ -905,6 +931,7 @@ max_pct_by_curve = {
     "default_pride": float(max_pct_pride),
     "ours": float(max_pct_ours),
     "ours_sqrt": float(max_pct_ours_sqrt),
+    "ours_posterior": float(max_pct_ours_posterior),
     "ours_pride": float(max_pct_ours_pride),
 }
 min_pct_by_curve = {
@@ -912,6 +939,7 @@ min_pct_by_curve = {
     "default_pride": float(min_pct_pride),
     "ours": float(min_pct_ours),
     "ours_sqrt": float(min_pct_ours_sqrt),
+    "ours_posterior": float(min_pct_ours_posterior),
     "ours_pride": float(min_pct_ours_pride),
 }
 
@@ -930,7 +958,7 @@ overall_mode_key = "flatten_equal_run_weight" if display_mode in ("each_plus_mea
 st.subheader("라벨(범례) 설정")
 st.caption("범례에 표시되는 곡선 이름/Overall 이름을 원하는 대로 바꿀 수 있어요.")
 
-col_a, col_b, col_c, col_d, col_e, col_f = st.columns([1, 1, 1, 1, 1, 1])
+col_a, col_b, col_c, col_d, col_e, col_f, col_g = st.columns([1, 1, 1, 1, 1, 1, 1])
 with col_a:
     overall_label = st.text_input("Overall 라벨", value="Overall mean")
 with col_b:
@@ -942,6 +970,8 @@ with col_d:
 with col_e:
     lab_ours_sqrt = st.text_input("OURS sqrt 라벨", value=CURVE_DEFS["ours_sqrt"]["label"])
 with col_f:
+    lab_ours_posterior = st.text_input("OURS posterior 라벨", value=CURVE_DEFS["ours_posterior"]["label"])
+with col_g:
     lab_ours_pride = st.text_input("Ours (PriDe 붙은 곡선) 라벨", value="Ours")
 
 curve_label_overrides = {
@@ -949,6 +979,7 @@ curve_label_overrides = {
     "default_pride": lab_pride,
     "ours": lab_ours,
     "ours_sqrt": lab_ours_sqrt,
+    "ours_posterior": lab_ours_posterior,
     "ours_pride": lab_ours_pride,
 }
 
