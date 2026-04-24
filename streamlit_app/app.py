@@ -58,14 +58,14 @@ CURVE_DEFS = {
         "marker": "P",
     },
     "ours_posterior": {
-        "x_key": "conf",
+        "x_key": "p",
         "label": "Ours (posterior-calibrated)",
         "color": _PAL["reddish_purple"],
         "linestyle": "--",
         "marker": "X",
     },
     "ours_posterior_latin": {
-        "x_key": "conf",
+        "x_key": "p",
         "label": "Ours (posterior + Latin fallback)",
         "color": "#7F3C8D",
         "linestyle": "-.",
@@ -263,6 +263,8 @@ def _curve_series_from_payload(
     x_key = CURVE_DEFS.get(curve_key, {}).get("x_key") or "p"
 
     xs = curve.get(x_key, []) or []
+    if (not xs) and curve_key in {"ours_posterior", "ours_posterior_latin"}:
+        xs = curve.get("conf", []) or []
     costs = curve.get("cost", []) or []
     if y_key == "delta_acc":
         ys = curve.get("delta_acc", []) or []
@@ -810,18 +812,17 @@ for rp in selected_runs:
     group_payloads[str(prefix)] = [payload]
 
 st.subheader("그래프 옵션")
-st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 현재 메인 곡선은 `ours`(swap Gaussian)와 `ours_pride`(legacy th1/2 baseline)입니다.")
+st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. `ours`, `ours_sqrt`, `ours_posterior`, `ours_posterior_latin`, `ours_pride`는 모두 percentile sweep 기준으로 비교합니다.")
 
 curve_keys = st.multiselect(
     "그릴 곡선",
     options=list(CURVE_DEFS.keys()),
     default=["cyclic", "default_pride", "ours", "ours_sqrt", "ours_posterior", "ours_posterior_latin", "ours_pride"],
-    help="주로 `ours`와 `ours_pride`를 보면 됩니다.",
+    help="posterior 계열도 기존 ours처럼 percentile sweep 축에서 비교됩니다.",
 )
 
 cyclic_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 pride_ours_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-posterior_conf_options = [50, 60, 70, 80, 90, 95, 99, 100]
 
 st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
 col_p1, col_p2, col_p3, col_p4, col_p5, col_p6 = st.columns(6)
@@ -860,8 +861,8 @@ with col_p4:
 with col_p5:
     max_pct_ours_posterior = st.selectbox(
         "Ours posterior 상한",
-        options=posterior_conf_options,
-        index=len(posterior_conf_options) - 1,
+        options=pride_ours_options,
+        index=len(pride_ours_options) - 1,
         format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
         key="max_ours_posterior",
     )
@@ -911,7 +912,7 @@ with col_m4:
 with col_m5:
     min_pct_ours_posterior = st.selectbox(
         "Ours posterior 하한",
-        options=posterior_conf_options,
+        options=pride_ours_options,
         index=0,
         format_func=lambda x: f"{x}%",
         key="min_ours_posterior",
@@ -941,6 +942,7 @@ max_pct_by_curve = {
     "ours": float(max_pct_ours),
     "ours_sqrt": float(max_pct_ours_sqrt),
     "ours_posterior": float(max_pct_ours_posterior),
+    "ours_posterior_latin": float(max_pct_ours_posterior),
     "ours_pride": float(max_pct_ours_pride),
 }
 min_pct_by_curve = {
@@ -949,6 +951,7 @@ min_pct_by_curve = {
     "ours": float(min_pct_ours),
     "ours_sqrt": float(min_pct_ours_sqrt),
     "ours_posterior": float(min_pct_ours_posterior),
+    "ours_posterior_latin": float(min_pct_ours_posterior),
     "ours_pride": float(min_pct_ours_pride),
 }
 

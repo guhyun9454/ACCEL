@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 PRIMARY_OURS_LABEL = "swap_gaussian"
 SWAP_GAUSSIAN_SQRT_LABEL = "swap_gaussian_sqrt"
 SWAP_GAUSSIAN_POSTERIOR_LABEL = "swap_gaussian_posterior"
+SWAP_GAUSSIAN_POSTERIOR_LATIN_LABEL = "swap_gaussian_posterior_latin"
 LEGACY_OURS_PRIDE_LABEL = "th1/2"
 
 
@@ -165,11 +166,15 @@ def _plot_three_curves_acc_recall_std(
         SWAP_GAUSSIAN_SQRT_LABEL,
         pride_ours_fractions,
     )
-    posterior_conf_levels, cost_ours_posterior, acc_ours_posterior, rstd_ours_posterior, acc_std_ours_posterior, rstd_std_ours_posterior = _agg_posterior_conf(
-        derived_records_posterior_by_conf or {}
+    cost_ours_posterior, acc_ours_posterior, rstd_ours_posterior, acc_std_ours_posterior, rstd_std_ours_posterior = _agg_heur(
+        derived_records_by_p,
+        SWAP_GAUSSIAN_POSTERIOR_LABEL,
+        pride_ours_fractions,
     )
-    posterior_latin_conf_levels, cost_ours_posterior_latin, acc_ours_posterior_latin, rstd_ours_posterior_latin, acc_std_ours_posterior_latin, rstd_std_ours_posterior_latin = _agg_posterior_conf(
-        derived_records_posterior_latin_by_conf or {}
+    cost_ours_posterior_latin, acc_ours_posterior_latin, rstd_ours_posterior_latin, acc_std_ours_posterior_latin, rstd_std_ours_posterior_latin = _agg_heur(
+        derived_records_by_p,
+        SWAP_GAUSSIAN_POSTERIOR_LATIN_LABEL,
+        pride_ours_fractions,
     )
 
     if derived_records_pride_by_alpha:
@@ -351,8 +356,8 @@ def _plot_three_curves_acc_recall_std(
             "default_recall_std": float(default_recall_std),
             "cyclic_fractions": [int(x) for x in cyclic_fractions],
             "pride_ours_fractions": [float(x) for x in pride_ours_fractions],
-            "posterior_conf_levels": [float(x) for x in posterior_conf_levels],
-            "posterior_latin_conf_levels": [float(x) for x in posterior_latin_conf_levels],
+            "posterior_conf_levels": [],
+            "posterior_latin_conf_levels": [],
             "curves": {
                 "cyclic": {
                     "fraction": [int(x) for x in cyclic_fractions],
@@ -398,7 +403,7 @@ def _plot_three_curves_acc_recall_std(
                 },
                 "swap_gaussian_posterior": {
                     "label": SWAP_GAUSSIAN_POSTERIOR_LABEL,
-                    "conf": [float(x) for x in posterior_conf_levels],
+                    "p": [float(x) for x in pride_ours_fractions],
                     "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours_posterior],
                     "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours_posterior],
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours_posterior],
@@ -408,8 +413,8 @@ def _plot_three_curves_acc_recall_std(
                     "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_ours_posterior],
                 },
                 "swap_gaussian_posterior_latin": {
-                    "label": "swap_gaussian_posterior_latin",
-                    "conf": [float(x) for x in posterior_latin_conf_levels],
+                    "label": SWAP_GAUSSIAN_POSTERIOR_LATIN_LABEL,
+                    "p": [float(x) for x in pride_ours_fractions],
                     "cost": [float(x) if np.isfinite(x) else float("nan") for x in cost_ours_posterior_latin],
                     "acc": [float(x) if np.isfinite(x) else float("nan") for x in acc_ours_posterior_latin],
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rstd_ours_posterior_latin],

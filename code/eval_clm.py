@@ -47,6 +47,9 @@ from eval_clm_online import (
     _run_online_swap_posterior_conf_policy,
     _run_online_swap_posterior_conf_policy_with_preds,
     _run_online_swap_posterior_conf_policy_with_stats,
+    _run_online_swap_posterior_beta_policy,
+    _run_online_swap_posterior_beta_policy_with_preds,
+    _run_online_swap_posterior_beta_policy_with_stats,
     _run_online_swap_gaussian_policy,
     _run_online_swap_gaussian_policy_with_preds,
     _run_online_swap_gaussian_policy_with_stats,
@@ -2839,6 +2842,74 @@ def main():
                                             cobj["heuristic_points"].append(hp_swap_sqrt)
                                         except Exception:
                                             pass
+                                        try:
+                                            c_post, a_post, st_post = _run_online_swap_posterior_beta_policy_with_stats(
+                                                base_posterior_prob=arr_base_posterior,
+                                                swap_posterior_prob=arr_swap_slot_posterior,
+                                                cand1_correct=swap_cand1_correct_list,
+                                                cand2_correct=swap_cand2_correct_list,
+                                                k=k,
+                                                th1_percent=perc,
+                                                cyclic_correct=cyclic_correct_list,
+                                            )
+                                            hp_post = {
+                                                "label": SWAP_GAUSSIAN_POSTERIOR_LABEL,
+                                                "cost": float(c_post),
+                                                "acc": float(a_post),
+                                                "marker": "X",
+                                                "color": "gray",
+                                                "n_base": int(st_post.get("n_base", 0)),
+                                                "n_swap": int(st_post.get("n_swap", 0)),
+                                                "n_cyclic": int(st_post.get("n_cyclic", 0)),
+                                            }
+                                            _, _, preds_post = _run_online_swap_posterior_beta_policy_with_preds(
+                                                base_posterior_prob=arr_base_posterior,
+                                                swap_posterior_prob=arr_swap_slot_posterior,
+                                                cand1_pred_idx=swap_cand1_pred_idx_list,
+                                                cand2_pred_idx=swap_cand2_pred_idx_list,
+                                                labels_idx=labels_idx_for_curves,
+                                                k=k,
+                                                th1_percent=perc,
+                                                cyclic_pred_idx=cyclic_pred_idx_list,
+                                            )
+                                            hp_post["recall_std"] = float(_recall_std(labels_idx_for_curves, preds_post, k))
+                                            cobj["heuristic_points"].append(hp_post)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            c_post_l, a_post_l, st_post_l = _run_online_swap_posterior_beta_policy_with_stats(
+                                                base_posterior_prob=arr_base_posterior,
+                                                swap_posterior_prob=arr_swap_slot_posterior,
+                                                cand1_correct=swap_cand1_correct_list,
+                                                cand2_correct=swap_cand2_correct_list,
+                                                k=k,
+                                                th1_percent=perc,
+                                                cyclic_correct=latin_correct_list,
+                                            )
+                                            hp_post_l = {
+                                                "label": SWAP_GAUSSIAN_POSTERIOR_LATIN_LABEL,
+                                                "cost": float(c_post_l),
+                                                "acc": float(a_post_l),
+                                                "marker": "D",
+                                                "color": "gray",
+                                                "n_base": int(st_post_l.get("n_base", 0)),
+                                                "n_swap": int(st_post_l.get("n_swap", 0)),
+                                                "n_cyclic": int(st_post_l.get("n_cyclic", 0)),
+                                            }
+                                            _, _, preds_post_l = _run_online_swap_posterior_beta_policy_with_preds(
+                                                base_posterior_prob=arr_base_posterior,
+                                                swap_posterior_prob=arr_swap_slot_posterior,
+                                                cand1_pred_idx=swap_cand1_pred_idx_list,
+                                                cand2_pred_idx=swap_cand2_pred_idx_list,
+                                                labels_idx=labels_idx_for_curves,
+                                                k=k,
+                                                th1_percent=perc,
+                                                cyclic_pred_idx=latin_pred_idx_list,
+                                            )
+                                            hp_post_l["recall_std"] = float(_recall_std(labels_idx_for_curves, preds_post_l, k))
+                                            cobj["heuristic_points"].append(hp_post_l)
+                                        except Exception:
+                                            pass
 
                                     # Ours (baseline) transition 기록
                                     try:
@@ -3429,8 +3500,12 @@ def main():
                     logger.info(f"ours_swap_gaussian_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_cyclic={nc:.0f}")
                     cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], SWAP_GAUSSIAN_SQRT_LABEL)
                     logger.info(f"ours_swap_gaussian_sqrt_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_cyclic={nc:.0f}")
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], SWAP_GAUSSIAN_POSTERIOR_LABEL)
+                    logger.info(f"ours_swap_gaussian_posterior_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_cyclic={nc:.0f}")
+                    cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats(derived_records_by_p[float(p)], SWAP_GAUSSIAN_POSTERIOR_LATIN_LABEL)
+                    logger.info(f"ours_swap_gaussian_posterior_latin_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_swap={np2:.0f}, n_latin={nc:.0f}")
 
-            # 3.5 calibrated Gaussian posterior routing
+            # 3.5 calibrated Gaussian posterior routing (legacy confidence-level summary)
             if swap_posterior_conf_records:
                 logger.info("---- ours posterior confidence ----")
                 for conf_level in sorted(swap_posterior_conf_records.keys()):

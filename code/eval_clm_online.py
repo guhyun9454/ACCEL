@@ -220,6 +220,140 @@ def _run_online_swap_posterior_conf_policy_with_stats(
     return total_cost / float(N), corrects / float(N), {"n_base": int(n_base), "n_swap": int(n_swap), "n_cyclic": int(n_cyclic)}
 
 
+def _run_online_swap_posterior_beta_policy_with_preds(
+    base_posterior_prob: np.ndarray,
+    swap_posterior_prob: np.ndarray,
+    cand1_pred_idx: List[int],
+    cand2_pred_idx: List[int],
+    labels_idx: List[int],
+    k: int,
+    th1_percent: float,
+    cyclic_pred_idx: Optional[List[int]] = None,
+) -> Tuple[float, float, List[int]]:
+    N = len(labels_idx)
+    if N == 0:
+        return float("nan"), float("nan"), []
+    bp = np.asarray(base_posterior_prob, dtype=np.float64)
+    sp = np.asarray(swap_posterior_prob, dtype=np.float64)
+    q = float(th1_percent) / 100.0
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    past_base_conf: List[float] = []
+    for i in range(N):
+        base_p = float(bp[i])
+        swap_p = float(sp[i])
+        base_conf = _posterior_confidence(base_p)
+        swap_conf = _posterior_confidence(swap_p)
+        th_val = float(np.quantile(np.asarray(past_base_conf, dtype=np.float64), q)) if len(past_base_conf) > 0 else 0.0
+        if base_conf >= th_val:
+            pred_i = int(cand1_pred_idx[i]) if base_p >= 0.5 else int(cand2_pred_idx[i])
+            c_step = 1.0
+        elif swap_conf >= th_val:
+            pred_i = int(cand1_pred_idx[i]) if swap_p >= 0.5 else int(cand2_pred_idx[i])
+            c_step = 2.0
+        elif cyclic_pred_idx is not None:
+            pred_i = int(cyclic_pred_idx[i])
+            c_step = float(k)
+        else:
+            pred_i = int(cand1_pred_idx[i]) if (swap_p if np.isfinite(swap_p) else base_p) >= 0.5 else int(cand2_pred_idx[i])
+            c_step = 2.0
+        preds.append(pred_i)
+        total_cost += float(c_step)
+        corrects += 1 if int(pred_i) == int(labels_idx[i]) else 0
+        past_base_conf.append(float(base_conf))
+    return total_cost / float(N), corrects / float(N), preds
+
+
+def _run_online_swap_posterior_beta_policy(
+    base_posterior_prob: np.ndarray,
+    swap_posterior_prob: np.ndarray,
+    cand1_correct: List[bool],
+    cand2_correct: List[bool],
+    k: int,
+    th1_percent: float,
+    cyclic_correct: Optional[List[bool]] = None,
+) -> Tuple[float, float]:
+    N = len(cand1_correct)
+    if N == 0:
+        return float("nan"), float("nan")
+    bp = np.asarray(base_posterior_prob, dtype=np.float64)
+    sp = np.asarray(swap_posterior_prob, dtype=np.float64)
+    q = float(th1_percent) / 100.0
+    total_cost = 0.0
+    corrects = 0
+    past_base_conf: List[float] = []
+    for i in range(N):
+        base_p = float(bp[i])
+        swap_p = float(sp[i])
+        base_conf = _posterior_confidence(base_p)
+        swap_conf = _posterior_confidence(swap_p)
+        th_val = float(np.quantile(np.asarray(past_base_conf, dtype=np.float64), q)) if len(past_base_conf) > 0 else 0.0
+        if base_conf >= th_val:
+            total_cost += 1.0
+            corrects += 1 if (bool(cand1_correct[i]) if base_p >= 0.5 else bool(cand2_correct[i])) else 0
+        elif swap_conf >= th_val:
+            total_cost += 2.0
+            corrects += 1 if (bool(cand1_correct[i]) if swap_p >= 0.5 else bool(cand2_correct[i])) else 0
+        elif cyclic_correct is not None:
+            total_cost += float(k)
+            corrects += 1 if bool(cyclic_correct[i]) else 0
+        else:
+            total_cost += 2.0
+            pred_from = swap_p if np.isfinite(swap_p) else base_p
+            corrects += 1 if (bool(cand1_correct[i]) if pred_from >= 0.5 else bool(cand2_correct[i])) else 0
+        past_base_conf.append(float(base_conf))
+    return total_cost / float(N), corrects / float(N)
+
+
+def _run_online_swap_posterior_beta_policy_with_stats(
+    base_posterior_prob: np.ndarray,
+    swap_posterior_prob: np.ndarray,
+    cand1_correct: List[bool],
+    cand2_correct: List[bool],
+    k: int,
+    th1_percent: float,
+    cyclic_correct: Optional[List[bool]] = None,
+) -> Tuple[float, float, Dict[str, int]]:
+    N = len(cand1_correct)
+    if N == 0:
+        return float("nan"), float("nan"), {"n_base": 0, "n_swap": 0, "n_cyclic": 0}
+    bp = np.asarray(base_posterior_prob, dtype=np.float64)
+    sp = np.asarray(swap_posterior_prob, dtype=np.float64)
+    q = float(th1_percent) / 100.0
+    total_cost = 0.0
+    corrects = 0
+    n_base = 0
+    n_swap = 0
+    n_cyclic = 0
+    past_base_conf: List[float] = []
+    for i in range(N):
+        base_p = float(bp[i])
+        swap_p = float(sp[i])
+        base_conf = _posterior_confidence(base_p)
+        swap_conf = _posterior_confidence(swap_p)
+        th_val = float(np.quantile(np.asarray(past_base_conf, dtype=np.float64), q)) if len(past_base_conf) > 0 else 0.0
+        if base_conf >= th_val:
+            total_cost += 1.0
+            corrects += 1 if (bool(cand1_correct[i]) if base_p >= 0.5 else bool(cand2_correct[i])) else 0
+            n_base += 1
+        elif swap_conf >= th_val:
+            total_cost += 2.0
+            corrects += 1 if (bool(cand1_correct[i]) if swap_p >= 0.5 else bool(cand2_correct[i])) else 0
+            n_swap += 1
+        elif cyclic_correct is not None:
+            total_cost += float(k)
+            corrects += 1 if bool(cyclic_correct[i]) else 0
+            n_cyclic += 1
+        else:
+            total_cost += 2.0
+            pred_from = swap_p if np.isfinite(swap_p) else base_p
+            corrects += 1 if (bool(cand1_correct[i]) if pred_from >= 0.5 else bool(cand2_correct[i])) else 0
+            n_swap += 1
+        past_base_conf.append(float(base_conf))
+    return total_cost / float(N), corrects / float(N), {"n_base": int(n_base), "n_swap": int(n_swap), "n_cyclic": int(n_cyclic)}
+
+
 def _run_online_swap_gaussian_policy_with_preds(
     default_conf: np.ndarray,
     swap_posterior_prob: np.ndarray,
