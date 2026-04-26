@@ -71,6 +71,13 @@ CURVE_DEFS = {
         "linestyle": "-.",
         "marker": "D",
     },
+    "empirical_pride_primary": {
+        "x_key": "p",
+        "label": "Empirical PriDe",
+        "color": _PAL["reddish_purple"],
+        "linestyle": "-",
+        "marker": "X",
+    },
 }
 
 # Ours+PRIDE 다중 α 곡선용 색상 팔레트 (α·variant별 구분)
@@ -259,6 +266,16 @@ def _curve_series_from_payload(
                         )
                 else:
                     curve = alpha_curves
+    elif curve_key == "empirical_pride_primary":
+        empirical_data = curves.get("empirical_pride", {}) or {}
+        by_alpha = empirical_data.get("by_alpha") or {}
+        alpha_key = (f"{float(ours_pride_alpha):g}" if ours_pride_alpha is not None else (list(by_alpha.keys())[0] if by_alpha else None))
+        if alpha_key and alpha_key in by_alpha:
+            alpha_curves = by_alpha[alpha_key]
+            if isinstance(alpha_curves, dict):
+                curve = alpha_curves.get("primary") or alpha_curves
+            else:
+                curve = alpha_curves
     x_key = CURVE_DEFS.get(curve_key, {}).get("x_key") or "p"
 
     xs = curve.get(x_key, []) or []
@@ -400,7 +417,7 @@ def _plot_groups(
     max_by = max_pct_by_curve or {}
     min_by = min_pct_by_curve or {}
 
-    _pride_keys = ("ours_pride_primary", "ours_pride_th1_2", "ours_pride_online_sqrt")
+    _pride_keys = ("ours_pride_primary", "ours_pride_th1_2", "ours_pride_online_sqrt", "empirical_pride_primary")
     if plot_individual:
         for gname, payloads in group_payloads.items():
             if not payloads:
@@ -422,18 +439,30 @@ def _plot_groups(
                         if x.size == 0:
                             continue
                         cd = CURVE_DEFS[ck]
-                        base_offset = {"ours_pride_primary": 0, "ours_pride_th1_2": len(alphas), "ours_pride_online_sqrt": 2 * len(alphas)}
+                        base_offset = {
+                            "ours_pride_primary": 0,
+                            "ours_pride_th1_2": len(alphas),
+                            "ours_pride_online_sqrt": 2 * len(alphas),
+                            "empirical_pride_primary": 3 * len(alphas),
+                        }
                         color_idx = base_offset.get(ck, 0) + i
                         line_color = cd["color"] if len(alphas) == 1 else ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
-                        base_lab = str(ours_pride_base_label or "Ours").strip()
+                        if ck == "empirical_pride_primary":
+                            base_lab = str((curve_label_overrides or {}).get(ck) or CURVE_DEFS[ck]["label"])
+                        else:
+                            base_lab = str(ours_pride_base_label or "Ours").strip()
                         suffix_map = {
                             "ours_pride_primary": "th1/sqrt2",
                             "ours_pride_th1_2": "th1/2",
                             "ours_pride_online_sqrt": "Online Sqrt",
+                            "empirical_pride_primary": "Empirical PriDe",
                         }
                         suffix = suffix_map.get(ck)
                         if suffix:
-                            base_lab = f"{base_lab} {suffix}"
+                            if ck == "empirical_pride_primary":
+                                base_lab = str((curve_label_overrides or {}).get(ck) or suffix)
+                            else:
+                                base_lab = f"{base_lab} {suffix}"
                         if _show_alpha:
                             base_lab = f"{base_lab} (α={alpha})"
                         label = f"{gname} • {base_lab}" if (len(group_payloads) > 1 and (gname or "").strip()) else base_lab
@@ -486,18 +515,30 @@ def _plot_groups(
                     if x.size == 0:
                         continue
                     cd = CURVE_DEFS[ck]
-                    base_offset = {"ours_pride_primary": 0, "ours_pride_th1_2": len(alphas), "ours_pride_online_sqrt": 2 * len(alphas)}
+                    base_offset = {
+                        "ours_pride_primary": 0,
+                        "ours_pride_th1_2": len(alphas),
+                        "ours_pride_online_sqrt": 2 * len(alphas),
+                        "empirical_pride_primary": 3 * len(alphas),
+                    }
                     color_idx = base_offset.get(ck, 0) + i
                     line_color = cd["color"] if len(alphas) == 1 else ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
-                    base_lab = str(ours_pride_base_label or "Ours").strip()
+                    if ck == "empirical_pride_primary":
+                        base_lab = str((curve_label_overrides or {}).get(ck) or CURVE_DEFS[ck]["label"])
+                    else:
+                        base_lab = str(ours_pride_base_label or "Ours").strip()
                     suffix_map = {
                         "ours_pride_primary": "th1/sqrt2",
                         "ours_pride_th1_2": "th1/2",
                         "ours_pride_online_sqrt": "Online Sqrt",
+                        "empirical_pride_primary": "Empirical PriDe",
                     }
                     suffix = suffix_map.get(ck)
                     if suffix:
-                        base_lab = f"{base_lab} {suffix}"
+                        if ck == "empirical_pride_primary":
+                            base_lab = str((curve_label_overrides or {}).get(ck) or suffix)
+                        else:
+                            base_lab = f"{base_lab} {suffix}"
                     if _show_alpha:
                         base_lab = f"{base_lab} (α={alpha})"
                     if show_overall_band and ystd.size == y.size:
@@ -827,20 +868,20 @@ for rp in selected_runs:
     group_payloads[str(prefix)] = [payload]
 
 st.subheader("그래프 옵션")
-st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 현재 primary는 `ours`와 `ours_pride_primary`의 `th1/sqrt2`입니다.")
+st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 기본 비교는 `cyclic`, `PriDe`, `Ours+PriDe (th1/2)`, `Empirical PriDe`입니다.")
 
 curve_keys = st.multiselect(
     "그릴 곡선",
     options=list(CURVE_DEFS.keys()),
-    default=["cyclic", "default_pride", "ours", "ours_pride_primary"],
-    help="주로 `ours`와 `ours_pride_primary`를 보면 됩니다. `th1/2`는 legacy 비교용, `Online Sqrt`는 별도 adaptive heuristic입니다.",
+    default=["cyclic", "default_pride", "ours_pride_th1_2", "empirical_pride_primary"],
+    help="기본 비교군은 `cyclic`, `PriDe`, `Ours+PriDe (th1/2)`, `Empirical PriDe`입니다. 나머지 곡선은 필요할 때만 추가로 보세요.",
 )
 
 cyclic_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 pride_ours_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
 st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
-col_p1, col_p2, col_p3, col_p4, col_p5, col_p6 = st.columns(6)
+col_p1, col_p2, col_p3, col_p4, col_p5, col_p6, col_p7 = st.columns(7)
 with col_p1:
     max_pct_cyclic = st.selectbox(
         "Cyclic 상한",
@@ -889,9 +930,17 @@ with col_p6:
         format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
         key="max_ours_pride_sqrt",
     )
+with col_p7:
+    max_pct_empirical_pride = st.selectbox(
+        "Empirical PriDe 상한",
+        options=pride_ours_options,
+        index=len(pride_ours_options) - 1,
+        format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
+        key="max_empirical_pride",
+    )
 
 st.caption("곡선별 퍼센타일 하한 (선택한 % 이상만 표시)")
-col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
+col_m1, col_m2, col_m3, col_m4, col_m5, col_m6, col_m7 = st.columns(7)
 with col_m1:
     min_pct_cyclic = st.selectbox(
         "Cyclic 하한",
@@ -940,15 +989,23 @@ with col_m6:
         format_func=lambda x: f"{x}%",
         key="min_ours_pride_sqrt",
     )
+with col_m7:
+    min_pct_empirical_pride = st.selectbox(
+        "Empirical PriDe 하한",
+        options=pride_ours_options,
+        index=0,
+        format_func=lambda x: f"{x}%",
+        key="min_empirical_pride",
+    )
 
 pride_alpha_options = [0.5, 1.0, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 ours_pride_alphas = st.multiselect(
-    "Ours+PRIDE PriDe α (prefix)",
+    "PriDe α (prefix)",
     options=pride_alpha_options,
     default=[2, 5, 10, 20],
     format_func=lambda x: f"α={x}%",
     key="ours_pride_alphas",
-    help="Ours+PRIDE에서 PriDe prefix 비율. 여러 α 선택 시 각 α별 곡선이 함께 표시됩니다.",
+    help="Ours+PriDe와 Empirical PriDe에서 공통으로 쓰는 PriDe prefix 비율입니다. 여러 α 선택 시 각 α별 곡선이 함께 표시됩니다.",
 )
 
 max_pct_by_curve = {
@@ -958,6 +1015,7 @@ max_pct_by_curve = {
     "ours_pride_primary": float(max_pct_ours_pride_primary),
     "ours_pride_th1_2": float(max_pct_ours_pride_th1_2),
     "ours_pride_online_sqrt": float(max_pct_ours_pride_online_sqrt),
+    "empirical_pride_primary": float(max_pct_empirical_pride),
 }
 min_pct_by_curve = {
     "cyclic": float(min_pct_cyclic),
@@ -966,6 +1024,7 @@ min_pct_by_curve = {
     "ours_pride_primary": float(min_pct_ours_pride_primary),
     "ours_pride_th1_2": float(min_pct_ours_pride_th1_2),
     "ours_pride_online_sqrt": float(min_pct_ours_pride_online_sqrt),
+    "empirical_pride_primary": float(min_pct_empirical_pride),
 }
 
 overall_mode = st.radio(
@@ -983,7 +1042,7 @@ overall_mode_key = "flatten_equal_run_weight" if display_mode in ("each_plus_mea
 st.subheader("라벨(범례) 설정")
 st.caption("범례에 표시되는 곡선 이름/Overall 이름을 원하는 대로 바꿀 수 있어요.")
 
-col_a, col_b, col_c, col_d, col_e = st.columns([1, 1, 1, 1, 1])
+col_a, col_b, col_c, col_d, col_e, col_f = st.columns([1, 1, 1, 1, 1, 1])
 with col_a:
     overall_label = st.text_input("Overall 라벨", value="Overall mean")
 with col_b:
@@ -994,6 +1053,8 @@ with col_d:
     lab_ours = st.text_input("OURS 라벨", value=CURVE_DEFS["ours"]["label"])
 with col_e:
     lab_ours_pride = st.text_input("Ours (PriDe 붙은 곡선) 라벨", value="Ours")
+with col_f:
+    lab_empirical = st.text_input("Empirical PriDe 라벨", value=CURVE_DEFS["empirical_pride_primary"]["label"])
 
 curve_label_overrides = {
     "cyclic": lab_cyclic,
@@ -1002,6 +1063,7 @@ curve_label_overrides = {
     "ours_pride_primary": lab_ours_pride,
     "ours_pride_th1_2": lab_ours_pride,
     "ours_pride_online_sqrt": lab_ours_pride,
+    "empirical_pride_primary": lab_empirical,
 }
 
 show_overall_band = st.checkbox(

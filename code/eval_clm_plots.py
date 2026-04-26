@@ -12,12 +12,15 @@ from utils import _purple
 logger = logging.getLogger(__name__)
 
 PRIMARY_OURS_LABEL = "th1/sqrt2"
+LEGACY_OURS_LABEL = "th1/2"
+EMPIRICAL_PRIDE_LABEL = "empirical_pride_primary"
 
 
 def _plot_three_curves_acc_recall_std(
     derived_records_by_p: Dict[float, List[dict]],
     derived_records_pride_by_p: Dict[float, List[dict]],
     derived_records_pride_by_alpha: Dict[float, List[dict]],
+    derived_records_empirical_by_alpha: Dict[float, List[dict]],
     out_dir: str,
     task: str,
     cyclic_fractions: List[int],
@@ -36,6 +39,7 @@ def _plot_three_curves_acc_recall_std(
     color_cyclic = "#F39C12"
     color_pride = "#27AE60"
     color_ours = "#5DADE2"
+    color_empirical = "#8E44AD"
     n_subjects = len(next(iter(derived_records_by_p.values()), []))
     macro_note = f" (macro over {n_subjects} subjects)" if n_subjects > 1 else ""
 
@@ -141,8 +145,19 @@ def _plot_three_curves_acc_recall_std(
         alpha_ours = pride_prefix_list[0] if pride_prefix_list else 10
         cobjs_op = derived_records_pride_by_alpha.get(alpha_ours, [])
         cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, PRIMARY_OURS_LABEL) if cobjs_op else _def5
+        cost_ours_pride_th12, acc_ours_pride_th12, rstd_ours_pride_th12, acc_std_ours_pride_th12, rstd_std_ours_pride_th12 = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, LEGACY_OURS_LABEL) if cobjs_op else _def5
     else:
         cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur(derived_records_pride_by_p, PRIMARY_OURS_LABEL, pride_ours_fractions) if derived_records_pride_by_p else _def5
+        cost_ours_pride_th12, acc_ours_pride_th12, rstd_ours_pride_th12, acc_std_ours_pride_th12, rstd_std_ours_pride_th12 = _agg_heur(derived_records_pride_by_p, LEGACY_OURS_LABEL, pride_ours_fractions) if derived_records_pride_by_p else _def5
+
+    if derived_records_empirical_by_alpha:
+        empirical_alpha = pride_prefix_list[0] if pride_prefix_list else next(iter(derived_records_empirical_by_alpha.keys()), None)
+        empirical_cobjs = derived_records_empirical_by_alpha.get(empirical_alpha, []) if empirical_alpha is not None else []
+        cost_empirical, acc_empirical, rstd_empirical, acc_std_empirical, rstd_std_empirical = _agg_heur_by_th1_p(
+            empirical_cobjs, pride_ours_fractions, EMPIRICAL_PRIDE_LABEL
+        ) if empirical_cobjs else _def5
+    else:
+        cost_empirical, acc_empirical, rstd_empirical, acc_std_empirical, rstd_std_empirical = _def5
 
     default_acc = float(acc_cyc[0]) if acc_cyc and np.isfinite(acc_cyc[0]) else float("nan")
     default_recall_std = float(rstd_cyc[0]) if rstd_cyc and np.isfinite(rstd_cyc[0]) else float("nan")
@@ -151,11 +166,15 @@ def _plot_three_curves_acc_recall_std(
     delta_acc_pride = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_pride]
     delta_acc_ours = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours]
     delta_acc_ours_pride = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours_pride]
+    delta_acc_ours_pride_th12 = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_ours_pride_th12]
+    delta_acc_empirical = [float(a - default_acc) if np.isfinite(a) and np.isfinite(default_acc) else float("nan") for a in acc_empirical]
 
     delta_rstd_cyc = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_cyc]
     delta_rstd_pride = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_pride]
     delta_rstd_ours = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours]
     delta_rstd_ours_pride = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours_pride]
+    delta_rstd_ours_pride_th12 = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_ours_pride_th12]
+    delta_rstd_empirical = [float(default_recall_std - r) if np.isfinite(r) and np.isfinite(default_recall_std) else float("nan") for r in rstd_empirical]
 
     def _plot_curve(ax, costs, yvals, marker, color, linestyle, label):
         valid = [(c, y) for c, y in zip(costs, yvals) if np.isfinite(c) and np.isfinite(y)]
@@ -169,7 +188,8 @@ def _plot_three_curves_acc_recall_std(
     fig, ax = plt.subplots(figsize=(10, 6.5), dpi=160)
     _plot_curve(ax, cost_cyc, delta_acc_cyc, "o", color_cyclic, "-", "Cyclic")
     _plot_curve(ax, cost_pride, delta_acc_pride, "s", color_pride, "--", "PriDe")
-    _plot_curve(ax, cost_ours, delta_acc_ours, "^", color_ours, "-.", "Ours")
+    _plot_curve(ax, cost_ours_pride_th12, delta_acc_ours_pride_th12, "*", color_ours, "-.", "Ours+PriDe (th1/2)")
+    _plot_curve(ax, cost_empirical, delta_acc_empirical, "X", color_empirical, "-", "Empirical PriDe")
     ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax.set_ylabel("Δ Accuracy (%)", fontsize=11)
@@ -191,7 +211,8 @@ def _plot_three_curves_acc_recall_std(
     fig2, ax2 = plt.subplots(figsize=(10, 6.5), dpi=160)
     _plot_curve(ax2, cost_cyc, delta_rstd_cyc, "o", color_cyclic, "-", "Cyclic")
     _plot_curve(ax2, cost_pride, delta_rstd_pride, "s", color_pride, "--", "PriDe")
-    _plot_curve(ax2, cost_ours, delta_rstd_ours, "^", color_ours, "-.", "Ours")
+    _plot_curve(ax2, cost_ours_pride_th12, delta_rstd_ours_pride_th12, "*", color_ours, "-.", "Ours+PriDe (th1/2)")
+    _plot_curve(ax2, cost_empirical, delta_rstd_empirical, "X", color_empirical, "-", "Empirical PriDe")
     ax2.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
     ax2.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
     ax2.set_ylabel("Δ Recall std", fontsize=11)
@@ -295,6 +316,31 @@ def _plot_three_curves_acc_recall_std(
             "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_legacy],
         }
 
+    def _build_empirical_payload(by_alpha, prefix_list, th1_fracs, def_acc, def_rstd, agg_fn):
+        by_alpha_out = {}
+        for alpha in prefix_list:
+            cobjs = by_alpha.get(alpha, [])
+            if not cobjs:
+                continue
+            co, ac, rs, asd, rsd = agg_fn(cobjs, th1_fracs, EMPIRICAL_PRIDE_LABEL)
+            by_alpha_out[f"{float(alpha):g}"] = {
+                "primary": {
+                    "p": [float(x) for x in th1_fracs],
+                    "cost": [float(x) if np.isfinite(x) else float("nan") for x in co],
+                    "acc": [float(x) if np.isfinite(x) else float("nan") for x in ac],
+                    "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rs],
+                    "delta_acc": [float(a - def_acc) if np.isfinite(a) and np.isfinite(def_acc) else float("nan") for a in ac],
+                    "delta_recall_std": [float(def_rstd - r) if np.isfinite(r) and np.isfinite(def_rstd) else float("nan") for r in rs],
+                    "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in asd],
+                    "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rsd],
+                }
+            }
+        return {
+            "pride_prefix_fractions": [float(a) for a in prefix_list],
+            "p": [float(x) for x in th1_fracs],
+            "by_alpha": by_alpha_out,
+        }
+
     try:
         points_path = os.path.join(out_dir, f"{task}_three_curves_points.json")
         payload = {
@@ -350,6 +396,14 @@ def _plot_three_curves_acc_recall_std(
                     delta_rstd_ours_pride,
                     acc_std_ours_pride,
                     rstd_std_ours_pride,
+                ),
+                "empirical_pride": _build_empirical_payload(
+                    derived_records_empirical_by_alpha,
+                    pride_prefix_list,
+                    pride_ours_fractions,
+                    default_acc,
+                    default_recall_std,
+                    _agg_heur_by_th1_p,
                 ),
             },
         }

@@ -92,6 +92,10 @@ def parse_arguments():
                         help="Use cyclic instead of full permutations when setting=full (e.g., MMLU 4-choice: 4x instead of 24x).")
     parser.add_argument("--pride_seed", type=int, default=0,
                         help="Seed for PRIDE random prefix sampling (default=0).")
+    parser.add_argument("--empirical_pride", action="store_true",
+                        help="Enable empirical-residual PriDe with adaptive Latin-square permutations.")
+    parser.add_argument("--empirical_logit_delta", type=float, default=1e-12,
+                        help="Stabilization delta used when converting PriDe priors to centered logits.")
     parser.add_argument("--n_runs", type=int, default=1,
                         help="Number of runs for derived policies (PRIDE prior, cyclic_random). Results averaged over runs, like debiase_pride.py (default=1).")
 
@@ -435,10 +439,8 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
 
     def eval_fn(sample, rng: random.Random):
         idx, (probing_inputs, options, ideal) = sample
-        # Allow either cyclic count (= #options) or full permutation count (= factorial(#options))
-        num_options = len(option_ids)
-        expected_counts = {num_options, math.factorial(num_options)}
-        assert len(probing_inputs) in expected_counts
+        if len(probing_inputs) <= 0:
+            raise ValueError("probing_inputs must contain at least one prompt")
 
         input_texts = []
         for probing_input in probing_inputs:
@@ -497,4 +499,3 @@ def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_id
         }
         return result
     return eval_fn
-

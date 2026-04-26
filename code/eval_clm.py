@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 
 PRIMARY_OURS_LABEL = "th1/sqrt2"
 LEGACY_OURS_LABEL = "th1/2"
+EMPIRICAL_PRIDE_LABEL = "empirical_pride_primary"
 
 
 def _rule_th1_half(th1_val: float) -> float:
@@ -227,6 +228,291 @@ def _estimate_pride_prior_random_prefix_mean(
 
     meta = {"N": int(N), "m": int(m), "used": int(used), "ratio": float(ratio), "seed": int(seed), "prefix_ids": prefix_ids}
     return prior, meta
+
+
+def _estimate_pride_prior_random_prefix_details(
+    per_sample_probs: List[np.ndarray],
+    cyclic_indices: List[int],
+    k: int,
+    prefix_ratio: float,
+    seed: int,
+    eps: float = 1e-12,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Returns (mean_prior, per_sample_priors, meta) for the sampled random prefix.
+    per_sample_priors has shape (used, k).
+    """
+    N = len(per_sample_probs)
+    if N <= 0:
+        prior = np.ones((k,), dtype=np.float64) / float(k)
+        empty = np.zeros((0, k), dtype=np.float64)
+        meta = {"N": 0, "m": 0, "used": 0, "ratio": float(prefix_ratio), "seed": int(seed), "prefix_ids": []}
+        return prior, empty, meta
+
+    ratio = float(max(0.0, min(1.0, prefix_ratio)))
+    m = int(max(1, int(round(N * ratio))))
+    rng = np.random.default_rng(int(seed))
+    prefix_ids = rng.choice(np.arange(N, dtype=np.int64), size=m, replace=False)
+    prefix_ids = [int(x) for x in prefix_ids.tolist()]
+
+    priors = []
+    used_ids = []
+    for i in prefix_ids:
+        ps = np.asarray(per_sample_probs[i], dtype=np.float64)
+        observed = np.asarray([ps[j] for j in cyclic_indices], dtype=np.float64)
+        try:
+            _, _, prior_i = debias_simple(observed)
+        except Exception:
+            continue
+        prior_i = np.asarray(prior_i, dtype=np.float64)
+        prior_i = prior_i / (prior_i.sum() + eps)
+        priors.append(prior_i)
+        used_ids.append(int(i))
+
+    if len(priors) == 0:
+        prior = np.ones((k,), dtype=np.float64) / float(k)
+        priors_arr = np.zeros((0, k), dtype=np.float64)
+    else:
+        priors_arr = np.asarray(priors, dtype=np.float64)
+        prior = np.mean(priors_arr, axis=0)
+        prior = np.asarray(prior, dtype=np.float64)
+        prior = prior / (prior.sum() + eps)
+
+    meta = {
+        "N": int(N),
+        "m": int(m),
+        "used": int(len(used_ids)),
+        "ratio": float(ratio),
+        "seed": int(seed),
+        "prefix_ids": used_ids,
+    }
+    return prior, priors_arr, meta
+
+
+def _estimate_empirical_pride_bank(
+    per_sample_probs: List[np.ndarray],
+    cyclic_indices: List[int],
+    k: int,
+    prefix_ratio: float,
+    seed: int,
+    logit_delta: float = 1e-12,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Returns (mean_prior, mu_hat, residual_bank, meta).
+    residual_bank has shape (used, k); each row is centered and sums to ~0.
+    """
+    mean_prior, priors_arr, meta = _estimate_pride_prior_random_prefix_details(
+        per_sample_probs=per_sample_probs,
+        cyclic_indices=cyclic_indices,
+        k=k,
+        prefix_ratio=prefix_ratio,
+        seed=seed,
+        eps=max(float(logit_delta), 1e-18),
+    )
+    if priors_arr.size == 0:
+        mu_hat = np.zeros((k,), dtype=np.float64)
+        residual_bank = np.zeros((1, k), dtype=np.float64)
+        return mean_prior, mu_hat, residual_bank, meta
+
+    delta = max(float(logit_delta), 1e-18)
+    log_priors = np.log(priors_arr + delta)
+    centered_logits = log_priors - np.mean(log_priors, axis=1, keepdims=True)
+    mu_hat = np.mean(centered_logits, axis=0)
+    residual_bank = centered_logits - mu_hat[None, :]
+    return mean_prior, np.asarray(mu_hat, dtype=np.float64), np.asarray(residual_bank, dtype=np.float64), meta
+
+
+def _extract_question_from_user_prompt(user_prompt: str) -> str:
+    marker = "\nOptions:\n"
+    if user_prompt.startswith("Question: ") and marker in user_prompt:
+        return user_prompt[len("Question: "): user_prompt.index(marker)]
+    return str(user_prompt)
+
+
+def _build_option_user_prompt(question: str, options: List[str], option_ids: List[str]) -> str:
+    return (
+        f"Question: {question.strip()}\nOptions:\n"
+        + "\n".join(f"{option_id}. {answer}".strip() for option_id, answer in zip(option_ids, options))
+        + "\nAnswer:"
+    )
+
+
+def _invert_slot_to_content_perm(slot_to_content: Tuple[int, ...]) -> np.ndarray:
+    inv = np.zeros(len(slot_to_content), dtype=np.int64)
+    for slot_idx, content_idx in enumerate(slot_to_content):
+        inv[int(content_idx)] = int(slot_idx)
+    return inv
+
+
+def _content_to_slot_assignment_to_perm(content_to_slot: List[int]) -> Tuple[int, ...]:
+    slot_to_content = [0] * len(content_to_slot)
+    for content_idx, slot_idx in enumerate(content_to_slot):
+        slot_to_content[int(slot_idx)] = int(content_idx)
+    return tuple(slot_to_content)
+
+
+def _search_latin_assignment(
+    k: int,
+    allowed_slots: List[List[int]],
+    content_idx: int,
+    used_slots: set,
+    current: List[int],
+) -> Optional[List[int]]:
+    if content_idx >= k:
+        return list(current)
+    for slot_idx in allowed_slots[content_idx]:
+        if slot_idx in used_slots:
+            continue
+        current[content_idx] = int(slot_idx)
+        used_slots.add(int(slot_idx))
+        out = _search_latin_assignment(k, allowed_slots, content_idx + 1, used_slots, current)
+        if out is not None:
+            return out
+        used_slots.remove(int(slot_idx))
+        current[content_idx] = -1
+    return None
+
+
+def _build_targeted_latin_schedule(k: int, top1_idx: int, runner_idx: int) -> List[Tuple[int, ...]]:
+    """
+    Returns slot->content permutations. The first is identity; the second swaps
+    the two targeted contents and rotates the remainder; later stages are filled
+    deterministically so each content visits every slot exactly once.
+    """
+    if k <= 1:
+        return [tuple(range(k))]
+
+    schedules_content_to_slot: List[List[int]] = [list(range(k))]
+    if top1_idx == runner_idx:
+        runner_idx = (int(top1_idx) + 1) % int(k)
+
+    remaining = [idx for idx in range(k) if idx not in (int(top1_idx), int(runner_idx))]
+    targeted = [-1] * k
+    targeted[int(top1_idx)] = int(runner_idx)
+    targeted[int(runner_idx)] = int(top1_idx)
+    if remaining:
+        for offset, content_idx in enumerate(remaining):
+            targeted[int(content_idx)] = int(remaining[(offset + 1) % len(remaining)])
+    schedules_content_to_slot.append(targeted)
+
+    for _stage in range(2, k):
+        used_by_content = [set() for _ in range(k)]
+        for sched in schedules_content_to_slot:
+            for content_idx, slot_idx in enumerate(sched):
+                used_by_content[content_idx].add(int(slot_idx))
+        allowed_slots = [sorted(set(range(k)) - used_by_content[i]) for i in range(k)]
+        candidate = _search_latin_assignment(
+            k=k,
+            allowed_slots=allowed_slots,
+            content_idx=0,
+            used_slots=set(),
+            current=[-1] * k,
+        )
+        if candidate is None:
+            raise RuntimeError(f"Failed to complete Latin schedule for k={k}, top1={top1_idx}, runner={runner_idx}")
+        schedules_content_to_slot.append(candidate)
+
+    return [_content_to_slot_assignment_to_perm(sched) for sched in schedules_content_to_slot]
+
+
+def _compute_empirical_stage_posteriors(
+    stage_probs: np.ndarray,
+    slot_to_content_schedule: List[Tuple[int, ...]],
+    mu_hat: np.ndarray,
+    residual_bank: np.ndarray,
+    eps: float = 1e-12,
+) -> Tuple[List[np.ndarray], List[int], List[float]]:
+    """
+    Returns (posterior_by_stage, pred_idx_by_stage, conf_by_stage).
+    """
+    probs = np.asarray(stage_probs, dtype=np.float64)
+    mu = np.asarray(mu_hat, dtype=np.float64).reshape(-1)
+    residuals = np.asarray(residual_bank, dtype=np.float64)
+    if residuals.ndim == 1:
+        residuals = residuals.reshape(1, -1)
+    if residuals.size == 0:
+        residuals = np.zeros((1, probs.shape[1]), dtype=np.float64)
+
+    k = probs.shape[1]
+    inverse_assignments = [_invert_slot_to_content_perm(p) for p in slot_to_content_schedule]
+    posterior_by_stage: List[np.ndarray] = []
+    pred_idx_by_stage: List[int] = []
+    conf_by_stage: List[float] = []
+
+    for stage_idx in range(len(slot_to_content_schedule)):
+        per_residual = []
+        for residual in residuals:
+            scores = np.zeros((k,), dtype=np.float64)
+            prior_factor = np.exp(-(mu + residual))
+            for inner_idx in range(stage_idx + 1):
+                inv = inverse_assignments[inner_idx]
+                stage_row = probs[inner_idx]
+                scores += stage_row[inv] * prior_factor[inv]
+            total = float(np.sum(scores))
+            if not np.isfinite(total) or total <= eps:
+                post = np.ones((k,), dtype=np.float64) / float(k)
+            else:
+                post = scores / total
+            per_residual.append(post)
+        posterior = np.mean(np.asarray(per_residual, dtype=np.float64), axis=0)
+        posterior = posterior / (float(np.sum(posterior)) + eps)
+        posterior_by_stage.append(posterior)
+        pred_idx_by_stage.append(int(np.argmax(posterior)))
+        conf_by_stage.append(float(np.max(posterior)))
+
+    return posterior_by_stage, pred_idx_by_stage, conf_by_stage
+
+
+def _run_empirical_pride_policy_from_stage_infos(
+    stage_infos: List[Dict[str, Any]],
+    labels_idx: List[int],
+    k: int,
+    percentile: float,
+) -> Tuple[float, float, List[int], Dict[str, int]]:
+    """
+    Evaluate the empirical PriDe policy online from precomputed stage confidences.
+    Thresholds are running quantiles over previously observed confidences for each stage,
+    and a stage history is only updated when a sample actually reaches that stage.
+    """
+    N = len(stage_infos)
+    if N == 0:
+        return float("nan"), float("nan"), [], {}
+
+    q = float(percentile) / 100.0
+    histories: List[List[float]] = [[] for _ in range(int(k))]
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    stage_counts = {f"n_stage_{stage + 1}": 0 for stage in range(int(k))}
+
+    for sample_idx, info in enumerate(stage_infos):
+        confs = [float(x) for x in (info.get("conf_by_stage") or [])]
+        pred_by_stage = [int(x) for x in (info.get("pred_by_stage") or [])]
+        forced_prefix = bool(info.get("prefix_forced", False))
+        if len(confs) < k or len(pred_by_stage) < k:
+            raise ValueError(f"Empirical PriDe stage info is incomplete for sample {sample_idx}: expected {k}, got conf={len(confs)}, pred={len(pred_by_stage)}")
+
+        if forced_prefix:
+            stop_stage = int(k)
+        else:
+            stop_stage = int(k)
+            for stage_idx in range(int(k)):
+                hist = histories[stage_idx]
+                thr = float(np.quantile(np.asarray(hist, dtype=np.float64), q)) if hist else 0.0
+                if float(confs[stage_idx]) >= thr:
+                    stop_stage = stage_idx + 1
+                    break
+
+        pred_idx = int(pred_by_stage[stop_stage - 1])
+        preds.append(pred_idx)
+        total_cost += float(stop_stage)
+        corrects += 1 if pred_idx == int(labels_idx[sample_idx]) else 0
+        stage_counts[f"n_stage_{stop_stage}"] = stage_counts.get(f"n_stage_{stop_stage}", 0) + 1
+
+        for stage_idx in range(stop_stage):
+            histories[stage_idx].append(float(confs[stage_idx]))
+
+    return total_cost / float(N), corrects / float(N), preds, stage_counts
 
 
 def _run_prefix_cyclic_postfix_base(
@@ -2020,6 +2306,7 @@ def main():
         derived_records_by_p: Dict[float, List[dict]] = {}  # p -> list of curve_obj (per subject)
         derived_records_pride_by_p: Dict[float, List[dict]] = {}  # legacy: p->list (Default+PRIDE 단일 alpha용)
         derived_records_pride_by_alpha: Dict[float, List[dict]] = {}  # alpha(0.5,1.0,2,5,...) -> list of PRIDE curve_obj
+        derived_records_empirical_by_alpha: Dict[float, List[dict]] = {}  # alpha -> list of empirical PriDe curve_obj
         pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
         recall_std_vs_p_records: List[dict] = []  # [{'subject':str,'p':float,'method':str,'kind':str,'rstd':float}]
         n_runs = max(1, int(getattr(args, "n_runs", 1)))
@@ -2217,10 +2504,28 @@ def main():
                             for s in range(k)
                         ]
                         cyc_perms = [tuple((i + s) % k for i in range(k)) for s in range(k)]
+                        sample_prompt_meta: Dict[int, Dict[str, Any]] = {}
+                        for sample_idx, sample_entry in enumerate(eval_samples):
+                            probing_inputs_raw, raw_options, raw_ideal = sample_entry
+                            if not probing_inputs_raw:
+                                continue
+                            first_prompt = probing_inputs_raw[0]
+                            if not isinstance(first_prompt, list) or len(first_prompt) < 2:
+                                continue
+                            sys_msg_i = str(first_prompt[0])
+                            user_prompt_i = str(first_prompt[1])
+                            sample_prompt_meta[int(sample_idx)] = {
+                                "idx": int(sample_idx),
+                                "sys_msg": sys_msg_i,
+                                "question": _extract_question_from_user_prompt(user_prompt_i),
+                                "options": list(raw_options),
+                                "ideal": str(raw_ideal),
+                            }
 
                         # ---------- collect per-sample raw probs ----------
                         per_sample_probs = []
                         ideals = []
+                        empirical_prompt_meta = []
 
                         # ---------- derived correctness lists (baseline) ----------
                         base_correct_list = []
@@ -2253,6 +2558,18 @@ def main():
                             per_sample_probs.append(probs_seq_np)
 
                             ideals.append(data['ideal'])
+                            empirical_prompt_meta.append(
+                                sample_prompt_meta.get(
+                                    int(data.get("idx", len(empirical_prompt_meta))),
+                                    {
+                                        "idx": int(data.get("idx", len(empirical_prompt_meta))),
+                                        "sys_msg": "",
+                                        "question": "",
+                                        "options": list(data.get("options", [])),
+                                        "ideal": str(data.get("ideal", "")),
+                                    },
+                                )
+                            )
 
                             # cyclic (k rotations)
                             cyc_probs = [probs_seq_np[idx] for idx in cyclic_indices]
@@ -2306,6 +2623,7 @@ def main():
                                 full_total += 1
 
                         # ---------- confidence stats & probe triggers (baseline) ----------
+                        labels_idx_for_curves = [option_ids.index(str(x)) for x in ideals]
                         default_conf = []          # base gap (letter-space)
                         mean_gap_list = []         # gap(mean(base,probe)) (content-space)
                         flip_trigger_mask = []     # pred_base != pred_probe (content-space)
@@ -2412,11 +2730,14 @@ def main():
                             })
 
                         # ---------- optional: PRIDE debiasing + n_runs averaging (like debiase_pride.py) ----------
-                        pride_enabled = bool(getattr(args, "pride_mix", False))
+                        empirical_enabled = bool(getattr(args, "empirical_pride", False))
+                        pride_enabled = bool(getattr(args, "pride_mix", False) or empirical_enabled)
                         by_perc_baseline: Dict[float, List[dict]] = defaultdict(list)
                         by_pride_alpha: Dict[float, List[dict]] = defaultdict(list)  # alpha(0.5,1.0,2,5,...) -> [cobj]
+                        by_empirical_alpha: Dict[float, List[dict]] = defaultdict(list)  # alpha -> [cobj]
                         curve_objs_baseline = []
                         curve_objs_pride = []
+                        curve_objs_empirical = []
 
                         pride_prefix_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
                         if not pride_prefix_list:
@@ -2432,7 +2753,6 @@ def main():
 
                             for perc in ours_th1_list:
                                 perc = float(perc)
-                                labels_idx_for_curves = [option_ids.index(str(x)) for x in ideals]
 
                                 # --- 1) BASELINE Curves 계산 ---
                                 cobj = _compute_curves_for_one_percentile(
@@ -2672,6 +2992,95 @@ def main():
                                     except Exception:
                                         pass
 
+                        if empirical_enabled:
+                            empirical_logit_delta = float(getattr(args, "empirical_logit_delta", 1e-12))
+                            empirical_base_seed = int(getattr(args, "pride_seed", 0))
+                            for pride_alpha in pride_prefix_list:
+                                empirical_seed = _stable_u32_seed(str(subject), empirical_base_seed + run_idx_inner)
+                                _, empirical_mu_hat, empirical_residual_bank, empirical_meta = _estimate_empirical_pride_bank(
+                                    per_sample_probs=per_sample_probs,
+                                    cyclic_indices=cyclic_indices,
+                                    k=k,
+                                    prefix_ratio=float(pride_alpha) / 100.0,
+                                    seed=empirical_seed,
+                                    logit_delta=empirical_logit_delta,
+                                )
+                                empirical_prefix_ids = set(int(x) for x in (empirical_meta.get("prefix_ids") or []))
+                                empirical_stage_infos = []
+
+                                for sample_pos, prompt_meta in enumerate(empirical_prompt_meta):
+                                    if not prompt_meta.get("question"):
+                                        raise ValueError(f"Empirical PriDe prompt metadata missing question for sample position {sample_pos}")
+
+                                    base_row = np.asarray(per_sample_probs[sample_pos][identity_idx], dtype=np.float64)
+                                    base_posterior, base_pred_stage, _ = _compute_empirical_stage_posteriors(
+                                        stage_probs=base_row.reshape(1, -1),
+                                        slot_to_content_schedule=[tuple(range(k))],
+                                        mu_hat=empirical_mu_hat,
+                                        residual_bank=empirical_residual_bank,
+                                    )
+                                    corrected_stage1 = np.asarray(base_posterior[0], dtype=np.float64)
+                                    sorted_idx = np.argsort(corrected_stage1)[::-1]
+                                    top1_idx = int(base_pred_stage[0])
+                                    runner_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else int(top1_idx)
+                                    stage_schedule = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
+
+                                    probing_inputs_emp = []
+                                    raw_options = list(prompt_meta["options"])
+                                    for slot_to_content in stage_schedule:
+                                        permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
+                                        probing_inputs_emp.append([
+                                            str(prompt_meta["sys_msg"]),
+                                            _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
+                                        ])
+
+                                    empirical_sample = (
+                                        int(prompt_meta["idx"]),
+                                        (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
+                                    )
+                                    empirical_result = eval_fn(empirical_sample, random.Random(0))
+                                    empirical_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
+                                    _, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
+                                        stage_probs=empirical_stage_probs,
+                                        slot_to_content_schedule=stage_schedule,
+                                        mu_hat=empirical_mu_hat,
+                                        residual_bank=empirical_residual_bank,
+                                    )
+                                    empirical_stage_infos.append({
+                                        "pred_by_stage": [int(x) for x in pred_by_stage],
+                                        "conf_by_stage": [float(x) for x in conf_by_stage],
+                                        "prefix_forced": bool(sample_pos in empirical_prefix_ids),
+                                    })
+
+                                cobj_emp = {
+                                    "subject": subject,
+                                    "tag": "empirical_pride",
+                                    "k": int(k),
+                                    "percentile": float(pride_alpha),
+                                    "n_samples": int(len(empirical_stage_infos)),
+                                    "heuristic_points": [],
+                                }
+                                for perc in ours_th1_list:
+                                    perc_f = float(perc)
+                                    c_emp, a_emp, preds_emp, counts_emp = _run_empirical_pride_policy_from_stage_infos(
+                                        stage_infos=empirical_stage_infos,
+                                        labels_idx=labels_idx_for_curves,
+                                        k=k,
+                                        percentile=perc_f,
+                                    )
+                                    hp_emp = {
+                                        "label": EMPIRICAL_PRIDE_LABEL,
+                                        "th1_p": perc_f,
+                                        "cost": float(c_emp),
+                                        "acc": float(a_emp),
+                                        "marker": "X",
+                                        "color": "gray",
+                                        "recall_std": float(_recall_std(labels_idx_for_curves, preds_emp, k)),
+                                    }
+                                    hp_emp.update({key: int(val) for key, val in counts_emp.items()})
+                                    cobj_emp["heuristic_points"].append(hp_emp)
+                                by_empirical_alpha[pride_alpha].append(cobj_emp)
+
                         # Merge over runs and append to derived_records
                         for perc in ours_th1_list:
                             perc = float(perc)
@@ -2688,6 +3097,14 @@ def main():
                                 if merged_p:
                                     derived_records_pride_by_alpha.setdefault(pride_alpha, []).append(merged_p)
                                     curve_objs_pride.append(merged_p)
+
+                        if empirical_enabled:
+                            for pride_alpha in pride_prefix_list:
+                                cobjs_emp = by_empirical_alpha.get(pride_alpha, [])
+                                merged_emp = _merge_curve_objs_over_runs(cobjs_emp) if cobjs_emp else None
+                                if merged_emp:
+                                    derived_records_empirical_by_alpha.setdefault(pride_alpha, []).append(merged_emp)
+                                    curve_objs_empirical.append(merged_emp)
 
                         # ---------- save cyclic/base derived results ----------
                         cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
@@ -2910,6 +3327,7 @@ def main():
                     derived_records_by_p,
                     derived_records_pride_by_p if len(derived_records_pride_by_p) > 0 else {},
                     derived_records_pride_by_alpha if len(derived_records_pride_by_alpha) > 0 else {},
+                    derived_records_empirical_by_alpha if len(derived_records_empirical_by_alpha) > 0 else {},
                     out_dir,
                     args.task,
                     cyclic_fractions=cyclic_fracs or [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
