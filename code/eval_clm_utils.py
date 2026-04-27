@@ -101,6 +101,11 @@ def parse_arguments():
                         help="Sweep mode for empirical PriDe curves: percentile uses beta-percentile thresholds, confidence uses fixed confidence thresholds.")
     parser.add_argument("--empirical_conf_thresholds", type=str, default="0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90",
                         help="Comma-separated confidence thresholds for empirical PriDe when --empirical_sweep_mode=confidence.")
+    parser.add_argument("--empirical_stage_schedule", type=str, default="sqrt",
+                        choices=["flat", "sqrt"],
+                        help="Stage-wise threshold schedule for empirical PriDe. flat keeps one threshold across stages, sqrt relaxes later stages.")
+    parser.add_argument("--empirical_stage_gamma", type=float, default=0.5,
+                        help="Gamma for empirical PriDe stage schedule. sqrt schedule uses threshold scaling by t^(-gamma).")
     parser.add_argument("--n_runs", type=int, default=1,
                         help="Number of runs for derived policies (PRIDE prior, cyclic_random). Results averaged over runs, like debiase_pride.py (default=1).")
 

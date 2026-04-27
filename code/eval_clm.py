@@ -468,6 +468,8 @@ def _run_empirical_pride_policy_from_stage_infos(
     labels_idx: List[int],
     k: int,
     percentile: float,
+    stage_schedule: str = "sqrt",
+    stage_gamma: float = 0.5,
 ) -> Tuple[float, float, List[int], Dict[str, int]]:
     """
     Evaluate the empirical PriDe policy online from precomputed stage confidences.
@@ -478,7 +480,11 @@ def _run_empirical_pride_policy_from_stage_infos(
     if N == 0:
         return float("nan"), float("nan"), [], {}
 
-    q = float(percentile) / 100.0
+    stage_schedule = str(stage_schedule or "sqrt").strip().lower()
+    if stage_schedule not in {"flat", "sqrt"}:
+        stage_schedule = "sqrt"
+    gamma = float(stage_gamma) if np.isfinite(float(stage_gamma)) and float(stage_gamma) > 0.0 else 0.5
+    base_percentile = max(0.0, min(100.0, float(percentile)))
     histories: List[List[float]] = [[] for _ in range(int(k))]
     total_cost = 0.0
     corrects = 0
@@ -498,6 +504,11 @@ def _run_empirical_pride_policy_from_stage_infos(
             stop_stage = int(k)
             for stage_idx in range(int(k)):
                 hist = histories[stage_idx]
+                if stage_schedule == "sqrt":
+                    stage_percentile = base_percentile / ((stage_idx + 1) ** gamma)
+                else:
+                    stage_percentile = base_percentile
+                q = max(0.0, min(1.0, float(stage_percentile) / 100.0))
                 thr = float(np.quantile(np.asarray(hist, dtype=np.float64), q)) if hist else 0.0
                 if float(confs[stage_idx]) >= thr:
                     stop_stage = stage_idx + 1
@@ -520,6 +531,8 @@ def _run_empirical_pride_policy_from_stage_infos_confidence(
     labels_idx: List[int],
     k: int,
     confidence_threshold: float,
+    stage_schedule: str = "sqrt",
+    stage_gamma: float = 0.5,
 ) -> Tuple[float, float, List[int], Dict[str, int]]:
     """
     Evaluate the empirical PriDe policy with a fixed confidence threshold shared
@@ -530,7 +543,11 @@ def _run_empirical_pride_policy_from_stage_infos_confidence(
     if N == 0:
         return float("nan"), float("nan"), [], {}
 
-    tau = float(confidence_threshold)
+    stage_schedule = str(stage_schedule or "sqrt").strip().lower()
+    if stage_schedule not in {"flat", "sqrt"}:
+        stage_schedule = "sqrt"
+    gamma = float(stage_gamma) if np.isfinite(float(stage_gamma)) and float(stage_gamma) > 0.0 else 0.5
+    base_tau = float(confidence_threshold)
     total_cost = 0.0
     corrects = 0
     preds: List[int] = []
@@ -546,6 +563,12 @@ def _run_empirical_pride_policy_from_stage_infos_confidence(
         stop_stage = int(k)
         if not forced_prefix:
             for stage_idx in range(int(k)):
+                if stage_schedule == "sqrt":
+                    chance = 1.0 / float(k)
+                    tau = chance + (base_tau - chance) / ((stage_idx + 1) ** gamma)
+                else:
+                    tau = base_tau
+                tau = max(0.0, min(1.0, float(tau)))
                 if float(confs[stage_idx]) >= tau:
                     stop_stage = stage_idx + 1
                     break
@@ -2819,6 +2842,12 @@ def main():
                         empirical_sweep_mode = str(getattr(args, "empirical_sweep_mode", "percentile")).strip().lower()
                         if empirical_sweep_mode not in {"percentile", "confidence"}:
                             empirical_sweep_mode = "percentile"
+                        empirical_stage_schedule = str(getattr(args, "empirical_stage_schedule", "sqrt")).strip().lower()
+                        if empirical_stage_schedule not in {"flat", "sqrt"}:
+                            empirical_stage_schedule = "sqrt"
+                        empirical_stage_gamma = float(getattr(args, "empirical_stage_gamma", 0.5))
+                        if not np.isfinite(empirical_stage_gamma) or empirical_stage_gamma <= 0.0:
+                            empirical_stage_gamma = 0.5
                         empirical_conf_thresholds = [
                             float(x) for x in _parse_float_value_list(
                                 getattr(args, "empirical_conf_thresholds", "0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90"),
@@ -3152,6 +3181,8 @@ def main():
                                     "k": int(k),
                                     "percentile": float(pride_alpha),
                                     "sweep_mode": empirical_sweep_mode,
+                                    "threshold_schedule": empirical_stage_schedule,
+                                    "threshold_gamma": empirical_stage_gamma,
                                     "n_samples": int(len(empirical_stage_infos)),
                                     "heuristic_points": [],
                                 }
@@ -3163,6 +3194,8 @@ def main():
                                             labels_idx=labels_idx_for_curves,
                                             k=k,
                                             confidence_threshold=conf_th_f,
+                                            stage_schedule=empirical_stage_schedule,
+                                            stage_gamma=empirical_stage_gamma,
                                         )
                                         hp_emp = {
                                             "label": EMPIRICAL_PRIDE_LABEL,
@@ -3183,6 +3216,8 @@ def main():
                                             labels_idx=labels_idx_for_curves,
                                             k=k,
                                             percentile=perc_f,
+                                            stage_schedule=empirical_stage_schedule,
+                                            stage_gamma=empirical_stage_gamma,
                                         )
                                         hp_emp = {
                                             "label": EMPIRICAL_PRIDE_LABEL,
@@ -3572,6 +3607,9 @@ def main():
             empirical_report_mode = str(getattr(args, "empirical_sweep_mode", "percentile")).strip().lower()
             if empirical_report_mode not in {"percentile", "confidence"}:
                 empirical_report_mode = "percentile"
+            empirical_report_schedule = str(getattr(args, "empirical_stage_schedule", "sqrt")).strip().lower()
+            if empirical_report_schedule not in {"flat", "sqrt"}:
+                empirical_report_schedule = "sqrt"
             # Cyclic 레포트: 항상 0,10,20,...,100 전체 구간 출력 (plot_cyclic_fractions와 무관)
             cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
             pride_alphas = sorted(derived_records_pride_by_alpha.keys()) if derived_records_pride_by_alpha else []
@@ -3617,7 +3655,7 @@ def main():
 
             if empirical_alphas:
                 if empirical_report_mode == "confidence":
-                    logger.info("---- empirical pride (confidence sweep) ----")
+                    logger.info(f"---- empirical pride (confidence sweep, {empirical_report_schedule}) ----")
                     for alpha in empirical_alphas:
                         cobjs = derived_records_empirical_by_alpha[alpha]
                         for conf_th in empirical_conf_fracs:
@@ -3626,9 +3664,9 @@ def main():
                             )
                             a_str = f"{float(alpha):g}"
                             conf_str = f"{float(conf_th):.2f}"
-                            logger.info(f"empirical_pride_conf_α{a_str}_{conf_str} : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                            logger.info(f"empirical_pride_conf_{empirical_report_schedule}_α{a_str}_{conf_str} : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
                 else:
-                    logger.info("---- empirical pride (percentile sweep) ----")
+                    logger.info(f"---- empirical pride (percentile sweep, {empirical_report_schedule}) ----")
                     for alpha in empirical_alphas:
                         cobjs = derived_records_empirical_by_alpha[alpha]
                         for p in pride_fracs:
@@ -3637,7 +3675,7 @@ def main():
                             )
                             a_str = f"{float(alpha):g}"
                             p_str = f"{float(p):g}"
-                            logger.info(f"empirical_pride_pct_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                            logger.info(f"empirical_pride_pct_{empirical_report_schedule}_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 3. ours
             logger.info("---- ours ----")

@@ -324,6 +324,24 @@ def _curve_series_from_payload(
     return out
 
 
+def _get_empirical_payload_meta(payload: dict) -> Tuple[str, str, float]:
+    if not isinstance(payload, dict):
+        return "percentile", "flat", 0.5
+    empirical_data = ((payload.get("curves", {}) or {}).get("empirical_pride", {}) or {})
+    mode = str(empirical_data.get("sweep_mode", "percentile")).strip().lower()
+    if mode not in ("percentile", "confidence"):
+        mode = "percentile"
+    schedule = str(empirical_data.get("threshold_schedule", "flat")).strip().lower()
+    if schedule not in ("flat", "sqrt"):
+        schedule = "flat"
+    gamma = empirical_data.get("threshold_gamma", 0.5)
+    try:
+        gamma_f = float(gamma)
+    except Exception:
+        gamma_f = 0.5
+    return mode, schedule, gamma_f
+
+
 def _nanmean(xs: List[float]) -> float:
     arr = np.asarray(xs, dtype=np.float64)
     return float(np.nanmean(arr)) if arr.size else float("nan")
@@ -479,8 +497,15 @@ def _plot_groups(
                                 base_lab = str((curve_label_overrides or {}).get(ck) or suffix)
                             else:
                                 base_lab = f"{base_lab} {suffix}"
+                        if ck == "empirical_pride_primary" and payloads:
+                            mode_meta, schedule_meta, gamma_meta = _get_empirical_payload_meta(payloads[0])
+                            if schedule_meta == "sqrt":
+                                sched_suffix = f"{mode_meta}, sqrt(g={gamma_meta:g})"
+                            else:
+                                sched_suffix = f"{mode_meta}, flat"
+                            base_lab = f"{base_lab} [{sched_suffix}]"
                         if ck == "empirical_pride_primary" and empirical_sweep_preference in ("percentile", "confidence"):
-                            base_lab = f"{base_lab} ({empirical_sweep_preference})"
+                            base_lab = f"{base_lab} (view={empirical_sweep_preference})"
                         if _show_alpha:
                             base_lab = f"{base_lab} (α={alpha})"
                         label = f"{gname} • {base_lab}" if (len(group_payloads) > 1 and (gname or "").strip()) else base_lab
@@ -559,8 +584,20 @@ def _plot_groups(
                             base_lab = str((curve_label_overrides or {}).get(ck) or suffix)
                         else:
                             base_lab = f"{base_lab} {suffix}"
+                    if ck == "empirical_pride_primary":
+                        sample_payload = None
+                        for payloads in group_payloads.values():
+                            if payloads:
+                                sample_payload = payloads[0]
+                                break
+                        mode_meta, schedule_meta, gamma_meta = _get_empirical_payload_meta(sample_payload or {})
+                        if schedule_meta == "sqrt":
+                            sched_suffix = f"{mode_meta}, sqrt(g={gamma_meta:g})"
+                        else:
+                            sched_suffix = f"{mode_meta}, flat"
+                        base_lab = f"{base_lab} [{sched_suffix}]"
                     if ck == "empirical_pride_primary" and empirical_sweep_preference in ("percentile", "confidence"):
-                        base_lab = f"{base_lab} ({empirical_sweep_preference})"
+                        base_lab = f"{base_lab} (view={empirical_sweep_preference})"
                     if _show_alpha:
                         base_lab = f"{base_lab} (α={alpha})"
                     if show_overall_band and ystd.size == y.size:
