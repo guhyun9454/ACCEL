@@ -26,6 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from eval_clm_utils import (
+    build_results_dir,
     parse_arguments,
     prepare_eval,
 )
@@ -2252,9 +2253,7 @@ def main():
                 args.task = task
                 args.num_few_shot = num_few_shot
 
-                out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
-                if getattr(args, "option_id_set", None):
-                    out_dir += f"_id-{args.option_id_set}"
+                out_dir = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="full")
                 os.makedirs(out_dir, exist_ok=True)
 
                 # Randomness per eval_name, mixed with base_seed
@@ -3264,18 +3263,14 @@ def main():
                                     curve_objs_empirical.append(merged_emp)
 
                         # ---------- save cyclic/base derived results ----------
-                        cyclic_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_cyclic'
-                        if getattr(args, 'option_id_set', None):
-                            cyclic_save_path += f'_id-{args.option_id_set}'
+                        cyclic_save_path = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="cyclic")
                         os.makedirs(cyclic_save_path, exist_ok=True)
 
                         cyclic_acc = (cyclic_corrects / cyclic_total) if cyclic_total > 0 else float('nan')
                         save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results,
                                  metrics={'type': 'metric', 'data': {'accuracy': cyclic_acc}})
 
-                        base_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}'
-                        if getattr(args, 'option_id_set', None):
-                            base_save_path += f'_id-{args.option_id_set}'
+                        base_save_path = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting=None)
                         os.makedirs(base_save_path, exist_ok=True)
 
                         base_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64))) if len(base_correct_list) else float('nan')
@@ -3285,9 +3280,7 @@ def main():
                         full_acc = (full_corrects / full_total) if full_total > 0 else float('nan')
 
                         # ---------- curve save path (for per-subject plots when not MMLU) ----------
-                        curve_save_path = f'results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full'
-                        if getattr(args, 'option_id_set', None):
-                            curve_save_path += f'_id-{args.option_id_set}'
+                        curve_save_path = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="full")
                         os.makedirs(curve_save_path, exist_ok=True)
 
                         # (per-subject report removed — FINAL CONDENSED REPORT only)
@@ -3473,9 +3466,7 @@ def main():
         # Three-curves: Cost vs Acc, Cost vs Recall_std (Cyclic / Default+PRIDE / OURS th1/sqrt2)
         if len(derived_records_by_p) > 0:
             try:
-                out_dir = f"results_{args.task}/{args.num_few_shot}s_{args.model_name}/{args.task}_full"
-                if getattr(args, 'option_id_set', None):
-                    out_dir += f"_id-{args.option_id_set}"
+                out_dir = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="full")
                 os.makedirs(out_dir, exist_ok=True)
                 cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
                 pride_fracs = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]

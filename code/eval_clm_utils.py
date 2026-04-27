@@ -6,6 +6,7 @@ import copy
 import json
 import argparse
 import logging
+import re
 from tqdm import tqdm
 from typing import List
 from functools import partial
@@ -159,6 +160,8 @@ def parse_arguments():
 
     parser.add_argument("--force", action="store_true",
                         help="Overwrite existing results files if they exist")
+    parser.add_argument("--result_tag", type=str, default=None,
+                        help="Optional suffix appended to local results directories to separate experiment variants. Legacy path is unchanged when omitted.")
     parser.add_argument("--develop", action="store_true",
                         help="Dev mode: skip model/data eval and generate dummy numeric logs/plots (for W&B/Streamlit pipeline test).")
 
@@ -187,6 +190,26 @@ def parse_arguments():
     return args
 
 
+def _sanitize_result_tag(tag: str) -> str:
+    s = str(tag or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", s)
+    return s.strip("-._")
+
+
+def build_results_dir(args, task: str, num_few_shot: int, setting: str = None) -> str:
+    save_path = f"results_{task}/{num_few_shot}s_{args.model_name}/{task}"
+    if setting is not None:
+        save_path += f"_{setting}"
+    if getattr(args, "option_id_set", None):
+        save_path += f"_id-{args.option_id_set}"
+    tag = _sanitize_result_tag(getattr(args, "result_tag", None))
+    if tag:
+        save_path += f"__{tag}"
+    return save_path
+
+
 def prepare_eval(args, eval_name):
     # task and setting
     eval_args = eval_name.split(',')
@@ -197,11 +220,7 @@ def prepare_eval(args, eval_name):
         moved_answer = setting[-1].upper()
 
     # save_path
-    save_path = f'results_{task}/{num_few_shot}s_{args.model_name}/{task}'
-    if setting is not None:
-        save_path += f'_{setting}'
-    if getattr(args, 'option_id_set', None):
-        save_path += f'_id-{args.option_id_set}'
+    save_path = build_results_dir(args, task=task, num_few_shot=num_few_shot, setting=setting)
     args.save_path = save_path
     os.makedirs(args.save_path, exist_ok=True)
 
