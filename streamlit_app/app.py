@@ -229,6 +229,7 @@ def _curve_series_from_payload(
     ours_pride_alpha: Optional[float] = None,
     ours_pride_variant: Optional[str] = None,
     empirical_sweep_preference: str = "auto",
+    empirical_pride_alpha: Optional[float] = None,
 ) -> Dict[float, Dict[str, float]]:
     """
     Returns: x(p or fraction) -> {'cost': float, 'y': float}
@@ -276,7 +277,8 @@ def _curve_series_from_payload(
         if desired_mode in ("percentile", "confidence") and empirical_mode != desired_mode:
             return {}
         by_alpha = empirical_data.get("by_alpha") or {}
-        alpha_key = (f"{float(ours_pride_alpha):g}" if ours_pride_alpha is not None else (list(by_alpha.keys())[0] if by_alpha else None))
+        alpha_src = empirical_pride_alpha if empirical_pride_alpha is not None else ours_pride_alpha
+        alpha_key = (f"{float(alpha_src):g}" if alpha_src is not None else (list(by_alpha.keys())[0] if by_alpha else None))
         if alpha_key and alpha_key in by_alpha:
             alpha_curves = by_alpha[alpha_key]
             if isinstance(alpha_curves, dict):
@@ -436,6 +438,7 @@ def _plot_groups(
     n_runs_flattened: int = 0,
     show_overall_band: bool = False,
     ours_pride_alphas: Optional[List[float]] = None,
+    empirical_pride_alphas: Optional[List[float]] = None,
     ours_pride_base_label: str = "Ours+PRIDE",
     min_pct_by_curve: Optional[Dict[str, float]] = None,
     empirical_sweep_preference: str = "auto",
@@ -453,12 +456,17 @@ def _plot_groups(
                 continue
             for ck in curve_keys:
                 if ck in _pride_keys:
-                    alphas = ours_pride_alphas or [2]
+                    alphas = (empirical_pride_alphas or [2]) if ck == "empirical_pride_primary" else (ours_pride_alphas or [2])
                     _show_alpha = len(alphas) >= 2
                     for i, alpha in enumerate(alphas):
                         series_list = [
                             _curve_series_from_payload(
-                                p, ck, y_key, ours_pride_alpha=alpha, empirical_sweep_preference=empirical_sweep_preference
+                                p,
+                                ck,
+                                y_key,
+                                ours_pride_alpha=(None if ck == "empirical_pride_primary" else alpha),
+                                empirical_sweep_preference=empirical_sweep_preference,
+                                empirical_pride_alpha=(alpha if ck == "empirical_pride_primary" else None),
                             )
                             for p in payloads
                         ]
@@ -541,14 +549,19 @@ def _plot_groups(
     if overall_mode in ("flatten_equal_run_weight",):
         for ck in curve_keys:
             if ck in _pride_keys:
-                alphas = ours_pride_alphas or [2]
+                alphas = (empirical_pride_alphas or [2]) if ck == "empirical_pride_primary" else (ours_pride_alphas or [2])
                 _show_alpha = len(alphas) >= 2
                 for i, alpha in enumerate(alphas):
                     all_series = []
                     for payloads in group_payloads.values():
                         for p in payloads:
                             s = _curve_series_from_payload(
-                                p, ck, y_key, ours_pride_alpha=alpha, empirical_sweep_preference=empirical_sweep_preference
+                                p,
+                                ck,
+                                y_key,
+                                ours_pride_alpha=(None if ck == "empirical_pride_primary" else alpha),
+                                empirical_sweep_preference=empirical_sweep_preference,
+                                empirical_pride_alpha=(alpha if ck == "empirical_pride_primary" else None),
                             )
                             m = max_by.get(ck)
                             mn = min_by.get(ck)
@@ -1070,12 +1083,20 @@ with col_m7:
 
 pride_alpha_options = [0.5, 1.0, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 ours_pride_alphas = st.multiselect(
-    "PriDe α (prefix)",
+    "Ours+PriDe α (prefix)",
     options=pride_alpha_options,
     default=[2, 5, 10, 20],
     format_func=lambda x: f"α={x}%",
     key="ours_pride_alphas",
-    help="Ours+PriDe와 Empirical PriDe에서 공통으로 쓰는 PriDe prefix 비율입니다. 여러 α 선택 시 각 α별 곡선이 함께 표시됩니다.",
+    help="PriDe / Ours+PriDe 곡선에 쓰는 prefix 비율입니다. 여러 α 선택 시 각 α별 곡선이 함께 표시됩니다.",
+)
+empirical_pride_alphas = st.multiselect(
+    "Empirical PriDe α (prefix)",
+    options=pride_alpha_options,
+    default=[2],
+    format_func=lambda x: f"α={x}%",
+    key="empirical_pride_alphas",
+    help="Empirical PriDe 전용 prefix 비율입니다. 여러 α 선택 시 각 α별 empirical 곡선이 함께 표시됩니다.",
 )
 
 max_pct_by_curve = {
@@ -1169,6 +1190,7 @@ if plot_clicked:
             n_runs_flattened=n_runs_flattened,
             show_overall_band=show_overall_band,
             ours_pride_alphas=ours_pride_alphas or [2],
+            empirical_pride_alphas=empirical_pride_alphas or [2],
             ours_pride_base_label=str(lab_ours_pride or "Ours+PRIDE"),
             min_pct_by_curve=min_pct_by_curve,
             empirical_sweep_preference=empirical_sweep_view,
@@ -1189,6 +1211,7 @@ if plot_clicked:
             n_runs_flattened=n_runs_flattened,
             show_overall_band=show_overall_band,
             ours_pride_alphas=ours_pride_alphas or [2],
+            empirical_pride_alphas=empirical_pride_alphas or [2],
             ours_pride_base_label=str(lab_ours_pride or "Ours+PRIDE"),
             min_pct_by_curve=min_pct_by_curve,
             empirical_sweep_preference=empirical_sweep_view,

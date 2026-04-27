@@ -26,6 +26,7 @@ def _plot_three_curves_acc_recall_std(
     cyclic_fractions: List[int],
     pride_ours_fractions: List[float],
     pride_prefix_list: List[float],
+    empirical_prefix_list: List[float],
     wandb_ok: bool = False,
     wandb_run: Any = None,
 ):
@@ -196,10 +197,10 @@ def _plot_three_curves_acc_recall_std(
         cost_ours_pride_th12, acc_ours_pride_th12, rstd_ours_pride_th12, acc_std_ours_pride_th12, rstd_std_ours_pride_th12 = _agg_heur(derived_records_pride_by_p, LEGACY_OURS_LABEL, pride_ours_fractions) if derived_records_pride_by_p else _def5
 
     if derived_records_empirical_by_alpha:
-        empirical_alpha = _pick_preferred_alpha(pride_prefix_list or list(derived_records_empirical_by_alpha.keys()), preferred=2.0)
+        empirical_alpha = _pick_preferred_alpha(empirical_prefix_list or list(derived_records_empirical_by_alpha.keys()), preferred=2.0)
         empirical_cobjs = derived_records_empirical_by_alpha.get(empirical_alpha, []) if empirical_alpha is not None else []
         empirical_mode, empirical_sweep_key, empirical_sweep_values, empirical_schedule, empirical_gamma = _infer_empirical_sweep(
-            derived_records_empirical_by_alpha, pride_prefix_list, pride_ours_fractions
+            derived_records_empirical_by_alpha, empirical_prefix_list, pride_ours_fractions
         )
         cost_empirical, acc_empirical, rstd_empirical, acc_std_empirical, rstd_std_empirical = _agg_heur_by_sweep(
             empirical_cobjs, empirical_sweep_values, empirical_sweep_key, EMPIRICAL_PRIDE_LABEL
@@ -388,6 +389,7 @@ def _plot_three_curves_acc_recall_std(
             }
         return {
             "pride_prefix_fractions": [float(a) for a in prefix_list],
+            "empirical_prefix_fractions": [float(a) for a in prefix_list],
             "sweep_mode": empirical_mode,
             "threshold_schedule": empirical_schedule,
             "threshold_gamma": float(empirical_gamma),
@@ -453,7 +455,7 @@ def _plot_three_curves_acc_recall_std(
                 ),
                 "empirical_pride": _build_empirical_payload(
                     derived_records_empirical_by_alpha,
-                    pride_prefix_list,
+                    empirical_prefix_list,
                     pride_ours_fractions,
                     default_acc,
                     default_recall_std,

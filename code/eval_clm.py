@@ -2306,6 +2306,7 @@ def main():
                     derived_records_by_p[float(p)] = [cobj]  # 1 "subject"
 
                 pride_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0] or [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+                empirical_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_empirical_prefix_fractions", None)) if 0.0 <= float(x) <= 100.0] or list(pride_prefix)
                 derived_records_pride_by_p = {}
                 derived_records_pride_by_alpha = {}
                 for alpha in pride_prefix:
@@ -2344,11 +2345,13 @@ def main():
                     derived_records_by_p,
                     derived_records_pride_by_p,
                     derived_records_pride_by_alpha,
+                    {},
                     out_dir,
                     args.task,
                     cyclic_fractions=cyclic_fracs,
                     pride_ours_fractions=pride_fracs,
                     pride_prefix_list=pride_prefix,
+                    empirical_prefix_list=empirical_prefix,
                     wandb_ok=wandb_ok,
                     wandb_run=wandb_run,
                 )
@@ -2865,6 +2868,9 @@ def main():
                         pride_prefix_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
                         if not pride_prefix_list:
                             pride_prefix_list = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+                        empirical_prefix_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_empirical_prefix_fractions", None)) if 0.0 <= float(x) <= 100.0]
+                        if not empirical_prefix_list:
+                            empirical_prefix_list = list(pride_prefix_list)
                         ours_th1_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
                         if not ours_th1_list:
                             ours_th1_list = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
@@ -3118,7 +3124,7 @@ def main():
                         if empirical_enabled:
                             empirical_logit_delta = float(getattr(args, "empirical_logit_delta", 1e-12))
                             empirical_base_seed = int(getattr(args, "pride_seed", 0))
-                            for pride_alpha in pride_prefix_list:
+                            for pride_alpha in empirical_prefix_list:
                                 empirical_seed = _stable_u32_seed(str(subject), empirical_base_seed + run_idx_inner)
                                 _, empirical_mu_hat, empirical_residual_bank, empirical_meta = _estimate_empirical_pride_bank(
                                     per_sample_probs=per_sample_probs,
@@ -3250,7 +3256,7 @@ def main():
                                     curve_objs_pride.append(merged_p)
 
                         if empirical_enabled:
-                            for pride_alpha in pride_prefix_list:
+                            for pride_alpha in empirical_prefix_list:
                                 cobjs_emp = by_empirical_alpha.get(pride_alpha, [])
                                 merged_emp = _merge_curve_objs_over_runs(cobjs_emp) if cobjs_emp else None
                                 if merged_emp:
@@ -3474,6 +3480,7 @@ def main():
                 cyclic_fracs = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
                 pride_fracs = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
                 pride_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0] or [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+                empirical_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_empirical_prefix_fractions", None)) if 0.0 <= float(x) <= 100.0] or list(pride_prefix)
                 _plot_three_curves_acc_recall_std(
                     derived_records_by_p,
                     derived_records_pride_by_p if len(derived_records_pride_by_p) > 0 else {},
@@ -3484,6 +3491,7 @@ def main():
                     cyclic_fractions=cyclic_fracs or [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
                     pride_ours_fractions=pride_fracs or [2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0],
                     pride_prefix_list=pride_prefix,
+                    empirical_prefix_list=empirical_prefix,
                     wandb_ok=wandb_ok,
                     wandb_run=wandb_run,
                 )
