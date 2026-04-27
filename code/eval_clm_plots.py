@@ -43,6 +43,15 @@ def _plot_three_curves_acc_recall_std(
     n_subjects = len(next(iter(derived_records_by_p.values()), []))
     macro_note = f" (macro over {n_subjects} subjects)" if n_subjects > 1 else ""
 
+    def _pick_preferred_alpha(available_alphas, preferred=2.0):
+        vals = [float(x) for x in (available_alphas or [])]
+        if not vals:
+            return None
+        for alpha in vals:
+            if abs(float(alpha) - float(preferred)) <= 1e-12:
+                return float(alpha)
+        return float(vals[0])
+
     def _agg_cyclic(by_p, fracs):
         costs, accs, rstds, acc_stds, rstd_stds = [], [], [], [], []
         p_any = next((float(p) for p in fracs if float(p) in by_p), None) or next(iter(by_p.keys()), None)
@@ -178,7 +187,7 @@ def _plot_three_curves_acc_recall_std(
     cost_ours, acc_ours, rstd_ours, acc_std_ours, rstd_std_ours = _agg_heur(derived_records_by_p, PRIMARY_OURS_LABEL, pride_ours_fractions)
 
     if derived_records_pride_by_alpha:
-        alpha_ours = pride_prefix_list[0] if pride_prefix_list else 10
+        alpha_ours = _pick_preferred_alpha(pride_prefix_list, preferred=2.0)
         cobjs_op = derived_records_pride_by_alpha.get(alpha_ours, [])
         cost_ours_pride, acc_ours_pride, rstd_ours_pride, acc_std_ours_pride, rstd_std_ours_pride = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, PRIMARY_OURS_LABEL) if cobjs_op else _def5
         cost_ours_pride_th12, acc_ours_pride_th12, rstd_ours_pride_th12, acc_std_ours_pride_th12, rstd_std_ours_pride_th12 = _agg_heur_by_th1_p(cobjs_op, pride_ours_fractions, LEGACY_OURS_LABEL) if cobjs_op else _def5
@@ -187,7 +196,7 @@ def _plot_three_curves_acc_recall_std(
         cost_ours_pride_th12, acc_ours_pride_th12, rstd_ours_pride_th12, acc_std_ours_pride_th12, rstd_std_ours_pride_th12 = _agg_heur(derived_records_pride_by_p, LEGACY_OURS_LABEL, pride_ours_fractions) if derived_records_pride_by_p else _def5
 
     if derived_records_empirical_by_alpha:
-        empirical_alpha = pride_prefix_list[0] if pride_prefix_list else next(iter(derived_records_empirical_by_alpha.keys()), None)
+        empirical_alpha = _pick_preferred_alpha(pride_prefix_list or list(derived_records_empirical_by_alpha.keys()), preferred=2.0)
         empirical_cobjs = derived_records_empirical_by_alpha.get(empirical_alpha, []) if empirical_alpha is not None else []
         empirical_mode, empirical_sweep_key, empirical_sweep_values, empirical_schedule, empirical_gamma = _infer_empirical_sweep(
             derived_records_empirical_by_alpha, pride_prefix_list, pride_ours_fractions
