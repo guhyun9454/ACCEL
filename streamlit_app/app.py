@@ -228,6 +228,7 @@ def _curve_series_from_payload(
     y_key: str,
     ours_pride_alpha: Optional[float] = None,
     ours_pride_variant: Optional[str] = None,
+    empirical_sweep_preference: str = "auto",
 ) -> Dict[float, Dict[str, float]]:
     """
     Returns: x(p or fraction) -> {'cost': float, 'y': float}
@@ -268,6 +269,12 @@ def _curve_series_from_payload(
                     curve = alpha_curves
     elif curve_key == "empirical_pride_primary":
         empirical_data = curves.get("empirical_pride", {}) or {}
+        empirical_mode = str(empirical_data.get("sweep_mode", "percentile")).strip().lower()
+        if empirical_mode not in ("percentile", "confidence"):
+            empirical_mode = "percentile"
+        desired_mode = str(empirical_sweep_preference or "auto").strip().lower()
+        if desired_mode in ("percentile", "confidence") and empirical_mode != desired_mode:
+            return {}
         by_alpha = empirical_data.get("by_alpha") or {}
         alpha_key = (f"{float(ours_pride_alpha):g}" if ours_pride_alpha is not None else (list(by_alpha.keys())[0] if by_alpha else None))
         if alpha_key and alpha_key in by_alpha:
@@ -276,7 +283,10 @@ def _curve_series_from_payload(
                 curve = alpha_curves.get("primary") or alpha_curves
             else:
                 curve = alpha_curves
-    x_key = CURVE_DEFS.get(curve_key, {}).get("x_key") or "p"
+    if curve_key == "empirical_pride_primary":
+        x_key = "confidence" if str((curves.get("empirical_pride", {}) or {}).get("sweep_mode", "percentile")).strip().lower() == "confidence" else "p"
+    else:
+        x_key = CURVE_DEFS.get(curve_key, {}).get("x_key") or "p"
 
     xs = curve.get(x_key, []) or []
     costs = curve.get("cost", []) or []
@@ -410,6 +420,7 @@ def _plot_groups(
     ours_pride_alphas: Optional[List[float]] = None,
     ours_pride_base_label: str = "Ours+PRIDE",
     min_pct_by_curve: Optional[Dict[str, float]] = None,
+    empirical_sweep_preference: str = "auto",
 ):
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=160)
 
@@ -427,7 +438,12 @@ def _plot_groups(
                     alphas = ours_pride_alphas or [2]
                     _show_alpha = len(alphas) >= 2
                     for i, alpha in enumerate(alphas):
-                        series_list = [_curve_series_from_payload(p, ck, y_key, ours_pride_alpha=alpha) for p in payloads]
+                        series_list = [
+                            _curve_series_from_payload(
+                                p, ck, y_key, ours_pride_alpha=alpha, empirical_sweep_preference=empirical_sweep_preference
+                            )
+                            for p in payloads
+                        ]
                         m = max_by.get(ck)
                         mn = min_by.get(ck)
                         series_list = [_filter_series_by_max_pct(s, m, ck, min_pct=mn) for s in series_list if s]
@@ -463,6 +479,8 @@ def _plot_groups(
                                 base_lab = str((curve_label_overrides or {}).get(ck) or suffix)
                             else:
                                 base_lab = f"{base_lab} {suffix}"
+                        if ck == "empirical_pride_primary" and empirical_sweep_preference in ("percentile", "confidence"):
+                            base_lab = f"{base_lab} ({empirical_sweep_preference})"
                         if _show_alpha:
                             base_lab = f"{base_lab} (α={alpha})"
                         label = f"{gname} • {base_lab}" if (len(group_payloads) > 1 and (gname or "").strip()) else base_lab
@@ -504,7 +522,9 @@ def _plot_groups(
                     all_series = []
                     for payloads in group_payloads.values():
                         for p in payloads:
-                            s = _curve_series_from_payload(p, ck, y_key, ours_pride_alpha=alpha)
+                            s = _curve_series_from_payload(
+                                p, ck, y_key, ours_pride_alpha=alpha, empirical_sweep_preference=empirical_sweep_preference
+                            )
                             m = max_by.get(ck)
                             mn = min_by.get(ck)
                             s = _filter_series_by_max_pct(s, m, ck, min_pct=mn) if s else {}
@@ -539,6 +559,8 @@ def _plot_groups(
                             base_lab = str((curve_label_overrides or {}).get(ck) or suffix)
                         else:
                             base_lab = f"{base_lab} {suffix}"
+                    if ck == "empirical_pride_primary" and empirical_sweep_preference in ("percentile", "confidence"):
+                        base_lab = f"{base_lab} ({empirical_sweep_preference})"
                     if _show_alpha:
                         base_lab = f"{base_lab} (α={alpha})"
                     if show_overall_band and ystd.size == y.size:
@@ -876,11 +898,22 @@ curve_keys = st.multiselect(
     default=["cyclic", "default_pride", "ours_pride_th1_2", "empirical_pride_primary"],
     help="기본 비교군은 `cyclic`, `PriDe`, `Ours+PriDe (th1/2)`, `Empirical PriDe`입니다. 나머지 곡선은 필요할 때만 추가로 보세요.",
 )
+empirical_sweep_view = st.selectbox(
+    "Empirical PriDe sweep",
+    options=["auto", "percentile", "confidence"],
+    index=0,
+    format_func=lambda x: {
+        "auto": "Auto (payload 따름)",
+        "percentile": "Percentile sweep",
+        "confidence": "Confidence sweep",
+    }.get(x, x),
+    help="Legacy empirical payload는 percentile로 간주합니다. Confidence run만 보고 싶으면 confidence를 고르세요.",
+)
 
 cyclic_options = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 pride_ours_options = [2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
 
-st.caption("곡선별 퍼센타일 상한 (선택한 % 이하만 표시)")
+st.caption("곡선별 상한. Empirical PriDe는 percentile 모드면 0~100, confidence 모드면 0~1 범위를 사용합니다.")
 col_p1, col_p2, col_p3, col_p4, col_p5, col_p6, col_p7 = st.columns(7)
 with col_p1:
     max_pct_cyclic = st.selectbox(
@@ -931,15 +964,15 @@ with col_p6:
         key="max_ours_pride_sqrt",
     )
 with col_p7:
-    max_pct_empirical_pride = st.selectbox(
+    max_pct_empirical_pride = st.number_input(
         "Empirical PriDe 상한",
-        options=pride_ours_options,
-        index=len(pride_ours_options) - 1,
-        format_func=lambda x: f"{x}%" if x < 100 else "100% (전체)",
+        min_value=0.0,
+        value=100.0 if empirical_sweep_view != "confidence" else 1.0,
+        step=1.0 if empirical_sweep_view != "confidence" else 0.01,
         key="max_empirical_pride",
     )
 
-st.caption("곡선별 퍼센타일 하한 (선택한 % 이상만 표시)")
+st.caption("곡선별 하한. Empirical PriDe는 percentile 모드면 0~100, confidence 모드면 0~1 범위를 사용합니다.")
 col_m1, col_m2, col_m3, col_m4, col_m5, col_m6, col_m7 = st.columns(7)
 with col_m1:
     min_pct_cyclic = st.selectbox(
@@ -990,11 +1023,11 @@ with col_m6:
         key="min_ours_pride_sqrt",
     )
 with col_m7:
-    min_pct_empirical_pride = st.selectbox(
+    min_pct_empirical_pride = st.number_input(
         "Empirical PriDe 하한",
-        options=pride_ours_options,
-        index=0,
-        format_func=lambda x: f"{x}%",
+        min_value=0.0,
+        value=0.0,
+        step=1.0 if empirical_sweep_view != "confidence" else 0.01,
         key="min_empirical_pride",
     )
 
@@ -1101,6 +1134,7 @@ if plot_clicked:
             ours_pride_alphas=ours_pride_alphas or [2],
             ours_pride_base_label=str(lab_ours_pride or "Ours+PRIDE"),
             min_pct_by_curve=min_pct_by_curve,
+            empirical_sweep_preference=empirical_sweep_view,
         )
         st.pyplot(fig_acc, use_container_width=True)
     with c_right:
@@ -1120,6 +1154,7 @@ if plot_clicked:
             ours_pride_alphas=ours_pride_alphas or [2],
             ours_pride_base_label=str(lab_ours_pride or "Ours+PRIDE"),
             min_pct_by_curve=min_pct_by_curve,
+            empirical_sweep_preference=empirical_sweep_view,
         )
         st.pyplot(fig_rstd, use_container_width=True)
 

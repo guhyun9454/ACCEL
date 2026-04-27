@@ -515,6 +515,50 @@ def _run_empirical_pride_policy_from_stage_infos(
     return total_cost / float(N), corrects / float(N), preds, stage_counts
 
 
+def _run_empirical_pride_policy_from_stage_infos_confidence(
+    stage_infos: List[Dict[str, Any]],
+    labels_idx: List[int],
+    k: int,
+    confidence_threshold: float,
+) -> Tuple[float, float, List[int], Dict[str, int]]:
+    """
+    Evaluate the empirical PriDe policy with a fixed confidence threshold shared
+    across all stages. Prefix calibration samples are forced to use the full
+    Latin-square schedule to keep calibration accounting aligned with PriDe.
+    """
+    N = len(stage_infos)
+    if N == 0:
+        return float("nan"), float("nan"), [], {}
+
+    tau = float(confidence_threshold)
+    total_cost = 0.0
+    corrects = 0
+    preds: List[int] = []
+    stage_counts = {f"n_stage_{stage + 1}": 0 for stage in range(int(k))}
+
+    for sample_idx, info in enumerate(stage_infos):
+        confs = [float(x) for x in (info.get("conf_by_stage") or [])]
+        pred_by_stage = [int(x) for x in (info.get("pred_by_stage") or [])]
+        forced_prefix = bool(info.get("prefix_forced", False))
+        if len(confs) < k or len(pred_by_stage) < k:
+            raise ValueError(f"Empirical PriDe stage info is incomplete for sample {sample_idx}: expected {k}, got conf={len(confs)}, pred={len(pred_by_stage)}")
+
+        stop_stage = int(k)
+        if not forced_prefix:
+            for stage_idx in range(int(k)):
+                if float(confs[stage_idx]) >= tau:
+                    stop_stage = stage_idx + 1
+                    break
+
+        pred_idx = int(pred_by_stage[stop_stage - 1])
+        preds.append(pred_idx)
+        total_cost += float(stop_stage)
+        corrects += 1 if pred_idx == int(labels_idx[sample_idx]) else 0
+        stage_counts[f"n_stage_{stop_stage}"] = stage_counts.get(f"n_stage_{stop_stage}", 0) + 1
+
+    return total_cost / float(N), corrects / float(N), preds, stage_counts
+
+
 def _run_prefix_cyclic_postfix_base(
     base_correct: List[bool],
     cyclic_correct: List[bool],
@@ -1710,6 +1754,40 @@ def _parse_percent_value_list(v) -> List[float]:
     return [30.0]
 
 
+def _parse_float_value_list(v, default: Optional[List[float]] = None) -> List[float]:
+    fallback = list(default) if default is not None else [0.5]
+    if v is None:
+        return fallback
+    if isinstance(v, (int, float)):
+        return [float(v)]
+    if isinstance(v, (list, tuple)):
+        out = []
+        for x in v:
+            try:
+                out.append(float(x))
+            except Exception:
+                pass
+        return out if out else fallback
+    if isinstance(v, str):
+        s = v.strip()
+        if "," in s:
+            out = []
+            for tok in s.split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                try:
+                    out.append(float(tok))
+                except Exception:
+                    pass
+            return out if out else fallback
+        try:
+            return [float(s)]
+        except Exception:
+            return fallback
+    return fallback
+
+
 # =========================================================
 # Curves: baseline (all methods)
 # =========================================================
@@ -1762,15 +1840,21 @@ def _merge_curve_objs_over_runs(cobjs: List[dict]) -> Optional[dict]:
     if hp_ref:
         def _hp_key(h):
             lab = str(h.get("label")) if h.get("label") else ""
-            th1_p = h.get("th1_p")
-            return (lab, th1_p) if th1_p is not None else (lab, None)
+            for sweep_key in ("th1_p", "conf_th"):
+                sweep_val = h.get(sweep_key)
+                if sweep_val is not None:
+                    return (lab, sweep_key, float(sweep_val))
+            return (lab, None, None)
 
         keys_seen = set()
         for h in hp_ref:
             if isinstance(h, dict) and h.get("label"):
                 keys_seen.add(_hp_key(h))
         merged_hp = []
-        for (lab, th1_p) in sorted(keys_seen, key=lambda k: (k[0], (k[1] if k[1] is not None else -1))):
+        for (lab, sweep_key, sweep_val) in sorted(
+            keys_seen,
+            key=lambda k: (k[0], k[1] or "", (k[2] if k[2] is not None else -1.0)),
+        ):
             costs, accs, rstds, nbs, np2s, ncs = [], [], [], [], [], []
             marker_ref, color_ref = "o", "black"
             for c in cobjs:
@@ -1779,9 +1863,9 @@ def _merge_curve_objs_over_runs(cobjs: List[dict]) -> Optional[dict]:
                         continue
                     if str(h.get("label")) != lab:
                         continue
-                    if th1_p is not None and h.get("th1_p") != th1_p:
+                    if sweep_key is not None and h.get(sweep_key) != sweep_val:
                         continue
-                    if th1_p is None and h.get("th1_p") is not None:
+                    if sweep_key is None and any(h.get(sk) is not None for sk in ("th1_p", "conf_th")):
                         continue
                     costs.append(float(h.get("cost", float("nan"))))
                     accs.append(float(h.get("acc", float("nan"))))
@@ -1800,8 +1884,8 @@ def _merge_curve_objs_over_runs(cobjs: List[dict]) -> Optional[dict]:
             accs = [x for x in accs if np.isfinite(x)]
             if costs and accs:
                 entry = {"label": lab, "cost": float(np.mean(costs)), "acc": float(np.mean(accs)), "marker": marker_ref, "color": color_ref}
-                if th1_p is not None:
-                    entry["th1_p"] = th1_p
+                if sweep_key is not None:
+                    entry[sweep_key] = sweep_val
                 if rstds:
                     entry["recall_std"] = float(np.mean(rstds))
                 if nbs:
@@ -2732,6 +2816,16 @@ def main():
                         # ---------- optional: PRIDE debiasing + n_runs averaging (like debiase_pride.py) ----------
                         empirical_enabled = bool(getattr(args, "empirical_pride", False))
                         pride_enabled = bool(getattr(args, "pride_mix", False) or empirical_enabled)
+                        empirical_sweep_mode = str(getattr(args, "empirical_sweep_mode", "percentile")).strip().lower()
+                        if empirical_sweep_mode not in {"percentile", "confidence"}:
+                            empirical_sweep_mode = "percentile"
+                        empirical_conf_thresholds = [
+                            float(x) for x in _parse_float_value_list(
+                                getattr(args, "empirical_conf_thresholds", "0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90"),
+                                default=[0.5],
+                            )
+                            if 0.0 <= float(x) <= 1.0
+                        ] or [0.5]
                         by_perc_baseline: Dict[float, List[dict]] = defaultdict(list)
                         by_pride_alpha: Dict[float, List[dict]] = defaultdict(list)  # alpha(0.5,1.0,2,5,...) -> [cobj]
                         by_empirical_alpha: Dict[float, List[dict]] = defaultdict(list)  # alpha -> [cobj]
@@ -3057,28 +3151,50 @@ def main():
                                     "tag": "empirical_pride",
                                     "k": int(k),
                                     "percentile": float(pride_alpha),
+                                    "sweep_mode": empirical_sweep_mode,
                                     "n_samples": int(len(empirical_stage_infos)),
                                     "heuristic_points": [],
                                 }
-                                for perc in ours_th1_list:
-                                    perc_f = float(perc)
-                                    c_emp, a_emp, preds_emp, counts_emp = _run_empirical_pride_policy_from_stage_infos(
-                                        stage_infos=empirical_stage_infos,
-                                        labels_idx=labels_idx_for_curves,
-                                        k=k,
-                                        percentile=perc_f,
-                                    )
-                                    hp_emp = {
-                                        "label": EMPIRICAL_PRIDE_LABEL,
-                                        "th1_p": perc_f,
-                                        "cost": float(c_emp),
-                                        "acc": float(a_emp),
-                                        "marker": "X",
-                                        "color": "gray",
-                                        "recall_std": float(_recall_std(labels_idx_for_curves, preds_emp, k)),
-                                    }
-                                    hp_emp.update({key: int(val) for key, val in counts_emp.items()})
-                                    cobj_emp["heuristic_points"].append(hp_emp)
+                                if empirical_sweep_mode == "confidence":
+                                    for conf_th in empirical_conf_thresholds:
+                                        conf_th_f = float(conf_th)
+                                        c_emp, a_emp, preds_emp, counts_emp = _run_empirical_pride_policy_from_stage_infos_confidence(
+                                            stage_infos=empirical_stage_infos,
+                                            labels_idx=labels_idx_for_curves,
+                                            k=k,
+                                            confidence_threshold=conf_th_f,
+                                        )
+                                        hp_emp = {
+                                            "label": EMPIRICAL_PRIDE_LABEL,
+                                            "conf_th": conf_th_f,
+                                            "cost": float(c_emp),
+                                            "acc": float(a_emp),
+                                            "marker": "X",
+                                            "color": "gray",
+                                            "recall_std": float(_recall_std(labels_idx_for_curves, preds_emp, k)),
+                                        }
+                                        hp_emp.update({key: int(val) for key, val in counts_emp.items()})
+                                        cobj_emp["heuristic_points"].append(hp_emp)
+                                else:
+                                    for perc in ours_th1_list:
+                                        perc_f = float(perc)
+                                        c_emp, a_emp, preds_emp, counts_emp = _run_empirical_pride_policy_from_stage_infos(
+                                            stage_infos=empirical_stage_infos,
+                                            labels_idx=labels_idx_for_curves,
+                                            k=k,
+                                            percentile=perc_f,
+                                        )
+                                        hp_emp = {
+                                            "label": EMPIRICAL_PRIDE_LABEL,
+                                            "th1_p": perc_f,
+                                            "cost": float(c_emp),
+                                            "acc": float(a_emp),
+                                            "marker": "X",
+                                            "color": "gray",
+                                            "recall_std": float(_recall_std(labels_idx_for_curves, preds_emp, k)),
+                                        }
+                                        hp_emp.update({key: int(val) for key, val in counts_emp.items()})
+                                        cobj_emp["heuristic_points"].append(hp_emp)
                                 by_empirical_alpha[pride_alpha].append(cobj_emp)
 
                         # Merge over runs and append to derived_records
@@ -3416,11 +3532,11 @@ def main():
                 mean_nc = float(np.mean(nc)) if nc else 0.0
                 return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
 
-            def get_heur_stats_by_th1_p(cobjs, th1_p, label_filter="online_sqrt_all"):
+            def get_heur_stats_by_sweep(cobjs, sweep_value, label_filter="online_sqrt_all", sweep_key="th1_p"):
                 costs, accs, rstds, nb, np2, nc = [], [], [], [], [], []
                 for c in cobjs:
                     for h in (c.get("heuristic_points") or []):
-                        if isinstance(h, dict) and h.get("th1_p") == th1_p and h.get("label") == label_filter:
+                        if isinstance(h, dict) and h.get(sweep_key) == sweep_value and h.get("label") == label_filter:
                             if "cost" in h:
                                 costs.append(h["cost"])
                             accs.append(h.get("acc", float("nan")))
@@ -3443,12 +3559,23 @@ def main():
                 mean_nc = float(np.mean(nc)) if nc else 0.0
                 return mean_c, mean_a, mean_r, mean_nb, mean_np2, mean_nc, std_c, std_a, std_r
 
+            def get_heur_stats_by_th1_p(cobjs, th1_p, label_filter="online_sqrt_all"):
+                return get_heur_stats_by_sweep(cobjs, th1_p, label_filter=label_filter, sweep_key="th1_p")
+
             pride_fracs = [float(x) for x in _parse_percent_value_list(
                 getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")
             ) if 0.0 <= float(x) <= 100.0] or [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+            empirical_conf_fracs = [float(x) for x in _parse_float_value_list(
+                getattr(args, "empirical_conf_thresholds", "0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90"),
+                default=[0.5],
+            ) if 0.0 <= float(x) <= 1.0] or [0.5]
+            empirical_report_mode = str(getattr(args, "empirical_sweep_mode", "percentile")).strip().lower()
+            if empirical_report_mode not in {"percentile", "confidence"}:
+                empirical_report_mode = "percentile"
             # Cyclic 레포트: 항상 0,10,20,...,100 전체 구간 출력 (plot_cyclic_fractions와 무관)
             cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
             pride_alphas = sorted(derived_records_pride_by_alpha.keys()) if derived_records_pride_by_alpha else []
+            empirical_alphas = sorted(derived_records_empirical_by_alpha.keys()) if derived_records_empirical_by_alpha else []
 
             _fmt = (lambda m, s: f"{m:.3f}±{s:.3f}" if np.isfinite(s) and s > 0 else f"{m:.3f}") if n_runs > 1 else (lambda m, s: f"{m:.3f}")
             _fmt4 = (lambda m, s: f"{m:.4f}±{s:.4f}" if np.isfinite(s) and s > 0 else f"{m:.4f}") if n_runs > 1 else (lambda m, s: f"{m:.4f}")
@@ -3487,6 +3614,30 @@ def main():
                     a_str = f"{float(alpha):g}"
                     p_str = f"{float(p):g}"
                     logger.info(f"ours_pride_sqrt_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+
+            if empirical_alphas:
+                if empirical_report_mode == "confidence":
+                    logger.info("---- empirical pride (confidence sweep) ----")
+                    for alpha in empirical_alphas:
+                        cobjs = derived_records_empirical_by_alpha[alpha]
+                        for conf_th in empirical_conf_fracs:
+                            cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_sweep(
+                                cobjs, float(conf_th), label_filter=EMPIRICAL_PRIDE_LABEL, sweep_key="conf_th"
+                            )
+                            a_str = f"{float(alpha):g}"
+                            conf_str = f"{float(conf_th):.2f}"
+                            logger.info(f"empirical_pride_conf_α{a_str}_{conf_str} : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                else:
+                    logger.info("---- empirical pride (percentile sweep) ----")
+                    for alpha in empirical_alphas:
+                        cobjs = derived_records_empirical_by_alpha[alpha]
+                        for p in pride_fracs:
+                            cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(
+                                cobjs, float(p), EMPIRICAL_PRIDE_LABEL
+                            )
+                            a_str = f"{float(alpha):g}"
+                            p_str = f"{float(p):g}"
+                            logger.info(f"empirical_pride_pct_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 3. ours
             logger.info("---- ours ----")

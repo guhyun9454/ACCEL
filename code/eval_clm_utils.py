@@ -96,6 +96,11 @@ def parse_arguments():
                         help="Enable empirical-residual PriDe with adaptive Latin-square permutations.")
     parser.add_argument("--empirical_logit_delta", type=float, default=1e-12,
                         help="Stabilization delta used when converting PriDe priors to centered logits.")
+    parser.add_argument("--empirical_sweep_mode", type=str, default="percentile",
+                        choices=["percentile", "confidence"],
+                        help="Sweep mode for empirical PriDe curves: percentile uses beta-percentile thresholds, confidence uses fixed confidence thresholds.")
+    parser.add_argument("--empirical_conf_thresholds", type=str, default="0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90",
+                        help="Comma-separated confidence thresholds for empirical PriDe when --empirical_sweep_mode=confidence.")
     parser.add_argument("--n_runs", type=int, default=1,
                         help="Number of runs for derived policies (PRIDE prior, cyclic_random). Results averaged over runs, like debiase_pride.py (default=1).")
 

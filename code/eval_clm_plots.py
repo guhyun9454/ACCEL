@@ -105,13 +105,13 @@ def _plot_three_curves_acc_recall_std(
             rstd_stds.append(float(np.nanstd(rl)) if len(rl) > 1 else 0.0)
         return costs, accs, rstds, acc_stds, rstd_stds
 
-    def _agg_heur_by_th1_p(cobjs_list, th1_list, label_filter="online_sqrt_all"):
+    def _agg_heur_by_sweep(cobjs_list, sweep_values, sweep_key, label_filter="online_sqrt_all"):
         costs, accs, rstds, acc_stds, rstd_stds = [], [], [], [], []
-        for p in th1_list:
+        for sweep_value in sweep_values:
             cl, al, rl = [], [], []
             for c in cobjs_list:
                 for h in (c.get("heuristic_points", []) or []):
-                    if isinstance(h, dict) and h.get("th1_p") == p and h.get("label") == label_filter:
+                    if isinstance(h, dict) and h.get(sweep_key) == sweep_value and h.get("label") == label_filter:
                         if "cost" in h:
                             cl.append(float(h["cost"]))
                         if "acc" in h:
@@ -125,6 +125,38 @@ def _plot_three_curves_acc_recall_std(
             acc_stds.append(float(np.nanstd(al)) if len(al) > 1 else 0.0)
             rstd_stds.append(float(np.nanstd(rl)) if len(rl) > 1 else 0.0)
         return costs, accs, rstds, acc_stds, rstd_stds
+
+    def _agg_heur_by_th1_p(cobjs_list, th1_list, label_filter="online_sqrt_all"):
+        return _agg_heur_by_sweep(cobjs_list, th1_list, "th1_p", label_filter=label_filter)
+
+    def _infer_empirical_sweep(by_alpha, prefix_list, fallback_percentiles):
+        for alpha in prefix_list:
+            for c in (by_alpha.get(alpha, []) or []):
+                if not isinstance(c, dict):
+                    continue
+                mode = str(c.get("sweep_mode", "percentile")).strip().lower()
+                if mode not in {"percentile", "confidence"}:
+                    mode = "percentile"
+                for h in (c.get("heuristic_points") or []):
+                    if not isinstance(h, dict) or h.get("label") != EMPIRICAL_PRIDE_LABEL:
+                        continue
+                    if mode == "confidence" and h.get("conf_th") is not None:
+                        vals = sorted({
+                            float(hp.get("conf_th"))
+                            for cc in (by_alpha.get(alpha, []) or [])
+                            for hp in (cc.get("heuristic_points") or [])
+                            if isinstance(hp, dict) and hp.get("label") == EMPIRICAL_PRIDE_LABEL and hp.get("conf_th") is not None
+                        })
+                        return mode, "conf_th", vals
+                    if h.get("th1_p") is not None:
+                        vals = sorted({
+                            float(hp.get("th1_p"))
+                            for cc in (by_alpha.get(alpha, []) or [])
+                            for hp in (cc.get("heuristic_points") or [])
+                            if isinstance(hp, dict) and hp.get("label") == EMPIRICAL_PRIDE_LABEL and hp.get("th1_p") is not None
+                        })
+                        return "percentile", "th1_p", vals
+        return "percentile", "th1_p", [float(x) for x in fallback_percentiles]
 
     cost_cyc, acc_cyc, rstd_cyc, acc_std_cyc, rstd_std_cyc = _agg_cyclic(derived_records_by_p, cyclic_fractions)
     _n = len(pride_prefix_list) if pride_prefix_list else len(pride_ours_fractions)
@@ -153,10 +185,14 @@ def _plot_three_curves_acc_recall_std(
     if derived_records_empirical_by_alpha:
         empirical_alpha = pride_prefix_list[0] if pride_prefix_list else next(iter(derived_records_empirical_by_alpha.keys()), None)
         empirical_cobjs = derived_records_empirical_by_alpha.get(empirical_alpha, []) if empirical_alpha is not None else []
-        cost_empirical, acc_empirical, rstd_empirical, acc_std_empirical, rstd_std_empirical = _agg_heur_by_th1_p(
-            empirical_cobjs, pride_ours_fractions, EMPIRICAL_PRIDE_LABEL
+        empirical_mode, empirical_sweep_key, empirical_sweep_values = _infer_empirical_sweep(
+            derived_records_empirical_by_alpha, pride_prefix_list, pride_ours_fractions
+        )
+        cost_empirical, acc_empirical, rstd_empirical, acc_std_empirical, rstd_std_empirical = _agg_heur_by_sweep(
+            empirical_cobjs, empirical_sweep_values, empirical_sweep_key, EMPIRICAL_PRIDE_LABEL
         ) if empirical_cobjs else _def5
     else:
+        empirical_mode, empirical_sweep_key, empirical_sweep_values = "percentile", "th1_p", [float(x) for x in pride_ours_fractions]
         cost_empirical, acc_empirical, rstd_empirical, acc_std_empirical, rstd_std_empirical = _def5
 
     default_acc = float(acc_cyc[0]) if acc_cyc and np.isfinite(acc_cyc[0]) else float("nan")
@@ -316,16 +352,18 @@ def _plot_three_curves_acc_recall_std(
             "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rstd_std_legacy],
         }
 
-    def _build_empirical_payload(by_alpha, prefix_list, th1_fracs, def_acc, def_rstd, agg_fn):
+    def _build_empirical_payload(by_alpha, prefix_list, percentile_fracs, def_acc, def_rstd):
+        empirical_mode, empirical_sweep_key, empirical_sweep_values = _infer_empirical_sweep(by_alpha, prefix_list, percentile_fracs)
+        payload_sweep_key = "confidence" if empirical_sweep_key == "conf_th" else "p"
         by_alpha_out = {}
         for alpha in prefix_list:
             cobjs = by_alpha.get(alpha, [])
             if not cobjs:
                 continue
-            co, ac, rs, asd, rsd = agg_fn(cobjs, th1_fracs, EMPIRICAL_PRIDE_LABEL)
+            co, ac, rs, asd, rsd = _agg_heur_by_sweep(cobjs, empirical_sweep_values, empirical_sweep_key, EMPIRICAL_PRIDE_LABEL)
             by_alpha_out[f"{float(alpha):g}"] = {
                 "primary": {
-                    "p": [float(x) for x in th1_fracs],
+                    payload_sweep_key: [float(x) for x in empirical_sweep_values],
                     "cost": [float(x) if np.isfinite(x) else float("nan") for x in co],
                     "acc": [float(x) if np.isfinite(x) else float("nan") for x in ac],
                     "recall_std": [float(x) if np.isfinite(x) else float("nan") for x in rs],
@@ -337,7 +375,8 @@ def _plot_three_curves_acc_recall_std(
             }
         return {
             "pride_prefix_fractions": [float(a) for a in prefix_list],
-            "p": [float(x) for x in th1_fracs],
+            "sweep_mode": empirical_mode,
+            payload_sweep_key: [float(x) for x in empirical_sweep_values],
             "by_alpha": by_alpha_out,
         }
 
@@ -403,7 +442,6 @@ def _plot_three_curves_acc_recall_std(
                     pride_ours_fractions,
                     default_acc,
                     default_recall_std,
-                    _agg_heur_by_th1_p,
                 ),
             },
         }
