@@ -109,9 +109,9 @@ def parse_arguments():
                         help="Gamma for empirical PriDe stage schedule. sqrt schedule uses threshold scaling by t^(-gamma).")
     parser.add_argument("--empirical_transition_mode", type=str, default="latin",
                         choices=["latin", "probe_cyclic"],
-                        help="Empirical PriDe transition path. latin keeps stage-by-stage Latin expansion, probe_cyclic uses base -> targeted probe -> cyclic fallback.")
+                        help="Empirical PriDe transition path. latin keeps stage-by-stage Latin expansion, probe_cyclic (legacy name) uses base -> targeted probe -> Latin fallback.")
     parser.add_argument("--empirical_skip_residual_on_cyclic", action="store_true",
-                        help="When empirical_transition_mode=probe_cyclic, skip residual-bank averaging on the final cyclic fallback stage and use only the global prior correction.")
+                        help="When empirical_transition_mode=probe_cyclic, skip residual-bank averaging on the final fallback stage and use only the global prior correction.")
     parser.add_argument("--n_runs", type=int, default=1,
                         help="Number of runs for derived policies (PRIDE prior, cyclic_random). Results averaged over runs, like debiase_pride.py (default=1).")
 

@@ -516,7 +516,7 @@ def _plot_groups(
                             else:
                                 sched_suffix = f"{mode_meta}, {transition_meta}, flat"
                             if skip_residual_meta:
-                                sched_suffix += ", no-resid-cyclic"
+                                sched_suffix += ", no-resid-fallback"
                             base_lab = f"{base_lab} [{sched_suffix}]"
                         if ck == "empirical_pride_primary" and empirical_sweep_preference in ("percentile", "confidence"):
                             base_lab = f"{base_lab} (view={empirical_sweep_preference})"
@@ -615,7 +615,7 @@ def _plot_groups(
                         else:
                             sched_suffix = f"{mode_meta}, {transition_meta}, flat"
                         if skip_residual_meta:
-                            sched_suffix += ", no-resid-cyclic"
+                            sched_suffix += ", no-resid-fallback"
                         base_lab = f"{base_lab} [{sched_suffix}]"
                     if ck == "empirical_pride_primary" and empirical_sweep_preference in ("percentile", "confidence"):
                         base_lab = f"{base_lab} (view={empirical_sweep_preference})"

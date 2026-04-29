@@ -3163,38 +3163,40 @@ def main():
                                     raw_options = list(prompt_meta["options"])
                                     if empirical_transition_mode == "probe_cyclic":
                                         probe_slot_to_content = stage_schedule[1]
-                                        permuted_probe_options = [raw_options[int(content_idx)] for content_idx in probe_slot_to_content]
-                                        probing_inputs_emp = [[
-                                            str(prompt_meta["sys_msg"]),
-                                            _build_option_user_prompt(str(prompt_meta["question"]), permuted_probe_options, option_ids),
-                                        ]]
+                                        probing_inputs_emp = []
+                                        for slot_to_content in stage_schedule[1:]:
+                                            permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
+                                            probing_inputs_emp.append([
+                                                str(prompt_meta["sys_msg"]),
+                                                _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
+                                            ])
                                         empirical_sample = (
                                             int(prompt_meta["idx"]),
                                             (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
                                         )
                                         empirical_result = eval_fn(empirical_sample, random.Random(0))
-                                        probe_row = np.asarray(empirical_result["data"]["probs"][0], dtype=np.float64)
-                                        _, pred_probe_stage, conf_probe_stage = _compute_empirical_stage_posteriors(
-                                            stage_probs=np.vstack([base_row, probe_row]),
-                                            slot_to_content_schedule=[tuple(range(k)), probe_slot_to_content],
+                                        extra_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
+                                        all_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
+                                        _, pred_by_stage_full, conf_by_stage_full = _compute_empirical_stage_posteriors(
+                                            stage_probs=all_stage_probs,
+                                            slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
                                             residual_bank=empirical_residual_bank,
                                         )
-                                        cyclic_stage_probs = np.asarray([per_sample_probs[sample_pos][perm_idx] for perm_idx in cyclic_indices], dtype=np.float64)
-                                        cyclic_residual_bank = (
+                                        fallback_residual_bank = (
                                             np.zeros((1, k), dtype=np.float64)
                                             if empirical_skip_residual_on_cyclic
                                             else empirical_residual_bank
                                         )
-                                        _, pred_cyclic_stage, conf_cyclic_stage = _compute_empirical_stage_posteriors(
-                                            stage_probs=cyclic_stage_probs,
-                                            slot_to_content_schedule=cyc_perms,
+                                        _, pred_fallback_stage, conf_fallback_stage = _compute_empirical_stage_posteriors(
+                                            stage_probs=all_stage_probs,
+                                            slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
-                                            residual_bank=cyclic_residual_bank,
+                                            residual_bank=fallback_residual_bank,
                                         )
                                         empirical_stage_infos.append({
-                                            "pred_by_stage": [int(base_pred_stage[0]), int(pred_probe_stage[-1]), int(pred_cyclic_stage[-1])],
-                                            "conf_by_stage": [float(corrected_stage1[top1_idx]), float(conf_probe_stage[-1]), float(conf_cyclic_stage[-1])],
+                                            "pred_by_stage": [int(base_pred_stage[0]), int(pred_by_stage_full[1]), int(pred_fallback_stage[-1])],
+                                            "conf_by_stage": [float(corrected_stage1[top1_idx]), float(conf_by_stage_full[1]), float(conf_fallback_stage[-1])],
                                             "decision_stages": [1, 2, int(k)],
                                             "prefix_forced": bool(sample_pos in empirical_prefix_ids),
                                         })
