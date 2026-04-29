@@ -97,6 +97,13 @@ def parse_arguments():
                         help="Enable empirical-residual PriDe with adaptive Latin-square permutations.")
     parser.add_argument("--empirical_logit_delta", type=float, default=1e-12,
                         help="Stabilization delta used when converting PriDe priors to centered logits.")
+    parser.add_argument("--empirical_residual_model", type=str, default="logistic_normal",
+                        choices=["logistic_normal", "empirical"],
+                        help="Residual prior model for empirical PriDe. logistic_normal uses Gaussian residual Monte Carlo; empirical reuses the residual bank directly (legacy).")
+    parser.add_argument("--empirical_mc_samples", type=int, default=64,
+                        help="Number of Monte Carlo residual samples for logistic-normal empirical PriDe.")
+    parser.add_argument("--empirical_cov_shrinkage", type=float, default=0.1,
+                        help="Shrinkage lambda for logistic-normal residual covariance estimation.")
     parser.add_argument("--empirical_sweep_mode", type=str, default="percentile",
                         choices=["percentile", "confidence"],
                         help="Sweep mode for empirical PriDe curves: percentile uses beta-percentile thresholds, confidence uses fixed confidence thresholds.")

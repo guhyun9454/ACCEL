@@ -323,6 +323,83 @@ def _estimate_empirical_pride_bank(
     return mean_prior, np.asarray(mu_hat, dtype=np.float64), np.asarray(residual_bank, dtype=np.float64), meta
 
 
+def _estimate_logistic_normal_pride_bank(
+    per_sample_probs: List[np.ndarray],
+    cyclic_indices: List[int],
+    k: int,
+    prefix_ratio: float,
+    seed: int,
+    logit_delta: float = 1e-12,
+    mc_samples: int = 64,
+    shrinkage_lambda: float = 0.1,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+    Returns (mean_prior, mu_hat, residual_samples, covariance, meta).
+    residual_samples has shape (mc_samples, k), centered to sum ~0 per row.
+    """
+    mean_prior, priors_arr, meta = _estimate_pride_prior_random_prefix_details(
+        per_sample_probs=per_sample_probs,
+        cyclic_indices=cyclic_indices,
+        k=k,
+        prefix_ratio=prefix_ratio,
+        seed=seed,
+        eps=max(float(logit_delta), 1e-18),
+    )
+    delta = max(float(logit_delta), 1e-18)
+    n_mc = max(1, int(mc_samples))
+    lam = min(max(float(shrinkage_lambda), 0.0), 1.0)
+
+    if priors_arr.size == 0:
+        mu_hat = np.zeros((k,), dtype=np.float64)
+        residual_samples = np.zeros((n_mc, k), dtype=np.float64)
+        covariance = np.zeros((k, k), dtype=np.float64)
+        meta = dict(meta)
+        meta.update({"residual_model": "logistic_normal", "mc_samples": int(n_mc), "cov_shrinkage": float(lam), "used_priors": 0})
+        return mean_prior, mu_hat, residual_samples, covariance, meta
+
+    log_priors = np.log(priors_arr + delta)
+    centered_logits = log_priors - np.mean(log_priors, axis=1, keepdims=True)
+    mu_hat = np.mean(centered_logits, axis=0)
+    residual_bank = centered_logits - mu_hat[None, :]
+
+    if residual_bank.shape[0] <= 1:
+        covariance = np.zeros((k, k), dtype=np.float64)
+    else:
+        covariance = (residual_bank.T @ residual_bank) / float(residual_bank.shape[0] - 1)
+    covariance = np.asarray(covariance, dtype=np.float64)
+    covariance = 0.5 * (covariance + covariance.T)
+
+    projector = np.eye(k, dtype=np.float64) - np.ones((k, k), dtype=np.float64) / float(k)
+    sigma2 = float(np.trace(covariance)) / float(max(k - 1, 1))
+    shrunk_cov = (1.0 - lam) * covariance + lam * sigma2 * projector
+    shrunk_cov = 0.5 * (shrunk_cov + shrunk_cov.T)
+    shrunk_cov = projector @ shrunk_cov @ projector
+    shrunk_cov = 0.5 * (shrunk_cov + shrunk_cov.T)
+
+    eigvals, eigvecs = np.linalg.eigh(shrunk_cov)
+    eigvals = np.maximum(np.asarray(eigvals, dtype=np.float64), 0.0)
+    shrunk_cov = eigvecs @ np.diag(eigvals) @ eigvecs.T
+    shrunk_cov = 0.5 * (shrunk_cov + shrunk_cov.T)
+
+    rng = np.random.default_rng(int(seed) + 99173)
+    if float(np.max(eigvals)) <= 1e-18:
+        residual_samples = np.zeros((n_mc, k), dtype=np.float64)
+    else:
+        gaussian = rng.normal(size=(n_mc, k))
+        transform = eigvecs @ np.diag(np.sqrt(eigvals))
+        residual_samples = gaussian @ transform.T
+        residual_samples = residual_samples - np.mean(residual_samples, axis=1, keepdims=True)
+
+    meta = dict(meta)
+    meta.update({
+        "residual_model": "logistic_normal",
+        "mc_samples": int(n_mc),
+        "cov_shrinkage": float(lam),
+        "used_priors": int(priors_arr.shape[0]),
+    })
+    return mean_prior, np.asarray(mu_hat, dtype=np.float64), np.asarray(residual_samples, dtype=np.float64), np.asarray(shrunk_cov, dtype=np.float64), meta
+
+
 def _extract_question_from_user_prompt(user_prompt: str) -> str:
     marker = "\nOptions:\n"
     if user_prompt.startswith("Question: ") and marker in user_prompt:
@@ -2848,12 +2925,17 @@ def main():
                         empirical_sweep_mode = str(getattr(args, "empirical_sweep_mode", "percentile")).strip().lower()
                         if empirical_sweep_mode not in {"percentile", "confidence"}:
                             empirical_sweep_mode = "percentile"
+                        empirical_residual_model = str(getattr(args, "empirical_residual_model", "logistic_normal")).strip().lower()
+                        if empirical_residual_model not in {"logistic_normal", "empirical"}:
+                            empirical_residual_model = "logistic_normal"
                         empirical_stage_schedule = str(getattr(args, "empirical_stage_schedule", "sqrt")).strip().lower()
                         if empirical_stage_schedule not in {"flat", "sqrt"}:
                             empirical_stage_schedule = "sqrt"
                         empirical_stage_gamma = float(getattr(args, "empirical_stage_gamma", 0.5))
                         if not np.isfinite(empirical_stage_gamma) or empirical_stage_gamma <= 0.0:
                             empirical_stage_gamma = 0.5
+                        empirical_mc_samples = max(1, int(getattr(args, "empirical_mc_samples", 64)))
+                        empirical_cov_shrinkage = min(max(float(getattr(args, "empirical_cov_shrinkage", 0.1)), 0.0), 1.0)
                         empirical_transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
                         if empirical_transition_mode not in {"latin", "probe_cyclic"}:
                             empirical_transition_mode = "latin"
@@ -3133,14 +3215,27 @@ def main():
                             empirical_base_seed = int(getattr(args, "pride_seed", 0))
                             for pride_alpha in empirical_prefix_list:
                                 empirical_seed = _stable_u32_seed(str(subject), empirical_base_seed + run_idx_inner)
-                                _, empirical_mu_hat, empirical_residual_bank, empirical_meta = _estimate_empirical_pride_bank(
-                                    per_sample_probs=per_sample_probs,
-                                    cyclic_indices=cyclic_indices,
-                                    k=k,
-                                    prefix_ratio=float(pride_alpha) / 100.0,
-                                    seed=empirical_seed,
-                                    logit_delta=empirical_logit_delta,
-                                )
+                                if empirical_residual_model == "logistic_normal":
+                                    _, empirical_mu_hat, empirical_residual_bank, empirical_covariance, empirical_meta = _estimate_logistic_normal_pride_bank(
+                                        per_sample_probs=per_sample_probs,
+                                        cyclic_indices=cyclic_indices,
+                                        k=k,
+                                        prefix_ratio=float(pride_alpha) / 100.0,
+                                        seed=empirical_seed,
+                                        logit_delta=empirical_logit_delta,
+                                        mc_samples=empirical_mc_samples,
+                                        shrinkage_lambda=empirical_cov_shrinkage,
+                                    )
+                                else:
+                                    _, empirical_mu_hat, empirical_residual_bank, empirical_meta = _estimate_empirical_pride_bank(
+                                        per_sample_probs=per_sample_probs,
+                                        cyclic_indices=cyclic_indices,
+                                        k=k,
+                                        prefix_ratio=float(pride_alpha) / 100.0,
+                                        seed=empirical_seed,
+                                        logit_delta=empirical_logit_delta,
+                                    )
+                                    empirical_covariance = np.zeros((k, k), dtype=np.float64)
                                 empirical_prefix_ids = set(int(x) for x in (empirical_meta.get("prefix_ids") or []))
                                 empirical_stage_infos = []
 
@@ -3234,6 +3329,9 @@ def main():
                                     "k": int(k),
                                     "percentile": float(pride_alpha),
                                     "sweep_mode": empirical_sweep_mode,
+                                    "residual_model": empirical_residual_model,
+                                    "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
+                                    "cov_shrinkage": float(empirical_cov_shrinkage),
                                     "transition_mode": empirical_transition_mode,
                                     "skip_residual_on_cyclic": bool(empirical_skip_residual_on_cyclic),
                                     "threshold_schedule": empirical_stage_schedule,
