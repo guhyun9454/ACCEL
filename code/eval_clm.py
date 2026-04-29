@@ -495,34 +495,36 @@ def _run_empirical_pride_policy_from_stage_infos(
     for sample_idx, info in enumerate(stage_infos):
         confs = [float(x) for x in (info.get("conf_by_stage") or [])]
         pred_by_stage = [int(x) for x in (info.get("pred_by_stage") or [])]
+        decision_stages = [int(x) for x in (info.get("decision_stages") or list(range(1, int(k) + 1)))]
         forced_prefix = bool(info.get("prefix_forced", False))
-        if len(confs) < k or len(pred_by_stage) < k:
-            raise ValueError(f"Empirical PriDe stage info is incomplete for sample {sample_idx}: expected {k}, got conf={len(confs)}, pred={len(pred_by_stage)}")
+        if len(confs) != len(pred_by_stage) or len(confs) != len(decision_stages):
+            raise ValueError(f"Empirical PriDe stage info is inconsistent for sample {sample_idx}: conf={len(confs)}, pred={len(pred_by_stage)}, stages={len(decision_stages)}")
 
         if forced_prefix:
-            stop_stage = int(k)
+            stop_stage = int(decision_stages[-1])
         else:
-            stop_stage = int(k)
-            for stage_idx in range(int(k)):
-                hist = histories[stage_idx]
+            stop_stage = int(decision_stages[-1])
+            for local_idx, stage_id in enumerate(decision_stages):
+                hist = histories[int(stage_id) - 1]
                 if stage_schedule == "sqrt":
-                    stage_percentile = base_percentile / ((stage_idx + 1) ** gamma)
+                    stage_percentile = base_percentile / (float(stage_id) ** gamma)
                 else:
                     stage_percentile = base_percentile
                 q = max(0.0, min(1.0, float(stage_percentile) / 100.0))
                 thr = float(np.quantile(np.asarray(hist, dtype=np.float64), q)) if hist else 0.0
-                if float(confs[stage_idx]) >= thr:
-                    stop_stage = stage_idx + 1
+                if float(confs[local_idx]) >= thr:
+                    stop_stage = int(stage_id)
                     break
 
-        pred_idx = int(pred_by_stage[stop_stage - 1])
+        stop_local_idx = decision_stages.index(int(stop_stage))
+        pred_idx = int(pred_by_stage[stop_local_idx])
         preds.append(pred_idx)
         total_cost += float(stop_stage)
         corrects += 1 if pred_idx == int(labels_idx[sample_idx]) else 0
         stage_counts[f"n_stage_{stop_stage}"] = stage_counts.get(f"n_stage_{stop_stage}", 0) + 1
 
-        for stage_idx in range(stop_stage):
-            histories[stage_idx].append(float(confs[stage_idx]))
+        for local_idx, stage_id in enumerate(decision_stages[: stop_local_idx + 1]):
+            histories[int(stage_id) - 1].append(float(confs[local_idx]))
 
     return total_cost / float(N), corrects / float(N), preds, stage_counts
 
@@ -557,24 +559,26 @@ def _run_empirical_pride_policy_from_stage_infos_confidence(
     for sample_idx, info in enumerate(stage_infos):
         confs = [float(x) for x in (info.get("conf_by_stage") or [])]
         pred_by_stage = [int(x) for x in (info.get("pred_by_stage") or [])]
+        decision_stages = [int(x) for x in (info.get("decision_stages") or list(range(1, int(k) + 1)))]
         forced_prefix = bool(info.get("prefix_forced", False))
-        if len(confs) < k or len(pred_by_stage) < k:
-            raise ValueError(f"Empirical PriDe stage info is incomplete for sample {sample_idx}: expected {k}, got conf={len(confs)}, pred={len(pred_by_stage)}")
+        if len(confs) != len(pred_by_stage) or len(confs) != len(decision_stages):
+            raise ValueError(f"Empirical PriDe stage info is inconsistent for sample {sample_idx}: conf={len(confs)}, pred={len(pred_by_stage)}, stages={len(decision_stages)}")
 
-        stop_stage = int(k)
+        stop_stage = int(decision_stages[-1])
         if not forced_prefix:
-            for stage_idx in range(int(k)):
+            for local_idx, stage_id in enumerate(decision_stages):
                 if stage_schedule == "sqrt":
                     chance = 1.0 / float(k)
-                    tau = chance + (base_tau - chance) / ((stage_idx + 1) ** gamma)
+                    tau = chance + (base_tau - chance) / (float(stage_id) ** gamma)
                 else:
                     tau = base_tau
                 tau = max(0.0, min(1.0, float(tau)))
-                if float(confs[stage_idx]) >= tau:
-                    stop_stage = stage_idx + 1
+                if float(confs[local_idx]) >= tau:
+                    stop_stage = int(stage_id)
                     break
 
-        pred_idx = int(pred_by_stage[stop_stage - 1])
+        stop_local_idx = decision_stages.index(int(stop_stage))
+        pred_idx = int(pred_by_stage[stop_local_idx])
         preds.append(pred_idx)
         total_cost += float(stop_stage)
         corrects += 1 if pred_idx == int(labels_idx[sample_idx]) else 0
@@ -2850,6 +2854,10 @@ def main():
                         empirical_stage_gamma = float(getattr(args, "empirical_stage_gamma", 0.5))
                         if not np.isfinite(empirical_stage_gamma) or empirical_stage_gamma <= 0.0:
                             empirical_stage_gamma = 0.5
+                        empirical_transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
+                        if empirical_transition_mode not in {"latin", "probe_cyclic"}:
+                            empirical_transition_mode = "latin"
+                        empirical_skip_residual_on_cyclic = bool(getattr(args, "empirical_skip_residual_on_cyclic", False))
                         empirical_conf_thresholds = [
                             float(x) for x in _parse_float_value_list(
                                 getattr(args, "empirical_conf_thresholds", "0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90"),
@@ -3152,33 +3160,71 @@ def main():
                                     top1_idx = int(base_pred_stage[0])
                                     runner_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else int(top1_idx)
                                     stage_schedule = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
-
-                                    probing_inputs_emp = []
                                     raw_options = list(prompt_meta["options"])
-                                    for slot_to_content in stage_schedule:
-                                        permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
-                                        probing_inputs_emp.append([
+                                    if empirical_transition_mode == "probe_cyclic":
+                                        probe_slot_to_content = stage_schedule[1]
+                                        permuted_probe_options = [raw_options[int(content_idx)] for content_idx in probe_slot_to_content]
+                                        probing_inputs_emp = [[
                                             str(prompt_meta["sys_msg"]),
-                                            _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
-                                        ])
+                                            _build_option_user_prompt(str(prompt_meta["question"]), permuted_probe_options, option_ids),
+                                        ]]
+                                        empirical_sample = (
+                                            int(prompt_meta["idx"]),
+                                            (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
+                                        )
+                                        empirical_result = eval_fn(empirical_sample, random.Random(0))
+                                        probe_row = np.asarray(empirical_result["data"]["probs"][0], dtype=np.float64)
+                                        _, pred_probe_stage, conf_probe_stage = _compute_empirical_stage_posteriors(
+                                            stage_probs=np.vstack([base_row, probe_row]),
+                                            slot_to_content_schedule=[tuple(range(k)), probe_slot_to_content],
+                                            mu_hat=empirical_mu_hat,
+                                            residual_bank=empirical_residual_bank,
+                                        )
+                                        cyclic_stage_probs = np.asarray([per_sample_probs[sample_pos][perm_idx] for perm_idx in cyclic_indices], dtype=np.float64)
+                                        cyclic_residual_bank = (
+                                            np.zeros((1, k), dtype=np.float64)
+                                            if empirical_skip_residual_on_cyclic
+                                            else empirical_residual_bank
+                                        )
+                                        _, pred_cyclic_stage, conf_cyclic_stage = _compute_empirical_stage_posteriors(
+                                            stage_probs=cyclic_stage_probs,
+                                            slot_to_content_schedule=cyc_perms,
+                                            mu_hat=empirical_mu_hat,
+                                            residual_bank=cyclic_residual_bank,
+                                        )
+                                        empirical_stage_infos.append({
+                                            "pred_by_stage": [int(base_pred_stage[0]), int(pred_probe_stage[-1]), int(pred_cyclic_stage[-1])],
+                                            "conf_by_stage": [float(corrected_stage1[top1_idx]), float(conf_probe_stage[-1]), float(conf_cyclic_stage[-1])],
+                                            "decision_stages": [1, 2, int(k)],
+                                            "prefix_forced": bool(sample_pos in empirical_prefix_ids),
+                                        })
+                                    else:
+                                        probing_inputs_emp = []
+                                        for slot_to_content in stage_schedule:
+                                            permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
+                                            probing_inputs_emp.append([
+                                                str(prompt_meta["sys_msg"]),
+                                                _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
+                                            ])
 
-                                    empirical_sample = (
-                                        int(prompt_meta["idx"]),
-                                        (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
-                                    )
-                                    empirical_result = eval_fn(empirical_sample, random.Random(0))
-                                    empirical_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
-                                    _, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
-                                        stage_probs=empirical_stage_probs,
-                                        slot_to_content_schedule=stage_schedule,
-                                        mu_hat=empirical_mu_hat,
-                                        residual_bank=empirical_residual_bank,
-                                    )
-                                    empirical_stage_infos.append({
-                                        "pred_by_stage": [int(x) for x in pred_by_stage],
-                                        "conf_by_stage": [float(x) for x in conf_by_stage],
-                                        "prefix_forced": bool(sample_pos in empirical_prefix_ids),
-                                    })
+                                        empirical_sample = (
+                                            int(prompt_meta["idx"]),
+                                            (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
+                                        )
+                                        empirical_result = eval_fn(empirical_sample, random.Random(0))
+                                        empirical_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
+                                        _, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
+                                            stage_probs=empirical_stage_probs,
+                                            slot_to_content_schedule=stage_schedule,
+                                            mu_hat=empirical_mu_hat,
+                                            residual_bank=empirical_residual_bank,
+                                        )
+                                        empirical_stage_infos.append({
+                                            "pred_by_stage": [int(x) for x in pred_by_stage],
+                                            "conf_by_stage": [float(x) for x in conf_by_stage],
+                                            "decision_stages": list(range(1, int(k) + 1)),
+                                            "prefix_forced": bool(sample_pos in empirical_prefix_ids),
+                                        })
 
                                 cobj_emp = {
                                     "subject": subject,
@@ -3186,6 +3232,8 @@ def main():
                                     "k": int(k),
                                     "percentile": float(pride_alpha),
                                     "sweep_mode": empirical_sweep_mode,
+                                    "transition_mode": empirical_transition_mode,
+                                    "skip_residual_on_cyclic": bool(empirical_skip_residual_on_cyclic),
                                     "threshold_schedule": empirical_stage_schedule,
                                     "threshold_gamma": empirical_stage_gamma,
                                     "n_samples": int(len(empirical_stage_infos)),

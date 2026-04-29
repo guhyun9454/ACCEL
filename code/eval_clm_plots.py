@@ -151,6 +151,10 @@ def _plot_three_curves_acc_recall_std(
                 if schedule not in {"flat", "sqrt"}:
                     schedule = "flat"
                 gamma = float(c.get("threshold_gamma", 0.5)) if isinstance(c.get("threshold_gamma"), (int, float)) else 0.5
+                transition_mode = str(c.get("transition_mode", "latin")).strip().lower()
+                if transition_mode not in {"latin", "probe_cyclic"}:
+                    transition_mode = "latin"
+                skip_residual = bool(c.get("skip_residual_on_cyclic", False))
                 for h in (c.get("heuristic_points") or []):
                     if not isinstance(h, dict) or h.get("label") != EMPIRICAL_PRIDE_LABEL:
                         continue
@@ -161,7 +165,7 @@ def _plot_three_curves_acc_recall_std(
                             for hp in (cc.get("heuristic_points") or [])
                             if isinstance(hp, dict) and hp.get("label") == EMPIRICAL_PRIDE_LABEL and hp.get("conf_th") is not None
                         })
-                        return mode, "conf_th", vals, schedule, gamma
+                        return mode, "conf_th", vals, schedule, gamma, transition_mode, skip_residual
                     if h.get("th1_p") is not None:
                         vals = sorted({
                             float(hp.get("th1_p"))
@@ -169,8 +173,8 @@ def _plot_three_curves_acc_recall_std(
                             for hp in (cc.get("heuristic_points") or [])
                             if isinstance(hp, dict) and hp.get("label") == EMPIRICAL_PRIDE_LABEL and hp.get("th1_p") is not None
                         })
-                        return "percentile", "th1_p", vals, schedule, gamma
-        return "percentile", "th1_p", [float(x) for x in fallback_percentiles], "flat", 0.5
+                        return "percentile", "th1_p", vals, schedule, gamma, transition_mode, skip_residual
+        return "percentile", "th1_p", [float(x) for x in fallback_percentiles], "flat", 0.5, "latin", False
 
     cost_cyc, acc_cyc, rstd_cyc, acc_std_cyc, rstd_std_cyc = _agg_cyclic(derived_records_by_p, cyclic_fractions)
     _n = len(pride_prefix_list) if pride_prefix_list else len(pride_ours_fractions)
@@ -199,14 +203,14 @@ def _plot_three_curves_acc_recall_std(
     if derived_records_empirical_by_alpha:
         empirical_alpha = _pick_preferred_alpha(empirical_prefix_list or list(derived_records_empirical_by_alpha.keys()), preferred=2.0)
         empirical_cobjs = derived_records_empirical_by_alpha.get(empirical_alpha, []) if empirical_alpha is not None else []
-        empirical_mode, empirical_sweep_key, empirical_sweep_values, empirical_schedule, empirical_gamma = _infer_empirical_sweep(
+        empirical_mode, empirical_sweep_key, empirical_sweep_values, empirical_schedule, empirical_gamma, empirical_transition_mode, empirical_skip_residual = _infer_empirical_sweep(
             derived_records_empirical_by_alpha, empirical_prefix_list, pride_ours_fractions
         )
         cost_empirical, acc_empirical, rstd_empirical, acc_std_empirical, rstd_std_empirical = _agg_heur_by_sweep(
             empirical_cobjs, empirical_sweep_values, empirical_sweep_key, EMPIRICAL_PRIDE_LABEL
         ) if empirical_cobjs else _def5
     else:
-        empirical_mode, empirical_sweep_key, empirical_sweep_values, empirical_schedule, empirical_gamma = "percentile", "th1_p", [float(x) for x in pride_ours_fractions], "flat", 0.5
+        empirical_mode, empirical_sweep_key, empirical_sweep_values, empirical_schedule, empirical_gamma, empirical_transition_mode, empirical_skip_residual = "percentile", "th1_p", [float(x) for x in pride_ours_fractions], "flat", 0.5, "latin", False
         cost_empirical, acc_empirical, rstd_empirical, acc_std_empirical, rstd_std_empirical = _def5
 
     default_acc = float(acc_cyc[0]) if acc_cyc and np.isfinite(acc_cyc[0]) else float("nan")
@@ -367,7 +371,7 @@ def _plot_three_curves_acc_recall_std(
         }
 
     def _build_empirical_payload(by_alpha, prefix_list, percentile_fracs, def_acc, def_rstd):
-        empirical_mode, empirical_sweep_key, empirical_sweep_values, empirical_schedule, empirical_gamma = _infer_empirical_sweep(by_alpha, prefix_list, percentile_fracs)
+        empirical_mode, empirical_sweep_key, empirical_sweep_values, empirical_schedule, empirical_gamma, empirical_transition_mode, empirical_skip_residual = _infer_empirical_sweep(by_alpha, prefix_list, percentile_fracs)
         payload_sweep_key = "confidence" if empirical_sweep_key == "conf_th" else "p"
         by_alpha_out = {}
         for alpha in prefix_list:
@@ -391,6 +395,8 @@ def _plot_three_curves_acc_recall_std(
             "pride_prefix_fractions": [float(a) for a in prefix_list],
             "empirical_prefix_fractions": [float(a) for a in prefix_list],
             "sweep_mode": empirical_mode,
+            "transition_mode": empirical_transition_mode,
+            "skip_residual_on_cyclic": bool(empirical_skip_residual),
             "threshold_schedule": empirical_schedule,
             "threshold_gamma": float(empirical_gamma),
             payload_sweep_key: [float(x) for x in empirical_sweep_values],
