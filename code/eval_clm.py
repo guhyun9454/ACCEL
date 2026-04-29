@@ -78,6 +78,13 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
+
+def _format_wall_clock(ts: float) -> str:
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S%z", time.localtime(float(ts)))
+    except Exception:
+        return str(ts)
+
 PRIMARY_OURS_LABEL = "th1/sqrt2"
 LEGACY_OURS_LABEL = "th1/2"
 EMPIRICAL_PRIDE_LABEL = "empirical_pride_primary"
@@ -3213,9 +3220,20 @@ def main():
                         if empirical_enabled:
                             empirical_logit_delta = float(getattr(args, "empirical_logit_delta", 1e-12))
                             empirical_base_seed = int(getattr(args, "pride_seed", 0))
+                            empirical_profile_time = bool(getattr(args, "empirical_profile_time", False)) or (
+                                str(os.environ.get("EMPIRICAL_PROFILE_TIME", "")).strip().lower() in {"1", "true", "yes", "y"}
+                            )
                             for pride_alpha in empirical_prefix_list:
+                                alpha_w0 = time.time() if empirical_profile_time else 0.0
+                                alpha_t0 = time.perf_counter() if empirical_profile_time else 0.0
+                                bank_s = 0.0
+                                bank_w0 = 0.0
+                                bank_w1 = 0.0
+
                                 empirical_seed = _stable_u32_seed(str(subject), empirical_base_seed + run_idx_inner)
                                 if empirical_residual_model == "logistic_normal":
+                                    t0_bank = time.perf_counter() if empirical_profile_time else 0.0
+                                    bank_w0 = time.time() if empirical_profile_time else 0.0
                                     _, empirical_mu_hat, empirical_residual_bank, empirical_covariance, empirical_meta = _estimate_logistic_normal_pride_bank(
                                         per_sample_probs=per_sample_probs,
                                         cyclic_indices=cyclic_indices,
@@ -3226,7 +3244,12 @@ def main():
                                         mc_samples=empirical_mc_samples,
                                         shrinkage_lambda=empirical_cov_shrinkage,
                                     )
+                                    if empirical_profile_time:
+                                        bank_w1 = time.time()
+                                        bank_s = float(time.perf_counter() - t0_bank)
                                 else:
+                                    t0_bank = time.perf_counter() if empirical_profile_time else 0.0
+                                    bank_w0 = time.time() if empirical_profile_time else 0.0
                                     _, empirical_mu_hat, empirical_residual_bank, empirical_meta = _estimate_empirical_pride_bank(
                                         per_sample_probs=per_sample_probs,
                                         cyclic_indices=cyclic_indices,
@@ -3236,20 +3259,51 @@ def main():
                                         logit_delta=empirical_logit_delta,
                                     )
                                     empirical_covariance = np.zeros((k, k), dtype=np.float64)
+                                    if empirical_profile_time:
+                                        bank_w1 = time.time()
+                                        bank_s = float(time.perf_counter() - t0_bank)
                                 empirical_prefix_ids = set(int(x) for x in (empirical_meta.get("prefix_ids") or []))
                                 empirical_stage_infos = []
+                                profile = {
+                                    "alpha_w0": float(alpha_w0),
+                                    "bank_w0": float(bank_w0),
+                                    "bank_w1": float(bank_w1),
+                                    "bank_s": float(bank_s),
+                                    "n_samples": 0,
+                                    "eval_calls": 0,
+                                    "eval_s": 0.0,
+                                    "post_calls": 0,
+                                    "post_s": 0.0,
+                                    "post_base_calls": 0,
+                                    "post_base_s": 0.0,
+                                    "post_full_calls": 0,
+                                    "post_full_s": 0.0,
+                                    "post_fallback_calls": 0,
+                                    "post_fallback_s": 0.0,
+                                    "R_sum": 0,
+                                    "stage_sum": 0,
+                                }
 
                                 for sample_pos, prompt_meta in enumerate(empirical_prompt_meta):
                                     if not prompt_meta.get("question"):
                                         raise ValueError(f"Empirical PriDe prompt metadata missing question for sample position {sample_pos}")
 
                                     base_row = np.asarray(per_sample_probs[sample_pos][identity_idx], dtype=np.float64)
+                                    t0_post = time.perf_counter() if empirical_profile_time else 0.0
                                     base_posterior, base_pred_stage, _ = _compute_empirical_stage_posteriors(
                                         stage_probs=base_row.reshape(1, -1),
                                         slot_to_content_schedule=[tuple(range(k))],
                                         mu_hat=empirical_mu_hat,
                                         residual_bank=empirical_residual_bank,
                                     )
+                                    if empirical_profile_time:
+                                        dt = float(time.perf_counter() - t0_post)
+                                        profile["post_calls"] += 1
+                                        profile["post_base_calls"] += 1
+                                        profile["post_s"] += dt
+                                        profile["post_base_s"] += dt
+                                        profile["R_sum"] += int(getattr(empirical_residual_bank, "shape", [0])[0])
+                                        profile["stage_sum"] += 1
                                     corrected_stage1 = np.asarray(base_posterior[0], dtype=np.float64)
                                     sorted_idx = np.argsort(corrected_stage1)[::-1]
                                     top1_idx = int(base_pred_stage[0])
@@ -3269,26 +3323,48 @@ def main():
                                             int(prompt_meta["idx"]),
                                             (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
                                         )
+                                        t0_eval = time.perf_counter() if empirical_profile_time else 0.0
                                         empirical_result = eval_fn(empirical_sample, random.Random(0))
+                                        if empirical_profile_time:
+                                            profile["eval_calls"] += 1
+                                            profile["eval_s"] += float(time.perf_counter() - t0_eval)
                                         extra_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
                                         all_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
+                                        t0_post = time.perf_counter() if empirical_profile_time else 0.0
                                         _, pred_by_stage_full, conf_by_stage_full = _compute_empirical_stage_posteriors(
                                             stage_probs=all_stage_probs,
                                             slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
                                             residual_bank=empirical_residual_bank,
                                         )
+                                        if empirical_profile_time:
+                                            dt = float(time.perf_counter() - t0_post)
+                                            profile["post_calls"] += 1
+                                            profile["post_full_calls"] += 1
+                                            profile["post_s"] += dt
+                                            profile["post_full_s"] += dt
+                                            profile["R_sum"] += int(getattr(empirical_residual_bank, "shape", [0])[0])
+                                            profile["stage_sum"] += int(len(stage_schedule))
                                         fallback_residual_bank = (
                                             np.zeros((1, k), dtype=np.float64)
                                             if empirical_skip_residual_on_cyclic
                                             else empirical_residual_bank
                                         )
+                                        t0_post = time.perf_counter() if empirical_profile_time else 0.0
                                         _, pred_fallback_stage, conf_fallback_stage = _compute_empirical_stage_posteriors(
                                             stage_probs=all_stage_probs,
                                             slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
                                             residual_bank=fallback_residual_bank,
                                         )
+                                        if empirical_profile_time:
+                                            dt = float(time.perf_counter() - t0_post)
+                                            profile["post_calls"] += 1
+                                            profile["post_fallback_calls"] += 1
+                                            profile["post_s"] += dt
+                                            profile["post_fallback_s"] += dt
+                                            profile["R_sum"] += int(getattr(fallback_residual_bank, "shape", [0])[0])
+                                            profile["stage_sum"] += int(len(stage_schedule))
                                         empirical_stage_infos.append({
                                             "pred_by_stage": [int(base_pred_stage[0]), int(pred_by_stage_full[1]), int(pred_fallback_stage[-1])],
                                             "conf_by_stage": [float(corrected_stage1[top1_idx]), float(conf_by_stage_full[1]), float(conf_fallback_stage[-1])],
@@ -3308,20 +3384,84 @@ def main():
                                             int(prompt_meta["idx"]),
                                             (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
                                         )
+                                        t0_eval = time.perf_counter() if empirical_profile_time else 0.0
                                         empirical_result = eval_fn(empirical_sample, random.Random(0))
+                                        if empirical_profile_time:
+                                            profile["eval_calls"] += 1
+                                            profile["eval_s"] += float(time.perf_counter() - t0_eval)
                                         empirical_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
+                                        t0_post = time.perf_counter() if empirical_profile_time else 0.0
                                         _, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
                                             stage_probs=empirical_stage_probs,
                                             slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
                                             residual_bank=empirical_residual_bank,
                                         )
+                                        if empirical_profile_time:
+                                            dt = float(time.perf_counter() - t0_post)
+                                            profile["post_calls"] += 1
+                                            profile["post_full_calls"] += 1
+                                            profile["post_s"] += dt
+                                            profile["post_full_s"] += dt
+                                            profile["R_sum"] += int(getattr(empirical_residual_bank, "shape", [0])[0])
+                                            profile["stage_sum"] += int(len(stage_schedule))
                                         empirical_stage_infos.append({
                                             "pred_by_stage": [int(x) for x in pred_by_stage],
                                             "conf_by_stage": [float(x) for x in conf_by_stage],
                                             "decision_stages": list(range(1, int(k) + 1)),
                                             "prefix_forced": bool(sample_pos in empirical_prefix_ids),
                                         })
+                                    if empirical_profile_time:
+                                        profile["n_samples"] += 1
+
+                                if empirical_profile_time:
+                                    n = max(1, int(profile.get("n_samples", 0)))
+                                    post_calls = max(1, int(profile.get("post_calls", 0)))
+                                    eval_calls = max(1, int(profile.get("eval_calls", 0)))
+                                    post_ms_per_call = 1000.0 * float(profile.get("post_s", 0.0)) / float(post_calls)
+                                    post_ms_per_sample = 1000.0 * float(profile.get("post_s", 0.0)) / float(n)
+                                    eval_ms_per_call = 1000.0 * float(profile.get("eval_s", 0.0)) / float(eval_calls)
+                                    eval_ms_per_sample = 1000.0 * float(profile.get("eval_s", 0.0)) / float(n)
+                                    R_avg = float(profile.get("R_sum", 0)) / float(post_calls)
+                                    stage_avg = float(profile.get("stage_sum", 0)) / float(post_calls)
+                                    alpha_w1 = time.time()
+                                    alpha_total_s = float(time.perf_counter() - alpha_t0)
+                                    logger.info(
+                                        "[wallclock] empirical_pride α={:.3g}, k={}, model={}, transition={}, skip_residual_on_cyclic={} | "
+                                        "start={} end={} total={:.2f}s | "
+                                        "residual_bank: dt={:.2f}s ({} -> {}) | "
+                                        "eval_fn: total={:.2f}s, calls={}, avg={:.2f}ms/call ({:.2f}ms/sample) | "
+                                        "posteriors: total={:.2f}s, calls={}, avg={:.2f}ms/call ({:.2f}ms/sample), avg_R={:.1f}, avg_stages={:.1f} | "
+                                        "post_base={:.2f}s({} calls), post_full={:.2f}s({} calls), post_fallback={:.2f}s({} calls)".format(
+                                            float(pride_alpha),
+                                            int(k),
+                                            str(empirical_residual_model),
+                                            str(empirical_transition_mode),
+                                            bool(empirical_skip_residual_on_cyclic),
+                                            _format_wall_clock(float(profile.get("alpha_w0", 0.0))),
+                                            _format_wall_clock(float(alpha_w1)),
+                                            float(alpha_total_s),
+                                            float(profile.get("bank_s", 0.0)),
+                                            _format_wall_clock(float(profile.get("bank_w0", 0.0))),
+                                            _format_wall_clock(float(profile.get("bank_w1", 0.0))),
+                                            float(profile.get("eval_s", 0.0)),
+                                            int(profile.get("eval_calls", 0)),
+                                            float(eval_ms_per_call),
+                                            float(eval_ms_per_sample),
+                                            float(profile.get("post_s", 0.0)),
+                                            int(profile.get("post_calls", 0)),
+                                            float(post_ms_per_call),
+                                            float(post_ms_per_sample),
+                                            float(R_avg),
+                                            float(stage_avg),
+                                            float(profile.get("post_base_s", 0.0)),
+                                            int(profile.get("post_base_calls", 0)),
+                                            float(profile.get("post_full_s", 0.0)),
+                                            int(profile.get("post_full_calls", 0)),
+                                            float(profile.get("post_fallback_s", 0.0)),
+                                            int(profile.get("post_fallback_calls", 0)),
+                                        )
+                                    )
 
                                 cobj_emp = {
                                     "subject": subject,

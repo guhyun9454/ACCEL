@@ -119,6 +119,8 @@ def parse_arguments():
                         help="Empirical PriDe transition path. latin keeps stage-by-stage Latin expansion, probe_cyclic (legacy name) uses base -> targeted probe -> Latin fallback.")
     parser.add_argument("--empirical_skip_residual_on_cyclic", action="store_true",
                         help="When empirical_transition_mode=probe_cyclic, skip residual-bank averaging on the final fallback stage and use only the global prior correction.")
+    parser.add_argument("--empirical_profile_time", action="store_true",
+                        help="Profile wall-clock time for empirical_pride (eval_fn vs residual posterior computation).")
     parser.add_argument("--n_runs", type=int, default=1,
                         help="Number of runs for derived policies (PRIDE prior, cyclic_random). Results averaged over runs, like debiase_pride.py (default=1).")
 
