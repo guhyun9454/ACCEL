@@ -153,7 +153,7 @@ def _plot_three_curves_acc_recall_std(
                     schedule = "flat"
                 gamma = float(c.get("threshold_gamma", 0.5)) if isinstance(c.get("threshold_gamma"), (int, float)) else 0.5
                 transition_mode = str(c.get("transition_mode", "latin")).strip().lower()
-                if transition_mode not in {"latin", "probe_cyclic"}:
+                if transition_mode not in {"latin", "probe_cyclic", "cyclic_random", "cyclic_targeted"}:
                     transition_mode = "latin"
                 skip_residual = bool(c.get("skip_residual_on_cyclic", False))
                 for h in (c.get("heuristic_points") or []):

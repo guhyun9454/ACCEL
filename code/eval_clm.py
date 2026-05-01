@@ -493,6 +493,44 @@ def _build_targeted_latin_schedule(k: int, top1_idx: int, runner_idx: int) -> Li
     return [_content_to_slot_assignment_to_perm(sched) for sched in schedules_content_to_slot]
 
 
+def _build_incremental_cyclic_schedule(
+    k: int,
+    top1_idx: int,
+    runner_idx: int,
+    mode: str,
+    seed: int,
+) -> List[Tuple[int, ...]]:
+    """
+    Returns slot->content permutations restricted to cyclic rotations.
+    identity is always first. Remaining cyclic shifts are either:
+    - cyclic_random: random order
+    - cyclic_targeted: first choose the shift that moves runner_idx into top1_idx's slot,
+      then randomize the remaining cyclic shifts.
+    """
+    if k <= 1:
+        return [tuple(range(k))]
+
+    mode = str(mode or "cyclic_random").strip().lower()
+    shifts = list(range(1, int(k)))
+    rng = np.random.default_rng(int(seed))
+
+    if mode == "cyclic_targeted":
+        preferred_shift = (int(runner_idx) - int(top1_idx)) % int(k)
+        if preferred_shift == 0:
+            preferred_shift = 1
+        remaining = [s for s in shifts if int(s) != int(preferred_shift)]
+        rng.shuffle(remaining)
+        ordered_shifts = [int(preferred_shift)] + remaining
+    else:
+        ordered_shifts = list(shifts)
+        rng.shuffle(ordered_shifts)
+
+    schedule = [tuple(range(k))]
+    for shift in ordered_shifts:
+        schedule.append(tuple((slot_idx + int(shift)) % int(k) for slot_idx in range(int(k))))
+    return schedule
+
+
 def _compute_empirical_stage_posteriors(
     stage_probs: np.ndarray,
     slot_to_content_schedule: List[Tuple[int, ...]],
@@ -2937,7 +2975,7 @@ def main():
                         empirical_mc_samples = max(1, int(getattr(args, "empirical_mc_samples", 64)))
                         empirical_cov_shrinkage = min(max(float(getattr(args, "empirical_cov_shrinkage", 0.1)), 0.0), 1.0)
                         empirical_transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
-                        if empirical_transition_mode not in {"latin", "probe_cyclic"}:
+                        if empirical_transition_mode not in {"latin", "probe_cyclic", "cyclic_random", "cyclic_targeted"}:
                             empirical_transition_mode = "latin"
                         empirical_skip_residual_on_cyclic = bool(getattr(args, "empirical_skip_residual_on_cyclic", False))
                         empirical_conf_thresholds = [
@@ -3254,7 +3292,20 @@ def main():
                                     sorted_idx = np.argsort(corrected_stage1)[::-1]
                                     top1_idx = int(base_pred_stage[0])
                                     runner_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else int(top1_idx)
-                                    stage_schedule = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
+                                    if empirical_transition_mode == "latin" or empirical_transition_mode == "probe_cyclic":
+                                        stage_schedule = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
+                                    else:
+                                        transition_seed = _stable_u32_seed(
+                                            f"{subject}:{sample_pos}:{top1_idx}:{runner_idx}:{empirical_transition_mode}",
+                                            empirical_seed,
+                                        )
+                                        stage_schedule = _build_incremental_cyclic_schedule(
+                                            k=k,
+                                            top1_idx=top1_idx,
+                                            runner_idx=runner_idx,
+                                            mode=empirical_transition_mode,
+                                            seed=transition_seed,
+                                        )
                                     raw_options = list(prompt_meta["options"])
                                     if empirical_transition_mode == "probe_cyclic":
                                         probe_slot_to_content = stage_schedule[1]
@@ -3805,24 +3856,26 @@ def main():
                     logger.info(f"---- empirical pride (confidence sweep, {empirical_report_schedule}) ----")
                     for alpha in empirical_alphas:
                         cobjs = derived_records_empirical_by_alpha[alpha]
+                        transition_mode = str(cobjs[0].get("transition_mode", "latin")).strip().lower() if cobjs else "latin"
                         for conf_th in empirical_conf_fracs:
                             cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_sweep(
                                 cobjs, float(conf_th), label_filter=EMPIRICAL_PRIDE_LABEL, sweep_key="conf_th"
                             )
                             a_str = f"{float(alpha):g}"
                             conf_str = f"{float(conf_th):.2f}"
-                            logger.info(f"empirical_pride_conf_{empirical_report_schedule}_α{a_str}_{conf_str} : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                            logger.info(f"empirical_pride_conf_{empirical_report_schedule}_{transition_mode}_α{a_str}_{conf_str} : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
                 else:
                     logger.info(f"---- empirical pride (percentile sweep, {empirical_report_schedule}) ----")
                     for alpha in empirical_alphas:
                         cobjs = derived_records_empirical_by_alpha[alpha]
+                        transition_mode = str(cobjs[0].get("transition_mode", "latin")).strip().lower() if cobjs else "latin"
                         for p in pride_fracs:
                             cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(
                                 cobjs, float(p), EMPIRICAL_PRIDE_LABEL
                             )
                             a_str = f"{float(alpha):g}"
                             p_str = f"{float(p):g}"
-                            logger.info(f"empirical_pride_pct_{empirical_report_schedule}_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                            logger.info(f"empirical_pride_pct_{empirical_report_schedule}_{transition_mode}_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 3. ours
             logger.info("---- ours ----")
