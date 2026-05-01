@@ -243,93 +243,96 @@ def _plot_three_curves_acc_recall_std(
 
     os.makedirs(out_dir, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(10, 6.5), dpi=160)
-    _plot_curve(ax, cost_cyc, delta_acc_cyc, "o", color_cyclic, "-", "Cyclic")
-    _plot_curve(ax, cost_pride, delta_acc_pride, "s", color_pride, "--", "PriDe")
-    _plot_curve(ax, cost_ours_pride_th12, delta_acc_ours_pride_th12, "*", color_ours, "-.", "Ours+PriDe (th1/2)")
-    _plot_curve(ax, cost_empirical, delta_acc_empirical, "X", color_empirical, "-", "Empirical PriDe")
-    ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
-    ax.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
-    ax.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax.set_title(f"{task} — Δ Accuracy{macro_note}", fontsize=12)
-    ax.legend(loc="best", fontsize=9)
-    ax.grid(True, linestyle="--", alpha=0.4)
-    fig.tight_layout()
-    out_acc = os.path.join(out_dir, f"{task}_three_curves_acc.png")
-    fig.savefig(out_acc, bbox_inches="tight")
-    plt.close(fig)
-    logger.info(_purple(f"Saved three-curves delta acc: {out_acc}"))
-    if wandb_ok and wandb_run is not None:
-        try:
-            import wandb
-            wandb_run.log({f"plots/{task}/three_curves_acc": wandb.Image(out_acc)})
-        except Exception:
-            pass
+    try:
+        fig, ax = plt.subplots(figsize=(10, 6.5), dpi=160)
+        _plot_curve(ax, cost_cyc, delta_acc_cyc, "o", color_cyclic, "-", "Cyclic")
+        _plot_curve(ax, cost_pride, delta_acc_pride, "s", color_pride, "--", "PriDe")
+        _plot_curve(ax, cost_ours_pride_th12, delta_acc_ours_pride_th12, "*", color_ours, "-.", "Ours+PriDe (th1/2)")
+        _plot_curve(ax, cost_empirical, delta_acc_empirical, "X", color_empirical, "-", "Empirical PriDe")
+        ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
+        ax.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
+        ax.set_ylabel("Δ Accuracy (%)", fontsize=11)
+        ax.set_title(f"{task} — Δ Accuracy{macro_note}", fontsize=12)
+        ax.legend(loc="best", fontsize=9)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        fig.tight_layout()
+        out_acc = os.path.join(out_dir, f"{task}_three_curves_acc.png")
+        fig.savefig(out_acc, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(_purple(f"Saved three-curves delta acc: {out_acc}"))
+        if wandb_ok and wandb_run is not None:
+            try:
+                import wandb
+                wandb_run.log({f"plots/{task}/three_curves_acc": wandb.Image(out_acc)})
+            except Exception:
+                pass
 
-    fig2, ax2 = plt.subplots(figsize=(10, 6.5), dpi=160)
-    _plot_curve(ax2, cost_cyc, delta_rstd_cyc, "o", color_cyclic, "-", "Cyclic")
-    _plot_curve(ax2, cost_pride, delta_rstd_pride, "s", color_pride, "--", "PriDe")
-    _plot_curve(ax2, cost_ours_pride_th12, delta_rstd_ours_pride_th12, "*", color_ours, "-.", "Ours+PriDe (th1/2)")
-    _plot_curve(ax2, cost_empirical, delta_rstd_empirical, "X", color_empirical, "-", "Empirical PriDe")
-    ax2.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
-    ax2.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
-    ax2.set_ylabel("Δ Recall std", fontsize=11)
-    ax2.set_title(f"{task} — Δ Recall std{macro_note}", fontsize=12)
-    ax2.legend(loc="best", fontsize=9)
-    ax2.grid(True, linestyle="--", alpha=0.4)
-    fig2.tight_layout()
-    out_rstd = os.path.join(out_dir, f"{task}_three_curves_recall_std.png")
-    fig2.savefig(out_rstd, bbox_inches="tight")
-    plt.close(fig2)
-    logger.info(_purple(f"Saved three-curves delta recall_std: {out_rstd}"))
-    if wandb_ok and wandb_run is not None:
-        try:
-            import wandb
-            wandb_run.log({f"plots/{task}/three_curves_recall_std": wandb.Image(out_rstd)})
-        except Exception:
-            pass
+        fig2, ax2 = plt.subplots(figsize=(10, 6.5), dpi=160)
+        _plot_curve(ax2, cost_cyc, delta_rstd_cyc, "o", color_cyclic, "-", "Cyclic")
+        _plot_curve(ax2, cost_pride, delta_rstd_pride, "s", color_pride, "--", "PriDe")
+        _plot_curve(ax2, cost_ours_pride_th12, delta_rstd_ours_pride_th12, "*", color_ours, "-.", "Ours+PriDe (th1/2)")
+        _plot_curve(ax2, cost_empirical, delta_rstd_empirical, "X", color_empirical, "-", "Empirical PriDe")
+        ax2.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
+        ax2.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
+        ax2.set_ylabel("Δ Recall std", fontsize=11)
+        ax2.set_title(f"{task} — Δ Recall std{macro_note}", fontsize=12)
+        ax2.legend(loc="best", fontsize=9)
+        ax2.grid(True, linestyle="--", alpha=0.4)
+        fig2.tight_layout()
+        out_rstd = os.path.join(out_dir, f"{task}_three_curves_recall_std.png")
+        fig2.savefig(out_rstd, bbox_inches="tight")
+        plt.close(fig2)
+        logger.info(_purple(f"Saved three-curves delta recall_std: {out_rstd}"))
+        if wandb_ok and wandb_run is not None:
+            try:
+                import wandb
+                wandb_run.log({f"plots/{task}/three_curves_recall_std": wandb.Image(out_rstd)})
+            except Exception:
+                pass
 
-    fig3, ax3 = plt.subplots(figsize=(10, 6.5), dpi=160)
-    _plot_curve(ax3, cost_ours, delta_acc_ours, "^", color_ours, "-.", "Ours")
-    _plot_curve(ax3, cost_ours_pride, delta_acc_ours_pride, "D", color_pride, "--", "Ours (with PriDe)")
-    ax3.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
-    ax3.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
-    ax3.set_ylabel("Δ Accuracy (%)", fontsize=11)
-    ax3.set_title(f"{task} — Ours vs Ours+PRIDE Δ Accuracy{macro_note}", fontsize=12)
-    ax3.legend(loc="best", fontsize=9)
-    ax3.grid(True, linestyle="--", alpha=0.4)
-    fig3.tight_layout()
-    out_ours_acc = os.path.join(out_dir, f"{task}_ours_vs_ours_pride_acc.png")
-    fig3.savefig(out_ours_acc, bbox_inches="tight")
-    plt.close(fig3)
-    logger.info(_purple(f"Saved ours vs ours_pride delta acc: {out_ours_acc}"))
-    if wandb_ok and wandb_run is not None:
-        try:
-            import wandb
-            wandb_run.log({f"plots/{task}/ours_vs_ours_pride_acc": wandb.Image(out_ours_acc)})
-        except Exception:
-            pass
+        fig3, ax3 = plt.subplots(figsize=(10, 6.5), dpi=160)
+        _plot_curve(ax3, cost_ours, delta_acc_ours, "^", color_ours, "-.", "Ours")
+        _plot_curve(ax3, cost_ours_pride, delta_acc_ours_pride, "D", color_pride, "--", "Ours (with PriDe)")
+        ax3.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
+        ax3.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
+        ax3.set_ylabel("Δ Accuracy (%)", fontsize=11)
+        ax3.set_title(f"{task} — Ours vs Ours+PRIDE Δ Accuracy{macro_note}", fontsize=12)
+        ax3.legend(loc="best", fontsize=9)
+        ax3.grid(True, linestyle="--", alpha=0.4)
+        fig3.tight_layout()
+        out_ours_acc = os.path.join(out_dir, f"{task}_ours_vs_ours_pride_acc.png")
+        fig3.savefig(out_ours_acc, bbox_inches="tight")
+        plt.close(fig3)
+        logger.info(_purple(f"Saved ours vs ours_pride delta acc: {out_ours_acc}"))
+        if wandb_ok and wandb_run is not None:
+            try:
+                import wandb
+                wandb_run.log({f"plots/{task}/ours_vs_ours_pride_acc": wandb.Image(out_ours_acc)})
+            except Exception:
+                pass
 
-    fig4, ax4 = plt.subplots(figsize=(10, 6.5), dpi=160)
-    _plot_curve(ax4, cost_ours, delta_rstd_ours, "^", color_ours, "-.", "Ours")
-    _plot_curve(ax4, cost_ours_pride, delta_rstd_ours_pride, "D", color_pride, "--", "Ours (with PriDe)")
-    ax4.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
-    ax4.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
-    ax4.set_ylabel("Δ Recall std", fontsize=11)
-    ax4.set_title(f"{task} — Ours vs Ours+PRIDE Δ Recall std{macro_note}", fontsize=12)
-    ax4.legend(loc="best", fontsize=9)
-    ax4.grid(True, linestyle="--", alpha=0.4)
-    fig4.tight_layout()
-    out_ours_rstd = os.path.join(out_dir, f"{task}_ours_vs_ours_pride_recall_std.png")
-    fig4.savefig(out_ours_rstd, bbox_inches="tight")
-    plt.close(fig4)
-    logger.info(_purple(f"Saved ours vs ours_pride delta recall_std: {out_ours_rstd}"))
-    if wandb_ok and wandb_run is not None:
-        try:
-            import wandb
-            wandb_run.log({f"plots/{task}/ours_vs_ours_pride_recall_std": wandb.Image(out_ours_rstd)})
-        except Exception:
-            pass
+        fig4, ax4 = plt.subplots(figsize=(10, 6.5), dpi=160)
+        _plot_curve(ax4, cost_ours, delta_rstd_ours, "^", color_ours, "-.", "Ours")
+        _plot_curve(ax4, cost_ours_pride, delta_rstd_ours_pride, "D", color_pride, "--", "Ours (with PriDe)")
+        ax4.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
+        ax4.set_xlabel("Computational Cost (× of default forward pass)", fontsize=11)
+        ax4.set_ylabel("Δ Recall std", fontsize=11)
+        ax4.set_title(f"{task} — Ours vs Ours+PRIDE Δ Recall std{macro_note}", fontsize=12)
+        ax4.legend(loc="best", fontsize=9)
+        ax4.grid(True, linestyle="--", alpha=0.4)
+        fig4.tight_layout()
+        out_ours_rstd = os.path.join(out_dir, f"{task}_ours_vs_ours_pride_recall_std.png")
+        fig4.savefig(out_ours_rstd, bbox_inches="tight")
+        plt.close(fig4)
+        logger.info(_purple(f"Saved ours vs ours_pride delta recall_std: {out_ours_rstd}"))
+        if wandb_ok and wandb_run is not None:
+            try:
+                import wandb
+                wandb_run.log({f"plots/{task}/ours_vs_ours_pride_recall_std": wandb.Image(out_ours_rstd)})
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"Three-curves figure rendering failed for task={task}: {e}")
 
     def _build_ours_pride_payload(
         by_alpha, prefix_list, th1_fracs, def_acc, def_rstd, agg_fn,
