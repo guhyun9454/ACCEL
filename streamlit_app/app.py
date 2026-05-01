@@ -326,9 +326,9 @@ def _curve_series_from_payload(
     return out
 
 
-def _get_empirical_payload_meta(payload: dict) -> Tuple[str, str, float, str, bool, str]:
+def _get_empirical_payload_meta(payload: dict) -> Tuple[str, str, float, str, str, bool, str]:
     if not isinstance(payload, dict):
-        return "percentile", "flat", 0.5, "latin", False, "empirical"
+        return "percentile", "flat", 0.5, "latin", "targeted_latin", False, "empirical"
     empirical_data = ((payload.get("curves", {}) or {}).get("empirical_pride", {}) or {})
     mode = str(empirical_data.get("sweep_mode", "percentile")).strip().lower()
     if mode not in ("percentile", "confidence"):
@@ -341,12 +341,15 @@ def _get_empirical_payload_meta(payload: dict) -> Tuple[str, str, float, str, bo
     transition_mode = str(empirical_data.get("transition_mode", "latin")).strip().lower()
     if transition_mode not in ("latin", "probe_cyclic"):
         transition_mode = "latin"
+    permutation_mode = str(empirical_data.get("permutation_mode", "targeted_latin")).strip().lower()
+    if permutation_mode not in ("targeted_latin", "cyclic_random", "cyclic_runnerup"):
+        permutation_mode = "targeted_latin"
     skip_residual = bool(empirical_data.get("skip_residual_on_cyclic", False))
     try:
         gamma_f = float(gamma)
     except Exception:
         gamma_f = 0.5
-    return mode, schedule, gamma_f, transition_mode, skip_residual, residual_model
+    return mode, schedule, gamma_f, transition_mode, permutation_mode, skip_residual, residual_model
 
 
 def _nanmean(xs: List[float]) -> float:
@@ -511,11 +514,11 @@ def _plot_groups(
                             else:
                                 base_lab = f"{base_lab} {suffix}"
                         if ck == "empirical_pride_primary" and payloads:
-                            mode_meta, schedule_meta, gamma_meta, transition_meta, skip_residual_meta, residual_model_meta = _get_empirical_payload_meta(payloads[0])
+                            mode_meta, schedule_meta, gamma_meta, transition_meta, permutation_meta, skip_residual_meta, residual_model_meta = _get_empirical_payload_meta(payloads[0])
                             if schedule_meta == "sqrt":
-                                sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, sqrt(g={gamma_meta:g})"
+                                sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, {permutation_meta}, sqrt(g={gamma_meta:g})"
                             else:
-                                sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, flat"
+                                sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, {permutation_meta}, flat"
                             if skip_residual_meta:
                                 sched_suffix += ", no-resid-fallback"
                             base_lab = f"{base_lab} [{sched_suffix}]"
@@ -610,11 +613,11 @@ def _plot_groups(
                             if payloads:
                                 sample_payload = payloads[0]
                                 break
-                        mode_meta, schedule_meta, gamma_meta, transition_meta, skip_residual_meta, residual_model_meta = _get_empirical_payload_meta(sample_payload or {})
+                        mode_meta, schedule_meta, gamma_meta, transition_meta, permutation_meta, skip_residual_meta, residual_model_meta = _get_empirical_payload_meta(sample_payload or {})
                         if schedule_meta == "sqrt":
-                            sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, sqrt(g={gamma_meta:g})"
+                            sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, {permutation_meta}, sqrt(g={gamma_meta:g})"
                         else:
-                            sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, flat"
+                            sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, {permutation_meta}, flat"
                         if skip_residual_meta:
                             sched_suffix += ", no-resid-fallback"
                         base_lab = f"{base_lab} [{sched_suffix}]"

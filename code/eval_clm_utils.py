@@ -117,6 +117,9 @@ def parse_arguments():
     parser.add_argument("--empirical_transition_mode", type=str, default="latin",
                         choices=["latin", "probe_cyclic"],
                         help="Empirical PriDe transition path. latin keeps stage-by-stage Latin expansion, probe_cyclic (legacy name) uses base -> targeted probe -> Latin fallback.")
+    parser.add_argument("--empirical_permutation_mode", type=str, default="targeted_latin",
+                        choices=["targeted_latin", "cyclic_random", "cyclic_runnerup"],
+                        help="Permutation family for empirical PriDe. targeted_latin uses targeted flip + Latin completion; cyclic_random uses identity plus a random order of cyclic permutations; cyclic_runnerup uses the cyclic permutation that moves the runner-up content into the top-1 slot first, then the remaining cyclic permutations.")
     parser.add_argument("--empirical_skip_residual_on_cyclic", action="store_true",
                         help="When empirical_transition_mode=probe_cyclic, skip residual-bank averaging on the final fallback stage and use only the global prior correction.")
     parser.add_argument("--n_runs", type=int, default=1,

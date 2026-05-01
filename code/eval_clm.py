@@ -493,6 +493,48 @@ def _build_targeted_latin_schedule(k: int, top1_idx: int, runner_idx: int) -> Li
     return [_content_to_slot_assignment_to_perm(sched) for sched in schedules_content_to_slot]
 
 
+def _build_cyclic_schedule(k: int, shifts: List[int]) -> List[Tuple[int, ...]]:
+    out: List[Tuple[int, ...]] = []
+    for shift in shifts:
+        s = int(shift) % int(k)
+        out.append(tuple(int((slot_idx + s) % int(k)) for slot_idx in range(int(k))))
+    return out
+
+
+def _build_random_cyclic_schedule(k: int, seed: int) -> List[Tuple[int, ...]]:
+    if k <= 1:
+        return [tuple(range(k))]
+    rng = random.Random(int(seed))
+    shifts = list(range(1, int(k)))
+    rng.shuffle(shifts)
+    return _build_cyclic_schedule(int(k), [0] + shifts)
+
+
+def _build_runnerup_cyclic_schedule(k: int, top1_idx: int, runner_idx: int) -> List[Tuple[int, ...]]:
+    if k <= 1:
+        return [tuple(range(k))]
+    target_shift = int((int(runner_idx) - int(top1_idx)) % int(k))
+    if target_shift == 0:
+        target_shift = 1 % int(k)
+    shifts = [target_shift] + [shift for shift in range(1, int(k)) if int(shift) != int(target_shift)]
+    return _build_cyclic_schedule(int(k), [0] + shifts)
+
+
+def _build_empirical_permutation_schedule(
+    k: int,
+    top1_idx: int,
+    runner_idx: int,
+    permutation_mode: str = "targeted_latin",
+    random_seed: Optional[int] = None,
+) -> List[Tuple[int, ...]]:
+    mode = str(permutation_mode or "targeted_latin").strip().lower()
+    if mode == "cyclic_random":
+        return _build_random_cyclic_schedule(int(k), int(0 if random_seed is None else random_seed))
+    if mode == "cyclic_runnerup":
+        return _build_runnerup_cyclic_schedule(int(k), int(top1_idx), int(runner_idx))
+    return _build_targeted_latin_schedule(int(k), int(top1_idx), int(runner_idx))
+
+
 def _compute_empirical_stage_posteriors(
     stage_probs: np.ndarray,
     slot_to_content_schedule: List[Tuple[int, ...]],
@@ -2939,6 +2981,9 @@ def main():
                         empirical_transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
                         if empirical_transition_mode not in {"latin", "probe_cyclic"}:
                             empirical_transition_mode = "latin"
+                        empirical_permutation_mode = str(getattr(args, "empirical_permutation_mode", "targeted_latin")).strip().lower()
+                        if empirical_permutation_mode not in {"targeted_latin", "cyclic_random", "cyclic_runnerup"}:
+                            empirical_permutation_mode = "targeted_latin"
                         empirical_skip_residual_on_cyclic = bool(getattr(args, "empirical_skip_residual_on_cyclic", False))
                         empirical_conf_thresholds = [
                             float(x) for x in _parse_float_value_list(
@@ -3254,7 +3299,20 @@ def main():
                                     sorted_idx = np.argsort(corrected_stage1)[::-1]
                                     top1_idx = int(base_pred_stage[0])
                                     runner_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else int(top1_idx)
-                                    stage_schedule = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
+                                    schedule_seed = _stable_u32_seed(
+                                        str(subject),
+                                        int(run_idx_inner),
+                                        int(prompt_meta["idx"]),
+                                        int(round(float(pride_alpha) * 1000.0)),
+                                        int(empirical_seed),
+                                    )
+                                    stage_schedule = _build_empirical_permutation_schedule(
+                                        k=k,
+                                        top1_idx=top1_idx,
+                                        runner_idx=runner_idx,
+                                        permutation_mode=empirical_permutation_mode,
+                                        random_seed=schedule_seed,
+                                    )
                                     raw_options = list(prompt_meta["options"])
                                     if empirical_transition_mode == "probe_cyclic":
                                         probe_slot_to_content = stage_schedule[1]
@@ -3333,6 +3391,7 @@ def main():
                                     "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
                                     "cov_shrinkage": float(empirical_cov_shrinkage),
                                     "transition_mode": empirical_transition_mode,
+                                    "permutation_mode": empirical_permutation_mode,
                                     "skip_residual_on_cyclic": bool(empirical_skip_residual_on_cyclic),
                                     "threshold_schedule": empirical_stage_schedule,
                                     "threshold_gamma": empirical_stage_gamma,
