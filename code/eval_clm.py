@@ -3442,6 +3442,18 @@ def main():
                                     )
                                     import traceback
                                     traceback.print_exc()
+                            if empirical_enabled:
+                                missing_empirical_alphas = [
+                                    float(alpha) for alpha in empirical_prefix_list
+                                    if len(by_empirical_alpha.get(alpha, [])) == 0
+                                ]
+                                if missing_empirical_alphas:
+                                    logger.warning(
+                                        f"Empirical PriDe produced no curve objects for subject='{subject}', run={run_idx_inner}, "
+                                        f"alphas={[f'{a:g}' for a in missing_empirical_alphas]}, "
+                                        f"residual_model={empirical_residual_model}, transition={empirical_transition_mode}, "
+                                        f"permutation={empirical_permutation_mode}"
+                                    )
 
                         # Merge over runs and append to derived_records
                         for perc in ours_th1_list:
@@ -3695,6 +3707,12 @@ def main():
             except Exception as ex:
                 logger.warning(f"Three-curves plot failed: {ex}")
 
+        if empirical_enabled and len(derived_records_empirical_by_alpha) == 0:
+            logger.warning(
+                f"Empirical PriDe is enabled but no merged empirical curve records were produced for task='{args.task}'. "
+                f"Check earlier 'Empirical PriDe failed ...' warnings."
+            )
+
         # =========================================================
         # 커스텀 최종 요약 리포트 (사용자 맞춤형 포맷)
         # =========================================================
@@ -3819,6 +3837,11 @@ def main():
             cyclic_fracs = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
             pride_alphas = sorted(derived_records_pride_by_alpha.keys()) if derived_records_pride_by_alpha else []
             empirical_alphas = sorted(derived_records_empirical_by_alpha.keys()) if derived_records_empirical_by_alpha else []
+            if empirical_enabled and not empirical_alphas:
+                logger.warning(
+                    f"Empirical PriDe section skipped in FINAL CONDENSED REPORT because no empirical alpha records were available. "
+                    f"residual_model={empirical_residual_model}, transition={empirical_transition_mode}, permutation={empirical_permutation_mode}"
+                )
 
             _fmt = (lambda m, s: f"{m:.3f}±{s:.3f}" if np.isfinite(s) and s > 0 else f"{m:.3f}") if n_runs > 1 else (lambda m, s: f"{m:.3f}")
             _fmt4 = (lambda m, s: f"{m:.4f}±{s:.4f}" if np.isfinite(s) and s > 0 else f"{m:.4f}") if n_runs > 1 else (lambda m, s: f"{m:.4f}")
