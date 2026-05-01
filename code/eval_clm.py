@@ -3259,63 +3259,62 @@ def main():
                             empirical_logit_delta = float(getattr(args, "empirical_logit_delta", 1e-12))
                             empirical_base_seed = int(getattr(args, "pride_seed", 0))
                             for pride_alpha in empirical_prefix_list:
-                                empirical_seed = _stable_u32_seed(str(subject), empirical_base_seed + run_idx_inner)
-                                if empirical_residual_model == "logistic_normal":
-                                    _, empirical_mu_hat, empirical_residual_bank, empirical_covariance, empirical_meta = _estimate_logistic_normal_pride_bank(
-                                        per_sample_probs=per_sample_probs,
-                                        cyclic_indices=cyclic_indices,
-                                        k=k,
-                                        prefix_ratio=float(pride_alpha) / 100.0,
-                                        seed=empirical_seed,
-                                        logit_delta=empirical_logit_delta,
-                                        mc_samples=empirical_mc_samples,
-                                        shrinkage_lambda=empirical_cov_shrinkage,
-                                    )
-                                else:
-                                    _, empirical_mu_hat, empirical_residual_bank, empirical_meta = _estimate_empirical_pride_bank(
-                                        per_sample_probs=per_sample_probs,
-                                        cyclic_indices=cyclic_indices,
-                                        k=k,
-                                        prefix_ratio=float(pride_alpha) / 100.0,
-                                        seed=empirical_seed,
-                                        logit_delta=empirical_logit_delta,
-                                    )
-                                    empirical_covariance = np.zeros((k, k), dtype=np.float64)
-                                empirical_prefix_ids = set(int(x) for x in (empirical_meta.get("prefix_ids") or []))
-                                empirical_stage_infos = []
+                                try:
+                                    empirical_seed = _stable_u32_seed(str(subject), empirical_base_seed + run_idx_inner)
+                                    if empirical_residual_model == "logistic_normal":
+                                        _, empirical_mu_hat, empirical_residual_bank, empirical_covariance, empirical_meta = _estimate_logistic_normal_pride_bank(
+                                            per_sample_probs=per_sample_probs,
+                                            cyclic_indices=cyclic_indices,
+                                            k=k,
+                                            prefix_ratio=float(pride_alpha) / 100.0,
+                                            seed=empirical_seed,
+                                            logit_delta=empirical_logit_delta,
+                                            mc_samples=empirical_mc_samples,
+                                            shrinkage_lambda=empirical_cov_shrinkage,
+                                        )
+                                    else:
+                                        _, empirical_mu_hat, empirical_residual_bank, empirical_meta = _estimate_empirical_pride_bank(
+                                            per_sample_probs=per_sample_probs,
+                                            cyclic_indices=cyclic_indices,
+                                            k=k,
+                                            prefix_ratio=float(pride_alpha) / 100.0,
+                                            seed=empirical_seed,
+                                            logit_delta=empirical_logit_delta,
+                                        )
+                                        empirical_covariance = np.zeros((k, k), dtype=np.float64)
+                                    empirical_prefix_ids = set(int(x) for x in (empirical_meta.get("prefix_ids") or []))
+                                    empirical_stage_infos = []
 
-                                for sample_pos, prompt_meta in enumerate(empirical_prompt_meta):
-                                    if not prompt_meta.get("question"):
-                                        raise ValueError(f"Empirical PriDe prompt metadata missing question for sample position {sample_pos}")
+                                    for sample_pos, prompt_meta in enumerate(empirical_prompt_meta):
+                                        if not prompt_meta.get("question"):
+                                            raise ValueError(f"Empirical PriDe prompt metadata missing question for sample position {sample_pos}")
 
-                                    base_row = np.asarray(per_sample_probs[sample_pos][identity_idx], dtype=np.float64)
-                                    base_posterior, base_pred_stage, _ = _compute_empirical_stage_posteriors(
-                                        stage_probs=base_row.reshape(1, -1),
-                                        slot_to_content_schedule=[tuple(range(k))],
-                                        mu_hat=empirical_mu_hat,
-                                        residual_bank=empirical_residual_bank,
-                                    )
-                                    corrected_stage1 = np.asarray(base_posterior[0], dtype=np.float64)
-                                    sorted_idx = np.argsort(corrected_stage1)[::-1]
-                                    top1_idx = int(base_pred_stage[0])
-                                    runner_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else int(top1_idx)
-                                    schedule_seed = _stable_u32_seed(
-                                        str(subject),
-                                        int(run_idx_inner),
-                                        int(prompt_meta["idx"]),
-                                        int(round(float(pride_alpha) * 1000.0)),
-                                        int(empirical_seed),
-                                    )
-                                    stage_schedule = _build_empirical_permutation_schedule(
-                                        k=k,
-                                        top1_idx=top1_idx,
-                                        runner_idx=runner_idx,
-                                        permutation_mode=empirical_permutation_mode,
-                                        random_seed=schedule_seed,
-                                    )
-                                    raw_options = list(prompt_meta["options"])
-                                    if empirical_transition_mode == "probe_cyclic":
-                                        probe_slot_to_content = stage_schedule[1]
+                                        base_row = np.asarray(per_sample_probs[sample_pos][identity_idx], dtype=np.float64)
+                                        base_posterior, base_pred_stage, _ = _compute_empirical_stage_posteriors(
+                                            stage_probs=base_row.reshape(1, -1),
+                                            slot_to_content_schedule=[tuple(range(k))],
+                                            mu_hat=empirical_mu_hat,
+                                            residual_bank=empirical_residual_bank,
+                                        )
+                                        corrected_stage1 = np.asarray(base_posterior[0], dtype=np.float64)
+                                        sorted_idx = np.argsort(corrected_stage1)[::-1]
+                                        top1_idx = int(base_pred_stage[0])
+                                        runner_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else int(top1_idx)
+                                        schedule_seed = _stable_u32_seed(
+                                            str(subject),
+                                            int(run_idx_inner),
+                                            int(prompt_meta["idx"]),
+                                            int(round(float(pride_alpha) * 1000.0)),
+                                            int(empirical_seed),
+                                        )
+                                        stage_schedule = _build_empirical_permutation_schedule(
+                                            k=k,
+                                            top1_idx=top1_idx,
+                                            runner_idx=runner_idx,
+                                            permutation_mode=empirical_permutation_mode,
+                                            random_seed=schedule_seed,
+                                        )
+                                        raw_options = list(prompt_meta["options"])
                                         probing_inputs_emp = []
                                         for slot_to_content in stage_schedule[1:]:
                                             permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
@@ -3323,126 +3322,126 @@ def main():
                                                 str(prompt_meta["sys_msg"]),
                                                 _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
                                             ])
-                                        empirical_sample = (
-                                            int(prompt_meta["idx"]),
-                                            (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
-                                        )
-                                        empirical_result = eval_fn(empirical_sample, random.Random(0))
-                                        extra_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
+
+                                        extra_stage_probs = np.zeros((0, k), dtype=np.float64)
+                                        if probing_inputs_emp:
+                                            empirical_sample = (
+                                                int(prompt_meta["idx"]),
+                                                (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
+                                            )
+                                            empirical_result = eval_fn(empirical_sample, random.Random(0))
+                                            extra_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
+
                                         all_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
-                                        _, pred_by_stage_full, conf_by_stage_full = _compute_empirical_stage_posteriors(
-                                            stage_probs=all_stage_probs,
-                                            slot_to_content_schedule=stage_schedule,
-                                            mu_hat=empirical_mu_hat,
-                                            residual_bank=empirical_residual_bank,
-                                        )
-                                        fallback_residual_bank = (
-                                            np.zeros((1, k), dtype=np.float64)
-                                            if empirical_skip_residual_on_cyclic
-                                            else empirical_residual_bank
-                                        )
-                                        _, pred_fallback_stage, conf_fallback_stage = _compute_empirical_stage_posteriors(
-                                            stage_probs=all_stage_probs,
-                                            slot_to_content_schedule=stage_schedule,
-                                            mu_hat=empirical_mu_hat,
-                                            residual_bank=fallback_residual_bank,
-                                        )
-                                        empirical_stage_infos.append({
-                                            "pred_by_stage": [int(base_pred_stage[0]), int(pred_by_stage_full[1]), int(pred_fallback_stage[-1])],
-                                            "conf_by_stage": [float(corrected_stage1[top1_idx]), float(conf_by_stage_full[1]), float(conf_fallback_stage[-1])],
-                                            "decision_stages": [1, 2, int(k)],
-                                            "prefix_forced": bool(sample_pos in empirical_prefix_ids),
-                                        })
+
+                                        if empirical_transition_mode == "probe_cyclic":
+                                            _, pred_by_stage_full, conf_by_stage_full = _compute_empirical_stage_posteriors(
+                                                stage_probs=all_stage_probs,
+                                                slot_to_content_schedule=stage_schedule,
+                                                mu_hat=empirical_mu_hat,
+                                                residual_bank=empirical_residual_bank,
+                                            )
+                                            fallback_residual_bank = (
+                                                np.zeros((1, k), dtype=np.float64)
+                                                if empirical_skip_residual_on_cyclic
+                                                else empirical_residual_bank
+                                            )
+                                            _, pred_fallback_stage, conf_fallback_stage = _compute_empirical_stage_posteriors(
+                                                stage_probs=all_stage_probs,
+                                                slot_to_content_schedule=stage_schedule,
+                                                mu_hat=empirical_mu_hat,
+                                                residual_bank=fallback_residual_bank,
+                                            )
+                                            empirical_stage_infos.append({
+                                                "pred_by_stage": [int(base_pred_stage[0]), int(pred_by_stage_full[1]), int(pred_fallback_stage[-1])],
+                                                "conf_by_stage": [float(corrected_stage1[top1_idx]), float(conf_by_stage_full[1]), float(conf_fallback_stage[-1])],
+                                                "decision_stages": [1, 2, int(k)],
+                                                "prefix_forced": bool(sample_pos in empirical_prefix_ids),
+                                            })
+                                        else:
+                                            _, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
+                                                stage_probs=all_stage_probs,
+                                                slot_to_content_schedule=stage_schedule,
+                                                mu_hat=empirical_mu_hat,
+                                                residual_bank=empirical_residual_bank,
+                                            )
+                                            empirical_stage_infos.append({
+                                                "pred_by_stage": [int(x) for x in pred_by_stage],
+                                                "conf_by_stage": [float(x) for x in conf_by_stage],
+                                                "decision_stages": list(range(1, int(k) + 1)),
+                                                "prefix_forced": bool(sample_pos in empirical_prefix_ids),
+                                            })
+
+                                    cobj_emp = {
+                                        "subject": subject,
+                                        "tag": "empirical_pride",
+                                        "k": int(k),
+                                        "percentile": float(pride_alpha),
+                                        "sweep_mode": empirical_sweep_mode,
+                                        "residual_model": empirical_residual_model,
+                                        "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
+                                        "cov_shrinkage": float(empirical_cov_shrinkage),
+                                        "transition_mode": empirical_transition_mode,
+                                        "permutation_mode": empirical_permutation_mode,
+                                        "skip_residual_on_cyclic": bool(empirical_skip_residual_on_cyclic),
+                                        "threshold_schedule": empirical_stage_schedule,
+                                        "threshold_gamma": empirical_stage_gamma,
+                                        "n_samples": int(len(empirical_stage_infos)),
+                                        "heuristic_points": [],
+                                    }
+                                    if empirical_sweep_mode == "confidence":
+                                        for conf_th in empirical_conf_thresholds:
+                                            conf_th_f = float(conf_th)
+                                            c_emp, a_emp, preds_emp, counts_emp = _run_empirical_pride_policy_from_stage_infos_confidence(
+                                                stage_infos=empirical_stage_infos,
+                                                labels_idx=labels_idx_for_curves,
+                                                k=k,
+                                                confidence_threshold=conf_th_f,
+                                                stage_schedule=empirical_stage_schedule,
+                                                stage_gamma=empirical_stage_gamma,
+                                            )
+                                            hp_emp = {
+                                                "label": EMPIRICAL_PRIDE_LABEL,
+                                                "conf_th": conf_th_f,
+                                                "cost": float(c_emp),
+                                                "acc": float(a_emp),
+                                                "marker": "X",
+                                                "color": "gray",
+                                                "recall_std": float(_recall_std(labels_idx_for_curves, preds_emp, k)),
+                                            }
+                                            hp_emp.update({key: int(val) for key, val in counts_emp.items()})
+                                            cobj_emp["heuristic_points"].append(hp_emp)
                                     else:
-                                        probing_inputs_emp = []
-                                        for slot_to_content in stage_schedule:
-                                            permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
-                                            probing_inputs_emp.append([
-                                                str(prompt_meta["sys_msg"]),
-                                                _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
-                                            ])
-
-                                        empirical_sample = (
-                                            int(prompt_meta["idx"]),
-                                            (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
-                                        )
-                                        empirical_result = eval_fn(empirical_sample, random.Random(0))
-                                        empirical_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
-                                        _, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
-                                            stage_probs=empirical_stage_probs,
-                                            slot_to_content_schedule=stage_schedule,
-                                            mu_hat=empirical_mu_hat,
-                                            residual_bank=empirical_residual_bank,
-                                        )
-                                        empirical_stage_infos.append({
-                                            "pred_by_stage": [int(x) for x in pred_by_stage],
-                                            "conf_by_stage": [float(x) for x in conf_by_stage],
-                                            "decision_stages": list(range(1, int(k) + 1)),
-                                            "prefix_forced": bool(sample_pos in empirical_prefix_ids),
-                                        })
-
-                                cobj_emp = {
-                                    "subject": subject,
-                                    "tag": "empirical_pride",
-                                    "k": int(k),
-                                    "percentile": float(pride_alpha),
-                                    "sweep_mode": empirical_sweep_mode,
-                                    "residual_model": empirical_residual_model,
-                                    "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
-                                    "cov_shrinkage": float(empirical_cov_shrinkage),
-                                    "transition_mode": empirical_transition_mode,
-                                    "permutation_mode": empirical_permutation_mode,
-                                    "skip_residual_on_cyclic": bool(empirical_skip_residual_on_cyclic),
-                                    "threshold_schedule": empirical_stage_schedule,
-                                    "threshold_gamma": empirical_stage_gamma,
-                                    "n_samples": int(len(empirical_stage_infos)),
-                                    "heuristic_points": [],
-                                }
-                                if empirical_sweep_mode == "confidence":
-                                    for conf_th in empirical_conf_thresholds:
-                                        conf_th_f = float(conf_th)
-                                        c_emp, a_emp, preds_emp, counts_emp = _run_empirical_pride_policy_from_stage_infos_confidence(
-                                            stage_infos=empirical_stage_infos,
-                                            labels_idx=labels_idx_for_curves,
-                                            k=k,
-                                            confidence_threshold=conf_th_f,
-                                            stage_schedule=empirical_stage_schedule,
-                                            stage_gamma=empirical_stage_gamma,
-                                        )
-                                        hp_emp = {
-                                            "label": EMPIRICAL_PRIDE_LABEL,
-                                            "conf_th": conf_th_f,
-                                            "cost": float(c_emp),
-                                            "acc": float(a_emp),
-                                            "marker": "X",
-                                            "color": "gray",
-                                            "recall_std": float(_recall_std(labels_idx_for_curves, preds_emp, k)),
-                                        }
-                                        hp_emp.update({key: int(val) for key, val in counts_emp.items()})
-                                        cobj_emp["heuristic_points"].append(hp_emp)
-                                else:
-                                    for perc in ours_th1_list:
-                                        perc_f = float(perc)
-                                        c_emp, a_emp, preds_emp, counts_emp = _run_empirical_pride_policy_from_stage_infos(
-                                            stage_infos=empirical_stage_infos,
-                                            labels_idx=labels_idx_for_curves,
-                                            k=k,
-                                            percentile=perc_f,
-                                            stage_schedule=empirical_stage_schedule,
-                                            stage_gamma=empirical_stage_gamma,
-                                        )
-                                        hp_emp = {
-                                            "label": EMPIRICAL_PRIDE_LABEL,
-                                            "th1_p": perc_f,
-                                            "cost": float(c_emp),
-                                            "acc": float(a_emp),
-                                            "marker": "X",
-                                            "color": "gray",
-                                            "recall_std": float(_recall_std(labels_idx_for_curves, preds_emp, k)),
-                                        }
-                                        hp_emp.update({key: int(val) for key, val in counts_emp.items()})
-                                        cobj_emp["heuristic_points"].append(hp_emp)
-                                by_empirical_alpha[pride_alpha].append(cobj_emp)
+                                        for perc in ours_th1_list:
+                                            perc_f = float(perc)
+                                            c_emp, a_emp, preds_emp, counts_emp = _run_empirical_pride_policy_from_stage_infos(
+                                                stage_infos=empirical_stage_infos,
+                                                labels_idx=labels_idx_for_curves,
+                                                k=k,
+                                                percentile=perc_f,
+                                                stage_schedule=empirical_stage_schedule,
+                                                stage_gamma=empirical_stage_gamma,
+                                            )
+                                            hp_emp = {
+                                                "label": EMPIRICAL_PRIDE_LABEL,
+                                                "th1_p": perc_f,
+                                                "cost": float(c_emp),
+                                                "acc": float(a_emp),
+                                                "marker": "X",
+                                                "color": "gray",
+                                                "recall_std": float(_recall_std(labels_idx_for_curves, preds_emp, k)),
+                                            }
+                                            hp_emp.update({key: int(val) for key, val in counts_emp.items()})
+                                            cobj_emp["heuristic_points"].append(hp_emp)
+                                    by_empirical_alpha[pride_alpha].append(cobj_emp)
+                                except Exception as empirical_ex:
+                                    logger.warning(
+                                        f"Empirical PriDe failed for subject='{subject}', run={run_idx_inner}, "
+                                        f"alpha={float(pride_alpha):g}, residual_model={empirical_residual_model}, "
+                                        f"transition={empirical_transition_mode}, permutation={empirical_permutation_mode}: {empirical_ex}"
+                                    )
+                                    import traceback
+                                    traceback.print_exc()
 
                         # Merge over runs and append to derived_records
                         for perc in ours_th1_list:
