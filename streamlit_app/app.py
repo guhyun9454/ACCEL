@@ -339,7 +339,7 @@ def _get_empirical_payload_meta(payload: dict) -> Tuple[str, str, float, str, bo
         schedule = "flat"
     gamma = empirical_data.get("threshold_gamma", 0.5)
     transition_mode = str(empirical_data.get("transition_mode", "latin")).strip().lower()
-    if transition_mode not in ("latin", "probe_cyclic", "cyclic_random", "cyclic_targeted"):
+    if transition_mode not in ("latin", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"):
         transition_mode = "latin"
     skip_residual = bool(empirical_data.get("skip_residual_on_cyclic", False))
     try:

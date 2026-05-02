@@ -531,6 +531,137 @@ def _build_incremental_cyclic_schedule(
     return schedule
 
 
+def _candidate_relative_action_sequences() -> List[Tuple[str, Tuple[Tuple[int, int], ...]]]:
+    return [
+        ("omega1", ((2, 1), (3, 1), (3, 2), (1, 3))),
+        ("omega2", ((2, 1), (3, 2), (3, 1), (1, 3))),
+        ("omega3", ((2, 1), (1, 2), (3, 1), (3, 2))),
+        ("omega4", ((2, 1), (2, 3), (3, 1), (1, 3))),
+        ("omega5", ((2, 1), (1, 3), (3, 1), (3, 2))),
+    ]
+
+
+def _format_relative_action_sequence(actions: Tuple[Tuple[int, int], ...]) -> List[str]:
+    return [f"A_{int(u)}to{int(v)}" for (u, v) in actions]
+
+
+def _build_relative_action_cyclic_schedule(
+    k: int,
+    initial_rank: List[int],
+    actions: Tuple[Tuple[int, int], ...],
+) -> Tuple[List[int], List[Tuple[int, ...]]]:
+    """
+    Build a cyclic-only schedule from relative rank actions.
+    initial_rank is a list of content indices ordered by the stage-1 corrected posterior.
+    """
+    if k <= 1:
+        return [0], [tuple(range(k))]
+
+    rank = [int(x) for x in initial_rank[: max(3, int(k))]]
+    shifts = [0]
+    used = {0}
+    for (u_rank, v_rank) in actions:
+        u_idx = int(u_rank) - 1
+        v_idx = int(v_rank) - 1
+        if u_idx < 0 or v_idx < 0 or u_idx >= len(rank) or v_idx >= len(rank):
+            continue
+        shift = int((rank[v_idx] - rank[u_idx]) % int(k))
+        if shift == 0 or shift in used:
+            continue
+        shifts.append(int(shift))
+        used.add(int(shift))
+    for shift in range(1, int(k)):
+        if int(shift) in used:
+            continue
+        shifts.append(int(shift))
+        used.add(int(shift))
+    schedule = [tuple((slot_idx + int(shift)) % int(k) for slot_idx in range(int(k))) for shift in shifts]
+    return shifts, schedule
+
+
+def _select_best_relative_cyclic_sequence(
+    sample_indices: List[int],
+    per_sample_probs: List[np.ndarray],
+    cyclic_indices: List[int],
+    cyc_perms: List[Tuple[int, ...]],
+    mu_hat: np.ndarray,
+    residual_bank: np.ndarray,
+    labels_idx: List[int],
+    eps: float = 1e-12,
+) -> Dict[str, Any]:
+    """
+    Pick the best cyclic action sequence on a small validation subset using
+    soft low-confidence weighted NLL gain.
+    """
+    k = int(len(cyc_perms))
+    candidates = _candidate_relative_action_sequences()
+    if k <= 1 or len(sample_indices) <= 0:
+        fallback_name, fallback_actions = candidates[0]
+        return {
+            "selection_policy": "initial_rank_relative_bruteforce_cyclic_top3",
+            "selected_sequence_name": str(fallback_name),
+            "selected_action_sequence": _format_relative_action_sequence(fallback_actions),
+            "candidate_scores": [{"name": str(name), "actions": _format_relative_action_sequence(actions), "score": float("nan")} for name, actions in candidates],
+            "n_validation": int(len(sample_indices)),
+        }
+
+    identity_perm = tuple(range(int(k)))
+    selection_rows: List[Dict[str, Any]] = []
+    for cand_name, cand_actions in candidates:
+        stage_num = np.zeros((max(k - 1, 1),), dtype=np.float64)
+        stage_den = np.zeros((max(k - 1, 1),), dtype=np.float64)
+        for sample_idx in sample_indices:
+            sample_idx_i = int(sample_idx)
+            base_row = np.asarray(per_sample_probs[sample_idx_i][cyclic_indices[0]], dtype=np.float64)
+            base_posteriors, _, _ = _compute_empirical_stage_posteriors(
+                stage_probs=base_row.reshape(1, -1),
+                slot_to_content_schedule=[identity_perm],
+                mu_hat=mu_hat,
+                residual_bank=residual_bank,
+            )
+            stage1_post = np.asarray(base_posteriors[0], dtype=np.float64)
+            initial_rank = [int(x) for x in np.argsort(stage1_post)[::-1]]
+            shifts, schedule = _build_relative_action_cyclic_schedule(int(k), initial_rank, cand_actions)
+            stage_probs = np.asarray([per_sample_probs[sample_idx_i][cyclic_indices[int(s)]] for s in shifts], dtype=np.float64)
+            posteriors, _, confs = _compute_empirical_stage_posteriors(
+                stage_probs=stage_probs,
+                slot_to_content_schedule=schedule,
+                mu_hat=mu_hat,
+                residual_bank=residual_bank,
+            )
+            label_idx = int(labels_idx[sample_idx_i])
+            for stage_idx in range(len(posteriors) - 1):
+                p_t = float(np.clip(posteriors[stage_idx][label_idx], eps, 1.0))
+                p_next = float(np.clip(posteriors[stage_idx + 1][label_idx], eps, 1.0))
+                gain = float(np.log(p_next) - np.log(p_t))
+                weight = float(1.0 - float(confs[stage_idx]))
+                stage_num[stage_idx] += weight * gain
+                stage_den[stage_idx] += weight
+        stage_terms = []
+        for stage_idx in range(max(k - 1, 1)):
+            if stage_den[stage_idx] > eps:
+                stage_terms.append(float(stage_num[stage_idx] / stage_den[stage_idx]))
+            else:
+                stage_terms.append(0.0)
+        score = float(np.sum(np.asarray(stage_terms, dtype=np.float64)))
+        selection_rows.append({
+            "name": str(cand_name),
+            "actions": _format_relative_action_sequence(cand_actions),
+            "score": float(score),
+            "stage_scores": [float(x) for x in stage_terms],
+        })
+
+    selection_rows = sorted(selection_rows, key=lambda row: float(row.get("score", float("-inf"))), reverse=True)
+    best_row = selection_rows[0]
+    return {
+        "selection_policy": "initial_rank_relative_bruteforce_cyclic_top3",
+        "selected_sequence_name": str(best_row.get("name")),
+        "selected_action_sequence": list(best_row.get("actions") or []),
+        "candidate_scores": selection_rows,
+        "n_validation": int(len(sample_indices)),
+    }
+
+
 def _compute_empirical_stage_posteriors(
     stage_probs: np.ndarray,
     slot_to_content_schedule: List[Tuple[int, ...]],
@@ -3169,7 +3300,7 @@ def main():
                         empirical_mc_samples = max(1, int(getattr(args, "empirical_mc_samples", 64)))
                         empirical_cov_shrinkage = min(max(float(getattr(args, "empirical_cov_shrinkage", 0.1)), 0.0), 1.0)
                         empirical_transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
-                        if empirical_transition_mode not in {"latin", "probe_cyclic", "cyclic_random", "cyclic_targeted"}:
+                        if empirical_transition_mode not in {"latin", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
                             empirical_transition_mode = "latin"
                         empirical_skip_residual_on_cyclic = bool(getattr(args, "empirical_skip_residual_on_cyclic", False))
                         empirical_conf_thresholds = [
@@ -3469,6 +3600,30 @@ def main():
                                     )
                                     empirical_covariance = np.zeros((k, k), dtype=np.float64)
                                 empirical_prefix_ids = set(int(x) for x in (empirical_meta.get("prefix_ids") or []))
+                                learned_selection_info = None
+                                if empirical_transition_mode == "cyclic_learned":
+                                    if len(cyclic_indices) != int(k):
+                                        raise ValueError(
+                                            f"cyclic_learned requires exactly {k} cyclic permutations, got {len(cyclic_indices)} "
+                                            f"(subject={subject}, alpha={pride_alpha:g})"
+                                        )
+                                    learned_selection_info = _select_best_relative_cyclic_sequence(
+                                        sample_indices=sorted(int(x) for x in empirical_prefix_ids),
+                                        per_sample_probs=per_sample_probs,
+                                        cyclic_indices=cyclic_indices,
+                                        cyc_perms=cyc_perms,
+                                        mu_hat=empirical_mu_hat,
+                                        residual_bank=empirical_residual_bank,
+                                        labels_idx=labels_idx_for_curves,
+                                    )
+                                    logger.info(
+                                        _blue(
+                                            f"Empirical learned cyclic selection: subject={subject}, alpha={float(pride_alpha):g}, "
+                                            f"run={int(run_idx_inner)}, seq={learned_selection_info.get('selected_sequence_name')}, "
+                                            f"actions={','.join(learned_selection_info.get('selected_action_sequence') or [])}, "
+                                            f"n_val={int(learned_selection_info.get('n_validation', 0))}"
+                                        )
+                                    )
                                 empirical_stage_infos = []
 
                                 for sample_pos, prompt_meta in enumerate(empirical_prompt_meta):
@@ -3489,6 +3644,21 @@ def main():
                                     runner_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else int(top1_idx)
                                     if empirical_transition_mode == "latin" or empirical_transition_mode == "probe_cyclic":
                                         stage_schedule = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
+                                        stage_shifts = None
+                                    elif empirical_transition_mode == "cyclic_learned":
+                                        selected_actions = tuple()
+                                        if learned_selection_info is not None:
+                                            selected_actions = tuple(
+                                                tuple(int(tok) for tok in action_str.replace("A_", "").split("to"))
+                                                for action_str in (learned_selection_info.get("selected_action_sequence") or [])
+                                                if isinstance(action_str, str) and action_str.startswith("A_") and "to" in action_str
+                                            )
+                                        initial_rank = [int(x) for x in sorted_idx.tolist()]
+                                        stage_shifts, stage_schedule = _build_relative_action_cyclic_schedule(
+                                            k=int(k),
+                                            initial_rank=initial_rank,
+                                            actions=selected_actions,
+                                        )
                                     else:
                                         transition_seed = _stable_u32_seed(
                                             f"{subject}:{sample_pos}:{top1_idx}:{runner_idx}:{empirical_transition_mode}",
@@ -3501,6 +3671,7 @@ def main():
                                             mode=empirical_transition_mode,
                                             seed=transition_seed,
                                         )
+                                        stage_shifts = None
                                     raw_options = list(prompt_meta["options"])
                                     if empirical_transition_mode == "probe_cyclic":
                                         probe_slot_to_content = stage_schedule[1]
@@ -3547,6 +3718,28 @@ def main():
                                             "decision_stages": [1, 2, int(k)],
                                             "prefix_forced": bool(sample_pos in empirical_prefix_ids),
                                         })
+                                    elif empirical_transition_mode == "cyclic_learned":
+                                        stage_probs = np.asarray(
+                                            [per_sample_probs[sample_pos][cyclic_indices[int(shift)]] for shift in (stage_shifts or [0])],
+                                            dtype=np.float64,
+                                        )
+                                        post_by_stage, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
+                                            stage_probs=stage_probs,
+                                            slot_to_content_schedule=stage_schedule,
+                                            mu_hat=empirical_mu_hat,
+                                            residual_bank=empirical_residual_bank,
+                                        )
+                                        empirical_stage_infos.append({
+                                            "sample_id": int(prompt_meta["idx"]),
+                                            "pred_by_stage": [int(x) for x in pred_by_stage],
+                                            "conf_by_stage": [float(x) for x in conf_by_stage],
+                                            "true_prob_by_stage": [float(post[label_idx_emp]) for post in post_by_stage],
+                                            "decision_stages": list(range(1, int(k) + 1)),
+                                            "prefix_forced": bool(sample_pos in empirical_prefix_ids),
+                                            "shift_order": [int(x) for x in (stage_shifts or [0])],
+                                            "selected_sequence_name": None if learned_selection_info is None else str(learned_selection_info.get("selected_sequence_name", "")),
+                                            "selected_action_sequence": [] if learned_selection_info is None else list(learned_selection_info.get("selected_action_sequence") or []),
+                                        })
                                     else:
                                         probing_inputs_emp = []
                                         for slot_to_content in stage_schedule:
@@ -3590,6 +3783,11 @@ def main():
                                     "skip_residual_on_cyclic": bool(empirical_skip_residual_on_cyclic),
                                     "threshold_schedule": empirical_stage_schedule,
                                     "threshold_gamma": empirical_stage_gamma,
+                                    "selection_policy": None if learned_selection_info is None else str(learned_selection_info.get("selection_policy", "")),
+                                    "selected_sequence_name": None if learned_selection_info is None else str(learned_selection_info.get("selected_sequence_name", "")),
+                                    "selected_action_sequence": [] if learned_selection_info is None else list(learned_selection_info.get("selected_action_sequence") or []),
+                                    "candidate_sequence_scores": [] if learned_selection_info is None else list(learned_selection_info.get("candidate_scores") or []),
+                                    "selection_n_validation": 0 if learned_selection_info is None else int(learned_selection_info.get("n_validation", 0)),
                                     "n_samples": int(len(empirical_stage_infos)),
                                     "heuristic_points": [],
                                 }
@@ -3659,6 +3857,11 @@ def main():
                                         "skip_residual_on_cyclic": bool(empirical_skip_residual_on_cyclic),
                                         "threshold_schedule": empirical_stage_schedule,
                                         "threshold_gamma": float(empirical_stage_gamma),
+                                        "selection_policy": None if learned_selection_info is None else str(learned_selection_info.get("selection_policy", "")),
+                                        "selected_sequence_name": None if learned_selection_info is None else str(learned_selection_info.get("selected_sequence_name", "")),
+                                        "selected_action_sequence": [] if learned_selection_info is None else list(learned_selection_info.get("selected_action_sequence") or []),
+                                        "candidate_sequence_scores": [] if learned_selection_info is None else list(learned_selection_info.get("candidate_scores") or []),
+                                        "selection_n_validation": 0 if learned_selection_info is None else int(learned_selection_info.get("n_validation", 0)),
                                         "summary": analysis_summary,
                                     }
                                     empirical_analysis_records.append(analysis_record)
@@ -3925,12 +4128,19 @@ def main():
                 pride_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0] or [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
                 empirical_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_empirical_prefix_fractions", None)) if 0.0 <= float(x) <= 100.0] or list(pride_prefix)
                 if empirical_analysis_records:
+                    seq_summary: Dict[str, int] = {}
+                    for rec in empirical_analysis_records:
+                        seq_name = str(rec.get("selected_sequence_name", "")).strip()
+                        if not seq_name:
+                            continue
+                        seq_summary[seq_name] = int(seq_summary.get(seq_name, 0)) + 1
                     task_analysis_path = os.path.join(out_dir, f"{args.task}_empirical_stage_analysis.json")
                     task_analysis_payload = {
                         "task": str(args.task),
                         "model_name": str(args.model_name),
                         "eval_name": str(eval_name),
                         "n_runs": int(n_runs),
+                        "selected_sequence_counts": seq_summary,
                         "records": empirical_analysis_records,
                     }
                     with open(task_analysis_path, "w", encoding="utf-8") as f:

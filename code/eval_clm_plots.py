@@ -153,7 +153,7 @@ def _plot_three_curves_acc_recall_std(
                     schedule = "flat"
                 gamma = float(c.get("threshold_gamma", 0.5)) if isinstance(c.get("threshold_gamma"), (int, float)) else 0.5
                 transition_mode = str(c.get("transition_mode", "latin")).strip().lower()
-                if transition_mode not in {"latin", "probe_cyclic", "cyclic_random", "cyclic_targeted"}:
+                if transition_mode not in {"latin", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
                     transition_mode = "latin"
                 skip_residual = bool(c.get("skip_residual_on_cyclic", False))
                 for h in (c.get("heuristic_points") or []):
@@ -375,11 +375,24 @@ def _plot_three_curves_acc_recall_std(
         empirical_mode, empirical_sweep_key, empirical_sweep_values, empirical_schedule, empirical_gamma, empirical_transition_mode, empirical_skip_residual, empirical_residual_model = _infer_empirical_sweep(by_alpha, prefix_list, percentile_fracs)
         payload_sweep_key = "confidence" if empirical_sweep_key == "conf_th" else "p"
         by_alpha_out = {}
+        selection_policy = None
+        selected_sequence_name = None
+        selected_action_sequence = None
         for alpha in prefix_list:
             cobjs = by_alpha.get(alpha, [])
             if not cobjs:
                 continue
+            if selection_policy is None:
+                selection_policy = cobjs[0].get("selection_policy")
+                selected_sequence_name = cobjs[0].get("selected_sequence_name")
+                selected_action_sequence = cobjs[0].get("selected_action_sequence")
             co, ac, rs, asd, rsd = _agg_heur_by_sweep(cobjs, empirical_sweep_values, empirical_sweep_key, EMPIRICAL_PRIDE_LABEL)
+            seq_counts = {}
+            for c in cobjs:
+                seq_name = str(c.get("selected_sequence_name", "")).strip()
+                if not seq_name:
+                    continue
+                seq_counts[seq_name] = int(seq_counts.get(seq_name, 0)) + 1
             by_alpha_out[f"{float(alpha):g}"] = {
                 "primary": {
                     payload_sweep_key: [float(x) for x in empirical_sweep_values],
@@ -390,7 +403,13 @@ def _plot_three_curves_acc_recall_std(
                     "delta_recall_std": [float(def_rstd - r) if np.isfinite(r) and np.isfinite(def_rstd) else float("nan") for r in rs],
                     "delta_acc_std": [float(x) if np.isfinite(x) else 0.0 for x in asd],
                     "delta_recall_std_std": [float(x) if np.isfinite(x) else 0.0 for x in rsd],
-                }
+                },
+                "selection": {
+                    "policy": cobjs[0].get("selection_policy"),
+                    "selected_sequence_name": cobjs[0].get("selected_sequence_name"),
+                    "selected_action_sequence": cobjs[0].get("selected_action_sequence"),
+                    "sequence_counts": seq_counts,
+                },
             }
         return {
             "pride_prefix_fractions": [float(a) for a in prefix_list],
@@ -398,6 +417,9 @@ def _plot_three_curves_acc_recall_std(
             "sweep_mode": empirical_mode,
             "residual_model": empirical_residual_model,
             "transition_mode": empirical_transition_mode,
+            "selection_policy": selection_policy,
+            "selected_sequence_name": selected_sequence_name,
+            "selected_action_sequence": selected_action_sequence,
             "skip_residual_on_cyclic": bool(empirical_skip_residual),
             "threshold_schedule": empirical_schedule,
             "threshold_gamma": float(empirical_gamma),
