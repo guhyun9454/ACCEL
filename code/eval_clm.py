@@ -702,6 +702,199 @@ def _run_empirical_pride_policy_from_stage_infos_confidence(
     return total_cost / float(N), corrects / float(N), preds, stage_counts
 
 
+def _compute_ece(confidences: np.ndarray, correct: np.ndarray, n_bins: int = 10) -> float:
+    conf = np.asarray(confidences, dtype=np.float64).ravel()
+    corr = np.asarray(correct, dtype=np.float64).ravel()
+    mask = np.isfinite(conf) & np.isfinite(corr)
+    if np.sum(mask) <= 0:
+        return float("nan")
+    conf = np.clip(conf[mask], 0.0, 1.0)
+    corr = corr[mask]
+    edges = np.linspace(0.0, 1.0, int(max(2, n_bins)) + 1, dtype=np.float64)
+    ece = 0.0
+    n = float(conf.shape[0])
+    for bin_idx in range(len(edges) - 1):
+        lo = float(edges[bin_idx])
+        hi = float(edges[bin_idx + 1])
+        if bin_idx == len(edges) - 2:
+            bmask = (conf >= lo) & (conf <= hi)
+        else:
+            bmask = (conf >= lo) & (conf < hi)
+        if np.sum(bmask) <= 0:
+            continue
+        acc_b = float(np.mean(corr[bmask]))
+        conf_b = float(np.mean(conf[bmask]))
+        ece += (float(np.sum(bmask)) / n) * abs(acc_b - conf_b)
+    return float(ece)
+
+
+def _masked_mean(arr: np.ndarray, mask: np.ndarray) -> float:
+    vals = np.asarray(arr, dtype=np.float64).ravel()
+    mm = np.asarray(mask, dtype=bool).ravel()
+    if vals.size == 0 or mm.size == 0 or vals.size != mm.size or np.sum(mm) <= 0:
+        return float("nan")
+    return float(np.mean(vals[mm]))
+
+
+def _build_empirical_stage_analysis(
+    stage_infos: List[Dict[str, Any]],
+    labels_idx: List[int],
+    k: int,
+    sweep_mode: str,
+    sweep_values: List[float],
+    heuristic_points: List[Dict[str, Any]],
+    ece_bins: int = 10,
+    eps: float = 1e-12,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """
+    Build a stage-by-stage diagnostic summary plus per-sample trajectories.
+    The summary is dataset-level over the evaluated samples for one subject/run/alpha.
+    """
+    ordered_stages: List[int] = []
+    stage_buffers: Dict[int, Dict[str, List[float]]] = {}
+    trajectories: List[Dict[str, Any]] = []
+
+    for sample_pos, info in enumerate(stage_infos):
+        label_idx = int(labels_idx[sample_pos])
+        sample_id = int(info.get("sample_id", sample_pos))
+        decision_stages = [int(x) for x in (info.get("decision_stages") or [])]
+        pred_by_stage = [int(x) for x in (info.get("pred_by_stage") or [])]
+        conf_by_stage = [float(x) for x in (info.get("conf_by_stage") or [])]
+        true_prob_by_stage = [float(x) for x in (info.get("true_prob_by_stage") or [])]
+        if not (len(decision_stages) == len(pred_by_stage) == len(conf_by_stage) == len(true_prob_by_stage)):
+            raise ValueError(
+                f"Empirical analysis stage info mismatch for sample {sample_pos}: "
+                f"stages={len(decision_stages)}, pred={len(pred_by_stage)}, conf={len(conf_by_stage)}, true_prob={len(true_prob_by_stage)}"
+            )
+        correct_by_stage = [1 if int(pred) == int(label_idx) else 0 for pred in pred_by_stage]
+        trajectories.append({
+            "sample_pos": int(sample_pos),
+            "sample_id": int(sample_id),
+            "label_idx": int(label_idx),
+            "prefix_forced": bool(info.get("prefix_forced", False)),
+            "decision_stages": [int(x) for x in decision_stages],
+            "pred_by_stage": [int(x) for x in pred_by_stage],
+            "conf_by_stage": [float(x) for x in conf_by_stage],
+            "true_prob_by_stage": [float(x) for x in true_prob_by_stage],
+            "correct_by_stage": [int(x) for x in correct_by_stage],
+        })
+        for local_idx, stage_id in enumerate(decision_stages):
+            if int(stage_id) not in stage_buffers:
+                ordered_stages.append(int(stage_id))
+                stage_buffers[int(stage_id)] = {
+                    "pred": [],
+                    "conf": [],
+                    "true_prob": [],
+                    "correct": [],
+                }
+            buf = stage_buffers[int(stage_id)]
+            buf["pred"].append(int(pred_by_stage[local_idx]))
+            buf["conf"].append(float(conf_by_stage[local_idx]))
+            buf["true_prob"].append(float(true_prob_by_stage[local_idx]))
+            buf["correct"].append(int(correct_by_stage[local_idx]))
+
+    stage_metrics: Dict[str, Any] = {}
+    for stage_id in ordered_stages:
+        buf = stage_buffers[int(stage_id)]
+        conf = np.asarray(buf["conf"], dtype=np.float64)
+        true_prob = np.asarray(buf["true_prob"], dtype=np.float64)
+        corr = np.asarray(buf["correct"], dtype=np.float64)
+        correct_mask = corr >= 0.5
+        wrong_mask = ~correct_mask
+        stage_metrics[str(stage_id)] = {
+            "n_samples": int(conf.shape[0]),
+            "acc": float(np.mean(corr)) if corr.size > 0 else float("nan"),
+            "nll": float(np.mean(-np.log(np.clip(true_prob, eps, 1.0)))) if true_prob.size > 0 else float("nan"),
+            "avg_conf": float(np.mean(conf)) if conf.size > 0 else float("nan"),
+            "ece": _compute_ece(conf, corr, n_bins=ece_bins),
+            "conf_correct": _masked_mean(conf, correct_mask),
+            "conf_wrong": _masked_mean(conf, wrong_mask),
+        }
+
+    transitions: List[Dict[str, Any]] = []
+    sweep_mode_norm = str(sweep_mode or "percentile").strip().lower()
+    if sweep_mode_norm not in {"percentile", "confidence"}:
+        sweep_mode_norm = "percentile"
+    for prev_stage, next_stage in zip(ordered_stages[:-1], ordered_stages[1:]):
+        prev_buf = stage_buffers[int(prev_stage)]
+        next_buf = stage_buffers[int(next_stage)]
+        conf_prev = np.asarray(prev_buf["conf"], dtype=np.float64)
+        corr_prev = np.asarray(prev_buf["correct"], dtype=np.float64)
+        corr_next = np.asarray(next_buf["correct"], dtype=np.float64)
+        w2c_mask = (corr_prev < 0.5) & (corr_next >= 0.5)
+        c2w_mask = (corr_prev >= 0.5) & (corr_next < 0.5)
+        trans_entry: Dict[str, Any] = {
+            "from_stage": int(prev_stage),
+            "to_stage": int(next_stage),
+            "acc_from": float(np.mean(corr_prev)) if corr_prev.size > 0 else float("nan"),
+            "acc_to": float(np.mean(corr_next)) if corr_next.size > 0 else float("nan"),
+            "delta_acc": float(np.mean(corr_next - corr_prev)) if corr_prev.size > 0 else float("nan"),
+            "w2c": float(np.mean(w2c_mask.astype(np.float64))) if corr_prev.size > 0 else float("nan"),
+            "c2w": float(np.mean(c2w_mask.astype(np.float64))) if corr_prev.size > 0 else float("nan"),
+            "threshold_analysis": [],
+        }
+        for sweep_value in sweep_values:
+            sweep_f = float(sweep_value)
+            if sweep_mode_norm == "percentile":
+                tau = float(np.quantile(conf_prev, max(0.0, min(1.0, sweep_f / 100.0)))) if conf_prev.size > 0 else 0.0
+                sweep_key = "p"
+            else:
+                tau = max(0.0, min(1.0, sweep_f))
+                sweep_key = "confidence"
+            low_mask = conf_prev < tau
+            high_mask = ~low_mask
+            trans_entry["threshold_analysis"].append({
+                sweep_key: sweep_f,
+                "threshold": float(tau),
+                "low_ratio": float(np.mean(low_mask.astype(np.float64))) if conf_prev.size > 0 else float("nan"),
+                "coverage": float(np.mean(high_mask.astype(np.float64))) if conf_prev.size > 0 else float("nan"),
+                "accepted_accuracy": _masked_mean(corr_prev, high_mask),
+                "acc_low_from": _masked_mean(corr_prev, low_mask),
+                "acc_low_to": _masked_mean(corr_next, low_mask),
+                "delta_low": _masked_mean(corr_next - corr_prev, low_mask),
+                "w2c_low": _masked_mean(w2c_mask.astype(np.float64), low_mask),
+                "c2w_low": _masked_mean(c2w_mask.astype(np.float64), low_mask),
+                "acc_high_from": _masked_mean(corr_prev, high_mask),
+                "acc_high_to": _masked_mean(corr_next, high_mask),
+                "delta_high": _masked_mean(corr_next - corr_prev, high_mask),
+                "w2c_high": _masked_mean(w2c_mask.astype(np.float64), high_mask),
+                "c2w_high": _masked_mean(c2w_mask.astype(np.float64), high_mask),
+            })
+        transitions.append(trans_entry)
+
+    adaptive_points: List[Dict[str, Any]] = []
+    for hp in (heuristic_points or []):
+        if not isinstance(hp, dict):
+            continue
+        out = {
+            "cost": float(hp.get("cost", float("nan"))),
+            "acc": float(hp.get("acc", float("nan"))),
+            "recall_std": float(hp.get("recall_std", float("nan"))),
+        }
+        if hp.get("th1_p") is not None:
+            out["p"] = float(hp.get("th1_p"))
+        if hp.get("conf_th") is not None:
+            out["confidence"] = float(hp.get("conf_th"))
+        for stage_id in ordered_stages:
+            key = f"n_stage_{int(stage_id)}"
+            if key in hp:
+                out[key] = int(hp.get(key, 0))
+        adaptive_points.append(out)
+
+    summary = {
+        "n_samples": int(len(stage_infos)),
+        "k": int(k),
+        "decision_stages": [int(x) for x in ordered_stages],
+        "ece_bins": int(ece_bins),
+        "sweep_mode": sweep_mode_norm,
+        "sweep_values": [float(x) for x in sweep_values],
+        "stage_metrics": stage_metrics,
+        "transitions": transitions,
+        "adaptive_points": adaptive_points,
+    }
+    return summary, trajectories
+
+
 def _run_prefix_cyclic_postfix_base(
     base_correct: List[bool],
     cyclic_correct: List[bool],
@@ -2535,6 +2728,7 @@ def main():
         derived_records_pride_by_p: Dict[float, List[dict]] = {}  # legacy: p->list (Default+PRIDE 단일 alpha용)
         derived_records_pride_by_alpha: Dict[float, List[dict]] = {}  # alpha(0.5,1.0,2,5,...) -> list of PRIDE curve_obj
         derived_records_empirical_by_alpha: Dict[float, List[dict]] = {}  # alpha -> list of empirical PriDe curve_obj
+        empirical_analysis_records: List[dict] = []
         pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
         recall_std_vs_p_records: List[dict] = []  # [{'subject':str,'p':float,'method':str,'kind':str,'rstd':float}]
         n_runs = max(1, int(getattr(args, "n_runs", 1)))
@@ -3281,8 +3475,9 @@ def main():
                                     if not prompt_meta.get("question"):
                                         raise ValueError(f"Empirical PriDe prompt metadata missing question for sample position {sample_pos}")
 
+                                    label_idx_emp = int(labels_idx_for_curves[sample_pos])
                                     base_row = np.asarray(per_sample_probs[sample_pos][identity_idx], dtype=np.float64)
-                                    base_posterior, base_pred_stage, _ = _compute_empirical_stage_posteriors(
+                                    base_posterior, base_pred_stage, base_conf_stage = _compute_empirical_stage_posteriors(
                                         stage_probs=base_row.reshape(1, -1),
                                         slot_to_content_schedule=[tuple(range(k))],
                                         mu_hat=empirical_mu_hat,
@@ -3323,7 +3518,7 @@ def main():
                                         empirical_result = eval_fn(empirical_sample, random.Random(0))
                                         extra_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
                                         all_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
-                                        _, pred_by_stage_full, conf_by_stage_full = _compute_empirical_stage_posteriors(
+                                        post_by_stage_full, pred_by_stage_full, conf_by_stage_full = _compute_empirical_stage_posteriors(
                                             stage_probs=all_stage_probs,
                                             slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
@@ -3334,15 +3529,21 @@ def main():
                                             if empirical_skip_residual_on_cyclic
                                             else empirical_residual_bank
                                         )
-                                        _, pred_fallback_stage, conf_fallback_stage = _compute_empirical_stage_posteriors(
+                                        post_fallback_stage, pred_fallback_stage, conf_fallback_stage = _compute_empirical_stage_posteriors(
                                             stage_probs=all_stage_probs,
                                             slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
                                             residual_bank=fallback_residual_bank,
                                         )
                                         empirical_stage_infos.append({
+                                            "sample_id": int(prompt_meta["idx"]),
                                             "pred_by_stage": [int(base_pred_stage[0]), int(pred_by_stage_full[1]), int(pred_fallback_stage[-1])],
-                                            "conf_by_stage": [float(corrected_stage1[top1_idx]), float(conf_by_stage_full[1]), float(conf_fallback_stage[-1])],
+                                            "conf_by_stage": [float(base_conf_stage[0]), float(conf_by_stage_full[1]), float(conf_fallback_stage[-1])],
+                                            "true_prob_by_stage": [
+                                                float(base_posterior[0][label_idx_emp]),
+                                                float(post_by_stage_full[1][label_idx_emp]),
+                                                float(post_fallback_stage[-1][label_idx_emp]),
+                                            ],
                                             "decision_stages": [1, 2, int(k)],
                                             "prefix_forced": bool(sample_pos in empirical_prefix_ids),
                                         })
@@ -3361,15 +3562,17 @@ def main():
                                         )
                                         empirical_result = eval_fn(empirical_sample, random.Random(0))
                                         empirical_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
-                                        _, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
+                                        post_by_stage, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
                                             stage_probs=empirical_stage_probs,
                                             slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
                                             residual_bank=empirical_residual_bank,
                                         )
                                         empirical_stage_infos.append({
+                                            "sample_id": int(prompt_meta["idx"]),
                                             "pred_by_stage": [int(x) for x in pred_by_stage],
                                             "conf_by_stage": [float(x) for x in conf_by_stage],
+                                            "true_prob_by_stage": [float(post[label_idx_emp]) for post in post_by_stage],
                                             "decision_stages": list(range(1, int(k) + 1)),
                                             "prefix_forced": bool(sample_pos in empirical_prefix_ids),
                                         })
@@ -3434,6 +3637,56 @@ def main():
                                         }
                                         hp_emp.update({key: int(val) for key, val in counts_emp.items()})
                                         cobj_emp["heuristic_points"].append(hp_emp)
+                                try:
+                                    empirical_sweep_values = empirical_conf_thresholds if empirical_sweep_mode == "confidence" else ours_th1_list
+                                    analysis_summary, analysis_trajectories = _build_empirical_stage_analysis(
+                                        stage_infos=empirical_stage_infos,
+                                        labels_idx=labels_idx_for_curves,
+                                        k=k,
+                                        sweep_mode=empirical_sweep_mode,
+                                        sweep_values=[float(x) for x in empirical_sweep_values],
+                                        heuristic_points=cobj_emp["heuristic_points"],
+                                    )
+                                    analysis_record = {
+                                        "task": str(args.task),
+                                        "subject": str(subject),
+                                        "run_idx": int(run_idx),
+                                        "alpha": float(pride_alpha),
+                                        "residual_model": empirical_residual_model,
+                                        "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
+                                        "cov_shrinkage": float(empirical_cov_shrinkage),
+                                        "transition_mode": empirical_transition_mode,
+                                        "skip_residual_on_cyclic": bool(empirical_skip_residual_on_cyclic),
+                                        "threshold_schedule": empirical_stage_schedule,
+                                        "threshold_gamma": float(empirical_stage_gamma),
+                                        "summary": analysis_summary,
+                                    }
+                                    empirical_analysis_records.append(analysis_record)
+
+                                    analysis_dir = os.path.join(
+                                        build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="full"),
+                                        "empirical_analysis",
+                                    )
+                                    os.makedirs(analysis_dir, exist_ok=True)
+                                    alpha_tag = f"{float(pride_alpha):g}"
+                                    run_tag = f"_run{int(run_idx)}" if use_run_suffix else ""
+                                    analysis_json_path = os.path.join(
+                                        analysis_dir,
+                                        f"{subject}{run_tag}_empirical_alpha{alpha_tag}_summary.json",
+                                    )
+                                    with open(analysis_json_path, "w", encoding="utf-8") as f:
+                                        json.dump(analysis_record, f, ensure_ascii=False, indent=2)
+                                    traj_jsonl_path = os.path.join(
+                                        analysis_dir,
+                                        f"{subject}{run_tag}_empirical_alpha{alpha_tag}_trajectories.jsonl",
+                                    )
+                                    with open(traj_jsonl_path, "w", encoding="utf-8") as f:
+                                        for row in analysis_trajectories:
+                                            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                                    logger.info(_purple(f"Saved empirical analysis: {analysis_json_path}"))
+                                    logger.info(_purple(f"Saved empirical trajectories: {traj_jsonl_path}"))
+                                except Exception as e:
+                                    logger.warning(f"Failed to build/save empirical analysis for {subject} alpha={pride_alpha:g}: {e}")
                                 by_empirical_alpha[pride_alpha].append(cobj_emp)
 
                         # Merge over runs and append to derived_records
@@ -3671,6 +3924,18 @@ def main():
                 pride_fracs = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
                 pride_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0] or [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
                 empirical_prefix = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_empirical_prefix_fractions", None)) if 0.0 <= float(x) <= 100.0] or list(pride_prefix)
+                if empirical_analysis_records:
+                    task_analysis_path = os.path.join(out_dir, f"{args.task}_empirical_stage_analysis.json")
+                    task_analysis_payload = {
+                        "task": str(args.task),
+                        "model_name": str(args.model_name),
+                        "eval_name": str(eval_name),
+                        "n_runs": int(n_runs),
+                        "records": empirical_analysis_records,
+                    }
+                    with open(task_analysis_path, "w", encoding="utf-8") as f:
+                        json.dump(task_analysis_payload, f, ensure_ascii=False, indent=2)
+                    logger.info(_purple(f"Saved task-level empirical analysis: {task_analysis_path}"))
                 _plot_three_curves_acc_recall_std(
                     derived_records_by_p,
                     derived_records_pride_by_p if len(derived_records_pride_by_p) > 0 else {},
