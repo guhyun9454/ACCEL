@@ -717,6 +717,7 @@ def _run_empirical_pride_policy_from_stage_infos(
     percentile: float,
     stage_schedule: str = "sqrt",
     stage_gamma: float = 0.5,
+    percentile_mode: str = "online",
 ) -> Tuple[float, float, List[int], Dict[str, int]]:
     """
     Evaluate the empirical PriDe policy online from precomputed stage confidences.
@@ -730,9 +731,33 @@ def _run_empirical_pride_policy_from_stage_infos(
     stage_schedule = str(stage_schedule or "sqrt").strip().lower()
     if stage_schedule not in {"flat", "sqrt"}:
         stage_schedule = "sqrt"
+    percentile_mode = str(percentile_mode or "online").strip().lower()
+    if percentile_mode not in {"online", "fixed_prefix"}:
+        percentile_mode = "online"
     gamma = float(stage_gamma) if np.isfinite(float(stage_gamma)) and float(stage_gamma) > 0.0 else 0.5
     base_percentile = max(0.0, min(100.0, float(percentile)))
     histories: List[List[float]] = [[] for _ in range(int(k))]
+    fixed_thresholds: List[float] = [0.0 for _ in range(int(k))]
+    if percentile_mode == "fixed_prefix":
+        fixed_histories: List[List[float]] = [[] for _ in range(int(k))]
+        for info in stage_infos:
+            if not bool(info.get("prefix_forced", False)):
+                continue
+            confs = [float(x) for x in (info.get("conf_by_stage") or [])]
+            decision_stages = [int(x) for x in (info.get("decision_stages") or list(range(1, int(k) + 1)))]
+            if len(confs) != len(decision_stages):
+                continue
+            for local_idx, stage_id in enumerate(decision_stages):
+                fixed_histories[int(stage_id) - 1].append(float(confs[local_idx]))
+        for stage_idx in range(int(k)):
+            stage_id = stage_idx + 1
+            if stage_schedule == "sqrt":
+                stage_percentile = base_percentile / (float(stage_id) ** gamma)
+            else:
+                stage_percentile = base_percentile
+            q = max(0.0, min(1.0, float(stage_percentile) / 100.0))
+            hist = fixed_histories[stage_idx]
+            fixed_thresholds[stage_idx] = float(np.quantile(np.asarray(hist, dtype=np.float64), q)) if hist else 0.0
     total_cost = 0.0
     corrects = 0
     preds: List[int] = []
@@ -751,13 +776,16 @@ def _run_empirical_pride_policy_from_stage_infos(
         else:
             stop_stage = int(decision_stages[-1])
             for local_idx, stage_id in enumerate(decision_stages):
-                hist = histories[int(stage_id) - 1]
-                if stage_schedule == "sqrt":
-                    stage_percentile = base_percentile / (float(stage_id) ** gamma)
+                if percentile_mode == "fixed_prefix":
+                    thr = float(fixed_thresholds[int(stage_id) - 1])
                 else:
-                    stage_percentile = base_percentile
-                q = max(0.0, min(1.0, float(stage_percentile) / 100.0))
-                thr = float(np.quantile(np.asarray(hist, dtype=np.float64), q)) if hist else 0.0
+                    hist = histories[int(stage_id) - 1]
+                    if stage_schedule == "sqrt":
+                        stage_percentile = base_percentile / (float(stage_id) ** gamma)
+                    else:
+                        stage_percentile = base_percentile
+                    q = max(0.0, min(1.0, float(stage_percentile) / 100.0))
+                    thr = float(np.quantile(np.asarray(hist, dtype=np.float64), q)) if hist else 0.0
                 if float(confs[local_idx]) >= thr:
                     stop_stage = int(stage_id)
                     break
@@ -769,8 +797,9 @@ def _run_empirical_pride_policy_from_stage_infos(
         corrects += 1 if pred_idx == int(labels_idx[sample_idx]) else 0
         stage_counts[f"n_stage_{stop_stage}"] = stage_counts.get(f"n_stage_{stop_stage}", 0) + 1
 
-        for local_idx, stage_id in enumerate(decision_stages[: stop_local_idx + 1]):
-            histories[int(stage_id) - 1].append(float(confs[local_idx]))
+        if percentile_mode == "online":
+            for local_idx, stage_id in enumerate(decision_stages[: stop_local_idx + 1]):
+                histories[int(stage_id) - 1].append(float(confs[local_idx]))
 
     return total_cost / float(N), corrects / float(N), preds, stage_counts
 
@@ -3288,6 +3317,9 @@ def main():
                         empirical_sweep_mode = str(getattr(args, "empirical_sweep_mode", "percentile")).strip().lower()
                         if empirical_sweep_mode not in {"percentile", "confidence"}:
                             empirical_sweep_mode = "percentile"
+                        empirical_percentile_mode = str(getattr(args, "empirical_percentile_mode", "online")).strip().lower()
+                        if empirical_percentile_mode not in {"online", "fixed_prefix"}:
+                            empirical_percentile_mode = "online"
                         empirical_residual_model = str(getattr(args, "empirical_residual_model", "logistic_normal")).strip().lower()
                         if empirical_residual_model not in {"logistic_normal", "empirical"}:
                             empirical_residual_model = "logistic_normal"
@@ -3776,6 +3808,7 @@ def main():
                                     "k": int(k),
                                     "percentile": float(pride_alpha),
                                     "sweep_mode": empirical_sweep_mode,
+                                    "percentile_mode": empirical_percentile_mode,
                                     "residual_model": empirical_residual_model,
                                     "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
                                     "cov_shrinkage": float(empirical_cov_shrinkage),
@@ -3823,6 +3856,7 @@ def main():
                                             percentile=perc_f,
                                             stage_schedule=empirical_stage_schedule,
                                             stage_gamma=empirical_stage_gamma,
+                                            percentile_mode=empirical_percentile_mode,
                                         )
                                         hp_emp = {
                                             "label": EMPIRICAL_PRIDE_LABEL,
@@ -3857,6 +3891,7 @@ def main():
                                         "skip_residual_on_cyclic": bool(empirical_skip_residual_on_cyclic),
                                         "threshold_schedule": empirical_stage_schedule,
                                         "threshold_gamma": float(empirical_stage_gamma),
+                                        "percentile_mode": empirical_percentile_mode,
                                         "selection_policy": None if learned_selection_info is None else str(learned_selection_info.get("selection_policy", "")),
                                         "selected_sequence_name": None if learned_selection_info is None else str(learned_selection_info.get("selected_sequence_name", "")),
                                         "selected_action_sequence": [] if learned_selection_info is None else list(learned_selection_info.get("selected_action_sequence") or []),
@@ -4327,8 +4362,9 @@ def main():
                     logger.info(f"ours_pride_sqrt_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             if empirical_alphas:
+                empirical_report_percentile_mode = str(getattr(args, "empirical_percentile_mode", "online")).strip().lower()
                 if empirical_report_mode == "confidence":
-                    logger.info(f"---- empirical pride (confidence sweep, {empirical_report_schedule}) ----")
+                    logger.info(f"---- empirical pride (confidence sweep, {empirical_report_schedule}, {empirical_report_percentile_mode}) ----")
                     for alpha in empirical_alphas:
                         cobjs = derived_records_empirical_by_alpha[alpha]
                         transition_mode = str(cobjs[0].get("transition_mode", "latin")).strip().lower() if cobjs else "latin"
@@ -4340,17 +4376,18 @@ def main():
                             conf_str = f"{float(conf_th):.2f}"
                             logger.info(f"empirical_pride_conf_{empirical_report_schedule}_{transition_mode}_α{a_str}_{conf_str} : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
                 else:
-                    logger.info(f"---- empirical pride (percentile sweep, {empirical_report_schedule}) ----")
+                    logger.info(f"---- empirical pride (percentile sweep, {empirical_report_schedule}, {empirical_report_percentile_mode}) ----")
                     for alpha in empirical_alphas:
                         cobjs = derived_records_empirical_by_alpha[alpha]
                         transition_mode = str(cobjs[0].get("transition_mode", "latin")).strip().lower() if cobjs else "latin"
+                        percentile_mode = str(cobjs[0].get("percentile_mode", empirical_report_percentile_mode)).strip().lower() if cobjs else empirical_report_percentile_mode
                         for p in pride_fracs:
                             cost, acc, rstd, nb, np2, nc, std_c, std_a, std_r = get_heur_stats_by_th1_p(
                                 cobjs, float(p), EMPIRICAL_PRIDE_LABEL
                             )
                             a_str = f"{float(alpha):g}"
                             p_str = f"{float(p):g}"
-                            logger.info(f"empirical_pride_pct_{empirical_report_schedule}_{transition_mode}_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
+                            logger.info(f"empirical_pride_pct_{empirical_report_schedule}_{percentile_mode}_{transition_mode}_α{a_str}_{p_str}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}, n_base={nb:.0f}, n_probe={np2:.0f}, n_cyclic={nc:.0f}")
 
             # 3. ours
             logger.info("---- ours ----")

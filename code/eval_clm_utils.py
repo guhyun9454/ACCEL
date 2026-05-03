@@ -107,6 +107,9 @@ def parse_arguments():
     parser.add_argument("--empirical_sweep_mode", type=str, default="percentile",
                         choices=["percentile", "confidence"],
                         help="Sweep mode for empirical PriDe curves: percentile uses beta-percentile thresholds, confidence uses fixed confidence thresholds.")
+    parser.add_argument("--empirical_percentile_mode", type=str, default="online",
+                        choices=["online", "fixed_prefix"],
+                        help="Percentile-threshold policy for empirical PriDe. online uses running stage-wise quantiles; fixed_prefix freezes stage-wise quantile thresholds from the empirical alpha-prefix samples.")
     parser.add_argument("--empirical_conf_thresholds", type=str, default="0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90",
                         help="Comma-separated confidence thresholds for empirical PriDe when --empirical_sweep_mode=confidence.")
     parser.add_argument("--empirical_stage_schedule", type=str, default="sqrt",
