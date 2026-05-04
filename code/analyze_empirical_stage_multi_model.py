@@ -206,6 +206,9 @@ def _aggregate_transition_metrics(reports: List[Dict[str, Any]]) -> Dict[str, An
     thresh_grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     )
+    top_grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
     sweep_key_by_alpha_transition: Dict[tuple[str, str], str] = {}
     for report in reports:
         payload = report.get("transition_summary") or {}
@@ -220,6 +223,11 @@ def _aggregate_transition_metrics(reports: List[Dict[str, Any]]) -> Dict[str, An
                     sweep_key_by_alpha_transition[(str(alpha_key), str(trans_key))] = sweep_key
                     for metric, metric_stats in (point_vals or {}).items():
                         thresh_grouped[str(alpha_key)][str(trans_key)][str(point_key)][str(metric)].append(
+                            (metric_stats or {}).get("mean")
+                        )
+                for point_key, point_vals in ((trans_vals or {}).get("top_threshold_analysis") or {}).items():
+                    for metric, metric_stats in (point_vals or {}).items():
+                        top_grouped[str(alpha_key)][str(trans_key)][str(point_key)][str(metric)].append(
                             (metric_stats or {}).get("mean")
                         )
     out: Dict[str, Any] = {}
@@ -239,6 +247,14 @@ def _aggregate_transition_metrics(reports: List[Dict[str, Any]]) -> Dict[str, An
             if thresh_payload:
                 entry["threshold_sweep_key"] = sweep_key_by_alpha_transition.get((alpha_key, trans_key), "p")
                 entry["threshold_analysis"] = thresh_payload
+            top_payload = {}
+            for point_key in sorted(top_grouped[alpha_key][trans_key].keys(), key=_float_key):
+                top_payload[point_key] = {
+                    metric: _stats(values)
+                    for metric, values in top_grouped[alpha_key][trans_key][point_key].items()
+                }
+            if top_payload:
+                entry["top_threshold_analysis"] = top_payload
             out[alpha_key][trans_key] = entry
     return out
 

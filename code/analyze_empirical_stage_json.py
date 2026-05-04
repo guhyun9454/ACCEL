@@ -125,6 +125,96 @@ def _load_records(task_analysis_path: Optional[str], summary_paths: List[str]) -
     return records, task_payload
 
 
+def _record_key(subject: Any, run_idx: Any, alpha: Any) -> Tuple[str, int, str]:
+    return (str(subject), int(run_idx), _normalize_alpha(alpha))
+
+
+def _trajectory_top_tail_summary(
+    trajectories: List[Dict[str, Any]],
+    sweep_mode: str,
+    sweep_values: List[float],
+) -> Dict[str, Dict[str, Dict[str, float]]]:
+    grouped: Dict[str, Dict[str, Dict[str, float]]] = {}
+    if not trajectories:
+        return grouped
+    by_stage: Dict[int, Dict[str, np.ndarray]] = {}
+    sample_count = len(trajectories)
+    for sample_idx, row in enumerate(trajectories):
+        stages = [int(x) for x in (row.get("decision_stages") or [])]
+        confs = np.asarray(row.get("conf_by_stage") or [], dtype=np.float64)
+        corrs = np.asarray(row.get("correct_by_stage") or [], dtype=np.float64)
+        for idx, stage_id in enumerate(stages):
+            if stage_id not in by_stage:
+                by_stage[stage_id] = {
+                    "conf": np.full((sample_count,), np.nan, dtype=np.float64),
+                    "corr": np.full((sample_count,), np.nan, dtype=np.float64),
+                }
+            by_stage[stage_id]["conf"][sample_idx] = float(confs[idx])
+            by_stage[stage_id]["corr"][sample_idx] = float(corrs[idx])
+
+    ordered_stages = sorted(by_stage.keys())
+    sweep_mode_norm = str(sweep_mode or "percentile").strip().lower()
+    if sweep_mode_norm not in {"percentile", "confidence"}:
+        sweep_mode_norm = "percentile"
+    for prev_stage, next_stage in zip(ordered_stages[:-1], ordered_stages[1:]):
+        conf_prev = np.asarray(by_stage[prev_stage]["conf"], dtype=np.float64)
+        corr_prev = np.asarray(by_stage[prev_stage]["corr"], dtype=np.float64)
+        corr_next = np.asarray(by_stage[next_stage]["corr"], dtype=np.float64)
+        valid = np.isfinite(conf_prev) & np.isfinite(corr_prev) & np.isfinite(corr_next)
+        conf_prev = conf_prev[valid]
+        corr_prev = corr_prev[valid]
+        corr_next = corr_next[valid]
+        if conf_prev.size == 0:
+            continue
+        trans_key = f"{int(prev_stage)}->{int(next_stage)}"
+        grouped[trans_key] = {}
+        w2c_mask = (corr_prev < 0.5) & (corr_next >= 0.5)
+        c2w_mask = (corr_prev >= 0.5) & (corr_next < 0.5)
+        for sweep_value in sweep_values:
+            sweep_f = float(sweep_value)
+            if sweep_mode_norm == "percentile":
+                q_low = max(0.0, min(1.0, sweep_f / 100.0))
+                q_high = max(0.0, min(1.0, 1.0 - q_low))
+                tau_low = float(np.quantile(conf_prev, q_low))
+                tau_high = float(np.quantile(conf_prev, q_high))
+                sweep_key = "p"
+            else:
+                tau_low = max(0.0, min(1.0, sweep_f))
+                tau_high = max(0.0, min(1.0, 1.0 - sweep_f))
+                sweep_key = "confidence"
+            low_mask = conf_prev < tau_low
+            top_mask = conf_prev >= tau_high
+            grouped[trans_key][f"{sweep_f:g}"] = {
+                sweep_key: float(sweep_f),
+                "low_ratio": float(np.mean(low_mask.astype(np.float64))) if conf_prev.size > 0 else float("nan"),
+                "top_ratio": float(np.mean(top_mask.astype(np.float64))) if conf_prev.size > 0 else float("nan"),
+                "acc_low_from": _masked_mean(corr_prev, low_mask),
+                "acc_low_to": _masked_mean(corr_next, low_mask),
+                "delta_low": _masked_mean(corr_next - corr_prev, low_mask),
+                "w2c_low": _masked_mean(w2c_mask.astype(np.float64), low_mask),
+                "c2w_low": _masked_mean(c2w_mask.astype(np.float64), low_mask),
+                "acc_top_from": _masked_mean(corr_prev, top_mask),
+                "acc_top_to": _masked_mean(corr_next, top_mask),
+                "delta_top": _masked_mean(corr_next - corr_prev, top_mask),
+                "w2c_top": _masked_mean(w2c_mask.astype(np.float64), top_mask),
+                "c2w_top": _masked_mean(c2w_mask.astype(np.float64), top_mask),
+                "threshold_low": float(tau_low),
+                "threshold_top": float(tau_high),
+            }
+    return grouped
+
+
+def _parse_traj_file_key(path: str) -> Optional[Tuple[str, int, str]]:
+    name = os.path.basename(path)
+    m = re.match(r"(.+)_run(\d+)_empirical_alpha([^.]+)_trajectories\.jsonl$", name)
+    if not m:
+        return None
+    subject = str(m.group(1))
+    run_idx = int(m.group(2))
+    alpha_key = _normalize_alpha(m.group(3))
+    return (subject, run_idx, alpha_key)
+
+
 def _summarize_stage_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for rec in records:
@@ -148,7 +238,10 @@ def _summarize_stage_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
-def _summarize_transitions(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _summarize_transitions(
+    records: List[Dict[str, Any]],
+    trajectory_map: Optional[Dict[Tuple[str, int, str], List[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     thresh_grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -209,6 +302,42 @@ def _summarize_transitions(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             if thresh_payload:
                 entry["threshold_sweep_key"] = sweep_key_by_alpha_transition.get((alpha_key, trans_key), "p")
                 entry["threshold_analysis"] = thresh_payload
+            if trajectory_map is not None:
+                matching_top_stats: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+                for rec in records:
+                    rec_alpha = _normalize_alpha(rec.get("alpha"))
+                    if rec_alpha != alpha_key:
+                        continue
+                    rec_key = _record_key(rec.get("subject"), rec.get("run_idx"), rec.get("alpha"))
+                    traj_rows = trajectory_map.get(rec_key)
+                    if not traj_rows:
+                        continue
+                    summary = rec.get("summary") or {}
+                    top_summary = _trajectory_top_tail_summary(
+                        traj_rows,
+                        sweep_mode=str(summary.get("sweep_mode", "percentile")),
+                        sweep_values=list(summary.get("sweep_values") or []),
+                    )
+                    row = top_summary.get(trans_key)
+                    if not row:
+                        continue
+                    for point_key, point_vals in row.items():
+                        matching_top_stats[point_key].append(point_vals)
+                if matching_top_stats:
+                    top_payload = {}
+                    for point_key in sorted(matching_top_stats.keys(), key=_float_key):
+                        metric_lists: Dict[str, List[float]] = defaultdict(list)
+                        for row in matching_top_stats[point_key]:
+                            for metric, val in row.items():
+                                if metric in {"p", "confidence"}:
+                                    continue
+                                metric_lists[metric].append(val)
+                        top_payload[point_key] = {
+                            metric: _stats(vals)
+                            for metric, vals in metric_lists.items()
+                        }
+                    if top_payload:
+                        entry["top_threshold_analysis"] = top_payload
             out[alpha_key][trans_key] = entry
     return out
 
@@ -480,6 +609,12 @@ def main() -> None:
     empirical_analysis_dir = os.path.join(results_dir, "empirical_analysis")
     summary_paths = sorted(glob.glob(os.path.join(empirical_analysis_dir, "*_summary.json")))
     traj_paths = sorted(glob.glob(os.path.join(empirical_analysis_dir, "*_trajectories.jsonl")))
+    trajectory_map: Dict[Tuple[str, int, str], List[Dict[str, Any]]] = {}
+    for path in traj_paths:
+        key = _parse_traj_file_key(path)
+        if key is None:
+            continue
+        trajectory_map[key] = _load_jsonl(path)
 
     records, task_payload = _load_records(task_analysis_path if os.path.exists(task_analysis_path) else None, summary_paths)
     if not records:
@@ -512,7 +647,7 @@ def main() -> None:
         },
         "record_overview": _summarize_record_metadata(records),
         "stage_metric_summary": _summarize_stage_metrics(records),
-        "transition_summary": _summarize_transitions(records),
+        "transition_summary": _summarize_transitions(records, trajectory_map=trajectory_map),
         "adaptive_point_summary": _summarize_adaptive_points(records),
         "trajectory_summary": _summarize_trajectories(traj_paths),
         "points_payload_summary": _summarize_points_payload(points_path if os.path.exists(points_path) else None),
