@@ -150,6 +150,10 @@ def _summarize_stage_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _summarize_transitions(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    thresh_grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    sweep_key_by_alpha_transition: Dict[Tuple[str, str], str] = {}
     for rec in records:
         alpha_key = _normalize_alpha(rec.get("alpha"))
         transitions = ((rec.get("summary") or {}).get("transitions") or [])
@@ -157,15 +161,55 @@ def _summarize_transitions(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             trans_key = f"{int(trans.get('from_stage', -1))}->{int(trans.get('to_stage', -1))}"
             for metric in ["delta_acc", "w2c", "c2w", "acc_from", "acc_to"]:
                 grouped[alpha_key][trans_key][metric].append(trans.get(metric))
+            for row in trans.get("threshold_analysis") or []:
+                if not isinstance(row, dict):
+                    continue
+                if "p" in row:
+                    sweep_key = "p"
+                    sweep_value = float(row["p"])
+                elif "confidence" in row:
+                    sweep_key = "confidence"
+                    sweep_value = float(row["confidence"])
+                else:
+                    continue
+                sweep_name = f"{sweep_value:g}"
+                sweep_key_by_alpha_transition[(alpha_key, trans_key)] = sweep_key
+                for metric in [
+                    "threshold",
+                    "low_ratio",
+                    "coverage",
+                    "accepted_accuracy",
+                    "acc_low_from",
+                    "acc_low_to",
+                    "delta_low",
+                    "w2c_low",
+                    "c2w_low",
+                    "acc_high_from",
+                    "acc_high_to",
+                    "delta_high",
+                    "w2c_high",
+                    "c2w_high",
+                ]:
+                    thresh_grouped[alpha_key][trans_key][sweep_name][metric].append(row.get(metric))
 
     out: Dict[str, Any] = {}
     for alpha_key in sorted(grouped.keys(), key=_float_key):
         out[alpha_key] = {}
         for trans_key in sorted(grouped[alpha_key].keys(), key=lambda x: tuple(int(p) for p in x.split("->"))):
-            out[alpha_key][trans_key] = {
+            entry = {
                 metric: _stats(values)
                 for metric, values in grouped[alpha_key][trans_key].items()
             }
+            thresh_payload = {}
+            for sweep_name in sorted(thresh_grouped[alpha_key][trans_key].keys(), key=_float_key):
+                thresh_payload[sweep_name] = {
+                    metric: _stats(values)
+                    for metric, values in thresh_grouped[alpha_key][trans_key][sweep_name].items()
+                }
+            if thresh_payload:
+                entry["threshold_sweep_key"] = sweep_key_by_alpha_transition.get((alpha_key, trans_key), "p")
+                entry["threshold_analysis"] = thresh_payload
+            out[alpha_key][trans_key] = entry
     return out
 
 

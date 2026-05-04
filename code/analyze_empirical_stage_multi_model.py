@@ -202,20 +202,43 @@ def _aggregate_stage_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _aggregate_transition_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    thresh_grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    sweep_key_by_alpha_transition: Dict[tuple[str, str], str] = {}
     for report in reports:
         payload = report.get("transition_summary") or {}
         for alpha_key, alpha_vals in payload.items():
             for trans_key, trans_vals in (alpha_vals or {}).items():
                 for metric, metric_stats in (trans_vals or {}).items():
+                    if metric in {"threshold_sweep_key", "threshold_analysis"}:
+                        continue
                     grouped[str(alpha_key)][str(trans_key)][str(metric)].append((metric_stats or {}).get("mean"))
+                sweep_key = str((trans_vals or {}).get("threshold_sweep_key", "p"))
+                for point_key, point_vals in ((trans_vals or {}).get("threshold_analysis") or {}).items():
+                    sweep_key_by_alpha_transition[(str(alpha_key), str(trans_key))] = sweep_key
+                    for metric, metric_stats in (point_vals or {}).items():
+                        thresh_grouped[str(alpha_key)][str(trans_key)][str(point_key)][str(metric)].append(
+                            (metric_stats or {}).get("mean")
+                        )
     out: Dict[str, Any] = {}
     for alpha_key in sorted(grouped.keys(), key=_float_key):
         out[alpha_key] = {}
         for trans_key in sorted(grouped[alpha_key].keys(), key=lambda x: tuple(int(p) for p in str(x).split("->"))):
-            out[alpha_key][trans_key] = {
+            entry = {
                 metric: _stats(values)
                 for metric, values in grouped[alpha_key][trans_key].items()
             }
+            thresh_payload = {}
+            for point_key in sorted(thresh_grouped[alpha_key][trans_key].keys(), key=_float_key):
+                thresh_payload[point_key] = {
+                    metric: _stats(values)
+                    for metric, values in thresh_grouped[alpha_key][trans_key][point_key].items()
+                }
+            if thresh_payload:
+                entry["threshold_sweep_key"] = sweep_key_by_alpha_transition.get((alpha_key, trans_key), "p")
+                entry["threshold_analysis"] = thresh_payload
+            out[alpha_key][trans_key] = entry
     return out
 
 
