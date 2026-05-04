@@ -42,7 +42,8 @@ def _build_results_dir(
     result_tag: Optional[str],
     setting: str = "full",
 ) -> str:
-    out = f"results_{task}/{int(num_few_shot)}s_{model_name}/{task}"
+    model_leaf = str(model_name).strip().split("/")[-1]
+    out = f"results_{task}/{int(num_few_shot)}s_{model_leaf}/{task}"
     if setting:
         out += f"_{setting}"
     if option_id_set:
