@@ -352,6 +352,34 @@ def _aggregate_cyclic_learned(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _aggregate_baseline_cyclic_transition(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    vals: Dict[str, List[float]] = defaultdict(list)
+    per_model = []
+    for report in reports:
+        payload = report.get("baseline_cyclic_transition") or {}
+        if not payload:
+            continue
+        model_name = str((report.get("metadata") or {}).get("model_name", ""))
+        row = {"model_name": model_name}
+        for metric in ["acc_from", "acc_to", "delta_acc", "w2c", "c2w"]:
+            mean_val = _safe_float((payload.get(metric) or {}).get("mean"))
+            row[metric] = mean_val
+            if math.isfinite(mean_val):
+                vals[metric].append(mean_val)
+        per_model.append(row)
+    if not per_model:
+        return {}
+    return {
+        "n_models": int(len(per_model)),
+        "acc_from": _stats(vals.get("acc_from", [])),
+        "acc_to": _stats(vals.get("acc_to", [])),
+        "delta_acc": _stats(vals.get("delta_acc", [])),
+        "w2c": _stats(vals.get("w2c", [])),
+        "c2w": _stats(vals.get("c2w", [])),
+        "per_model": per_model,
+    }
+
+
 def _aggregate_overview(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     tasks = sorted({str((r.get("metadata") or {}).get("task", "")) for r in reports})
     models = [str((r.get("metadata") or {}).get("model_name", "")) for r in reports]
@@ -396,9 +424,21 @@ def _build_markdown(report: Dict[str, Any]) -> str:
         f"- `transition_modes`: `{json.dumps((report.get('overview') or {}).get('transition_modes', {}), ensure_ascii=False)}`",
         f"- `residual_models`: `{json.dumps((report.get('overview') or {}).get('residual_models', {}), ensure_ascii=False)}`",
         "",
+    ]
+    baseline = report.get("baseline_cyclic_transition") or {}
+    if baseline:
+        lines.extend([
+            "## Baseline Cyclic",
+            "",
+            f"- `delta_acc`: {((baseline.get('delta_acc') or {}).get('mean', float('nan'))):.4f}, "
+            f"`w2c`: {((baseline.get('w2c') or {}).get('mean', float('nan'))):.4f}, "
+            f"`c2w`: {((baseline.get('c2w') or {}).get('mean', float('nan'))):.4f}",
+            "",
+        ])
+    lines.extend([
         "## Stage Metrics",
         "",
-    ]
+    ])
     for alpha_key, alpha_payload in sorted((report.get("stage_metric_summary") or {}).items(), key=lambda kv: _float_key(kv[0])):
         lines.append(f"### alpha={alpha_key}")
         for stage_id, stage_payload in sorted((alpha_payload or {}).items(), key=lambda kv: _float_key(kv[0])):
@@ -503,6 +543,7 @@ def main() -> None:
         "transition_summary": _aggregate_transition_metrics(reports),
         "adaptive_point_summary": _aggregate_adaptive_points(reports),
         "points_payload_selection_summary": _aggregate_curve_points(reports),
+        "baseline_cyclic_transition": _aggregate_baseline_cyclic_transition(reports),
     }
     if args.include_cyclic_learned:
         report["cyclic_learned_summary"] = _aggregate_cyclic_learned(reports)
