@@ -148,13 +148,14 @@ def _collect_report_paths(
     return unique_paths
 
 
-def _maybe_generate_missing_report(
+def _maybe_generate_report(
     *,
     report_path: str,
     task: Optional[str],
     include_cyclic_learned: bool,
+    force: bool,
 ) -> bool:
-    if os.path.exists(report_path):
+    if os.path.exists(report_path) and not bool(force):
         return True
     results_dir = os.path.dirname(os.path.abspath(report_path))
     if not os.path.isdir(results_dir):
@@ -428,6 +429,8 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(auto_generate_missing_reports=True)
     parser.add_argument("--no_auto_generate_missing_reports", dest="auto_generate_missing_reports", action="store_false",
                         help="Do not auto-run analyze_empirical_stage_json.py for missing per-model report json files.")
+    parser.add_argument("--force", action="store_true",
+                        help="Force-regenerate per-model empirical analysis reports before multi-model aggregation, even if they already exist.")
     parser.add_argument("--output_json", type=str, default=None,
                         help="Explicit output path for aggregated json.")
     parser.add_argument("--output_md", type=str, default=None,
@@ -449,14 +452,13 @@ def main() -> None:
     )
     if not report_paths:
         raise SystemExit("No report paths resolved. Provide --report_paths, --results_dirs, or --task with --model_names.")
-    if args.auto_generate_missing_reports:
+    if args.auto_generate_missing_reports or args.force:
         for path in report_paths:
-            if os.path.exists(path):
-                continue
-            _maybe_generate_missing_report(
+            _maybe_generate_report(
                 report_path=path,
                 task=args.task,
                 include_cyclic_learned=bool(args.include_cyclic_learned),
+                force=bool(args.force),
             )
     missing = [path for path in report_paths if not os.path.exists(path)]
     if missing:
