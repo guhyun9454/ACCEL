@@ -490,6 +490,14 @@ def _build_targeted_latin_schedule(k: int, top1_idx: int, runner_idx: int) -> Li
             raise RuntimeError(f"Failed to complete Latin schedule for k={k}, top1={top1_idx}, runner={runner_idx}")
         schedules_content_to_slot.append(candidate)
 
+    if int(k) == 4 and len(schedules_content_to_slot) == 4:
+        # For 4-choice Latin mode, keep stage 2 as the targeted swap but
+        # visit the fully reversed assignment before the remaining completion.
+        schedules_content_to_slot[2], schedules_content_to_slot[3] = (
+            schedules_content_to_slot[3],
+            schedules_content_to_slot[2],
+        )
+
     return [_content_to_slot_assignment_to_perm(sched) for sched in schedules_content_to_slot]
 
 
