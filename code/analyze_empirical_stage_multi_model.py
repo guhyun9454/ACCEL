@@ -17,6 +17,8 @@ import json
 import math
 import os
 import re
+import subprocess
+import sys
 from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -143,6 +145,39 @@ def _collect_report_paths(
         seen.add(norm)
         unique_paths.append(norm)
     return unique_paths
+
+
+def _maybe_generate_missing_report(
+    *,
+    report_path: str,
+    task: Optional[str],
+    include_cyclic_learned: bool,
+) -> bool:
+    if os.path.exists(report_path):
+        return True
+    results_dir = os.path.dirname(os.path.abspath(report_path))
+    if not os.path.isdir(results_dir):
+        return False
+    report_name = os.path.basename(report_path)
+    if task and report_name != f"{task}_empirical_analysis_report.json":
+        return False
+
+    script_path = os.path.join(os.path.dirname(__file__), "analyze_empirical_stage_json.py")
+    cmd = [
+        sys.executable,
+        script_path,
+        "--results_dir",
+        results_dir,
+    ]
+    if task:
+        cmd.extend(["--task", str(task)])
+    if include_cyclic_learned:
+        cmd.append("--analyze_cyclic_learned")
+    try:
+        subprocess.run(cmd, check=True)
+    except Exception:
+        return False
+    return os.path.exists(report_path)
 
 
 def _aggregate_stage_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -366,6 +401,9 @@ def parse_args() -> argparse.Namespace:
                         help="Setting suffix for results dir reconstruction. Usually full.")
     parser.add_argument("--include_cyclic_learned", action="store_true",
                         help="Aggregate cyclic_learned sequence-selection summaries when present.")
+    parser.set_defaults(auto_generate_missing_reports=True)
+    parser.add_argument("--no_auto_generate_missing_reports", dest="auto_generate_missing_reports", action="store_false",
+                        help="Do not auto-run analyze_empirical_stage_json.py for missing per-model report json files.")
     parser.add_argument("--output_json", type=str, default=None,
                         help="Explicit output path for aggregated json.")
     parser.add_argument("--output_md", type=str, default=None,
@@ -387,6 +425,15 @@ def main() -> None:
     )
     if not report_paths:
         raise SystemExit("No report paths resolved. Provide --report_paths, --results_dirs, or --task with --model_names.")
+    if args.auto_generate_missing_reports:
+        for path in report_paths:
+            if os.path.exists(path):
+                continue
+            _maybe_generate_missing_report(
+                report_path=path,
+                task=args.task,
+                include_cyclic_learned=bool(args.include_cyclic_learned),
+            )
     missing = [path for path in report_paths if not os.path.exists(path)]
     if missing:
         raise SystemExit("Missing report files:\n" + "\n".join(missing))
