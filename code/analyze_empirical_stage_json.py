@@ -71,6 +71,13 @@ def _load_jsonl(path: str) -> List[Dict[str, Any]]:
     return rows
 
 
+def _load_result_jsonl(path: str) -> List[Dict[str, Any]]:
+    rows = _load_jsonl(path)
+    out = [row for row in rows if isinstance(row, dict) and row.get("type") == "result"]
+    out = sorted(out, key=lambda x: int(((x.get("data") or {}).get("idx", -1))))
+    return out
+
+
 def _safe_float(x: Any) -> float:
     try:
         v = float(x)
@@ -105,6 +112,25 @@ def _normalize_alpha(alpha: Any) -> str:
     if not math.isfinite(f):
         return str(alpha)
     return f"{f:g}"
+
+
+def _rotations(k: int) -> List[Tuple[int, ...]]:
+    return [tuple((i + s) % k for i in range(k)) for s in range(k)]
+
+
+def _aggregate_probs_over_permutations(
+    probs_seq: List[List[float]],
+    permuted_indices: List[Tuple[int, ...]],
+    k: int,
+) -> np.ndarray:
+    agg = np.zeros(k, dtype=np.float64)
+    for perm_idx, p in enumerate(permuted_indices):
+        letter_probs = np.asarray(probs_seq[perm_idx], dtype=np.float64)
+        for j in range(k):
+            agg[p[j]] += letter_probs[j]
+    if len(permuted_indices) > 0:
+        agg /= float(len(permuted_indices))
+    return agg
 
 
 def _extract_task_from_dir(results_dir: str) -> Optional[str]:
@@ -450,6 +476,123 @@ def _summarize_points_payload(points_path: Optional[str]) -> Dict[str, Any]:
     return out
 
 
+def _find_baseline_transition_files(results_dir: str, task: str, result_tag: Optional[str]) -> List[Tuple[str, str, str]]:
+    parent_dir = os.path.dirname(os.path.abspath(results_dir))
+    base_name = os.path.basename(os.path.abspath(results_dir))
+    prefix = f"{task}_full"
+    suffix = ""
+    if base_name.startswith(prefix):
+        suffix = base_name[len(prefix):]
+    elif base_name.startswith(task):
+        suffix = base_name[len(task):]
+    subject_pattern = "*.jsonl"
+
+    def _glob_dir(mode_prefix: str) -> List[str]:
+        pat = os.path.join(parent_dir, f"{task}{mode_prefix}{suffix}", subject_pattern)
+        return sorted(glob.glob(pat))
+
+    base_files = _glob_dir("")
+    cyclic_files = _glob_dir("_cyclic")
+    # Keep only subject files, not curve files.
+    def _filter_subject_files(paths: List[str]) -> Dict[str, str]:
+        out = {}
+        for path in paths:
+            name = os.path.basename(path)
+            if name.endswith("_curve.jsonl") or name.endswith("_pride_curve.jsonl"):
+                continue
+            if name.startswith(f"{task}_") and (name.endswith("_curve.jsonl") or name.endswith("_pride_curve.jsonl")):
+                continue
+            subject = name[:-6]
+            out[subject] = path
+        return out
+    base_map = _filter_subject_files(base_files)
+    cyc_map = _filter_subject_files(cyclic_files)
+    pairs = []
+    for subject in sorted(set(base_map) & set(cyc_map)):
+        pairs.append((subject, base_map[subject], cyc_map[subject]))
+    return pairs
+
+
+def _summarize_baseline_cyclic_transition(results_dir: str, task: str, result_tag: Optional[str]) -> Dict[str, Any]:
+    pairs = _find_baseline_transition_files(results_dir, task, result_tag)
+    if not pairs:
+        return {}
+    per_subject = []
+    w2c_vals = []
+    c2w_vals = []
+    delta_vals = []
+    acc_from_vals = []
+    acc_to_vals = []
+    for subject, base_path, cyc_path in pairs:
+        base_rows = _load_result_jsonl(base_path)
+        cyc_rows = _load_result_jsonl(cyc_path)
+        if not base_rows or not cyc_rows:
+            continue
+        base_map = {int((row.get("data") or {}).get("idx", -1)): row for row in base_rows}
+        cyc_map = {int((row.get("data") or {}).get("idx", -1)): row for row in cyc_rows}
+        shared = sorted(set(base_map) & set(cyc_map))
+        if not shared:
+            continue
+        base_corr = []
+        cyc_corr = []
+        for idx in shared:
+            bdata = base_map[idx].get("data") or {}
+            cdata = cyc_map[idx].get("data") or {}
+            b_corr = bdata.get("correct")
+            if b_corr is None:
+                sampled = bdata.get("sampled")
+                ideal = bdata.get("ideal")
+                if sampled is None or ideal is None:
+                    continue
+                b_corr = (sampled == ideal)
+            cyc_probs = cdata.get("probs") or []
+            ideal = str(cdata.get("ideal", ""))
+            if not isinstance(cyc_probs, list) or not cyc_probs:
+                continue
+            k = len(cyc_probs)
+            perm_list = _rotations(k)
+            agg = _aggregate_probs_over_permutations(cyc_probs, perm_list, k)
+            pred_idx = int(np.argmax(agg))
+            option_ids = list("ABCDE"[:k]) if k <= 5 else [str(i) for i in range(k)]
+            c_corr = (option_ids[pred_idx] == ideal)
+            base_corr.append(bool(b_corr))
+            cyc_corr.append(bool(c_corr))
+        if not base_corr:
+            continue
+        base_arr = np.asarray(base_corr, dtype=np.float64)
+        cyc_arr = np.asarray(cyc_corr, dtype=np.float64)
+        w2c = float(np.mean((base_arr < 0.5) & (cyc_arr >= 0.5)))
+        c2w = float(np.mean((base_arr >= 0.5) & (cyc_arr < 0.5)))
+        delta = float(np.mean(cyc_arr - base_arr))
+        acc_from = float(np.mean(base_arr))
+        acc_to = float(np.mean(cyc_arr))
+        per_subject.append({
+            "subject": subject,
+            "n_samples": int(base_arr.size),
+            "acc_from": acc_from,
+            "acc_to": acc_to,
+            "delta_acc": delta,
+            "w2c": w2c,
+            "c2w": c2w,
+        })
+        w2c_vals.append(w2c)
+        c2w_vals.append(c2w)
+        delta_vals.append(delta)
+        acc_from_vals.append(acc_from)
+        acc_to_vals.append(acc_to)
+    if not per_subject:
+        return {}
+    return {
+        "n_subjects": int(len(per_subject)),
+        "per_subject": per_subject,
+        "acc_from": _stats(acc_from_vals),
+        "acc_to": _stats(acc_to_vals),
+        "delta_acc": _stats(delta_vals),
+        "w2c": _stats(w2c_vals),
+        "c2w": _stats(c2w_vals),
+    }
+
+
 def _summarize_cyclic_learned(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     learned_records = [rec for rec in records if str(rec.get("transition_mode", "")).strip() == "cyclic_learned"]
     if not learned_records:
@@ -528,6 +671,17 @@ def _build_markdown(report: Dict[str, Any]) -> str:
         lines.append(f"- `n_rows`: {traj.get('n_rows', 0)}")
         lines.append(f"- `prefix_forced_ratio`: {traj.get('prefix_forced_ratio', float('nan')):.4f}")
         lines.append(f"- `decision_stage_patterns`: `{json.dumps(traj.get('decision_stage_patterns', {}), ensure_ascii=False)}`")
+        lines.append("")
+
+    baseline = report.get("baseline_cyclic_transition") or {}
+    if baseline:
+        lines.append("## Baseline Cyclic")
+        lines.append("")
+        lines.append(
+            f"- `delta_acc`: {((baseline.get('delta_acc') or {}).get('mean', float('nan'))):.4f}, "
+            f"`w2c`: {((baseline.get('w2c') or {}).get('mean', float('nan'))):.4f}, "
+            f"`c2w`: {((baseline.get('c2w') or {}).get('mean', float('nan'))):.4f}"
+        )
         lines.append("")
 
     learned = report.get("cyclic_learned_summary") or {}
@@ -651,6 +805,7 @@ def main() -> None:
         "adaptive_point_summary": _summarize_adaptive_points(records),
         "trajectory_summary": _summarize_trajectories(traj_paths),
         "points_payload_summary": _summarize_points_payload(points_path if os.path.exists(points_path) else None),
+        "baseline_cyclic_transition": _summarize_baseline_cyclic_transition(results_dir, task, args.result_tag),
     }
     if args.analyze_cyclic_learned:
         report["cyclic_learned_summary"] = _summarize_cyclic_learned(records)
