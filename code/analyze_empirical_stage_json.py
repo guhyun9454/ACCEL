@@ -107,6 +107,16 @@ def _stats(values: Iterable[Any]) -> Dict[str, Any]:
     }
 
 
+def _masked_mean(values: np.ndarray, mask: np.ndarray) -> float:
+    vals = np.asarray(values, dtype=np.float64)
+    m = np.asarray(mask, dtype=bool)
+    if vals.shape[0] == 0 or m.shape[0] != vals.shape[0]:
+        return float("nan")
+    if not np.any(m):
+        return float("nan")
+    return float(np.mean(vals[m]))
+
+
 def _normalize_alpha(alpha: Any) -> str:
     f = _safe_float(alpha)
     if not math.isfinite(f):
