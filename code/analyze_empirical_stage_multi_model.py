@@ -280,6 +280,25 @@ def _aggregate_adaptive_points(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _aggregate_stage1_reference(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for report in reports:
+        payload = report.get("stage1_reference_summary") or {}
+        for alpha_key, alpha_vals in payload.items():
+            for stage_key, stage_vals in (alpha_vals or {}).items():
+                for metric, metric_stats in (stage_vals or {}).items():
+                    grouped[str(alpha_key)][str(stage_key)][str(metric)].append((metric_stats or {}).get("mean"))
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        out[alpha_key] = {}
+        for stage_key in sorted(grouped[alpha_key].keys(), key=_float_key):
+            out[alpha_key][stage_key] = {
+                metric: _stats(values)
+                for metric, values in grouped[alpha_key][stage_key].items()
+            }
+    return out
+
+
 def _aggregate_curve_points(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list))))
     curve_meta: Dict[str, Dict[str, Any]] = {}
@@ -541,6 +560,7 @@ def main() -> None:
         "overview": _aggregate_overview(reports),
         "stage_metric_summary": _aggregate_stage_metrics(reports),
         "transition_summary": _aggregate_transition_metrics(reports),
+        "stage1_reference_summary": _aggregate_stage1_reference(reports),
         "adaptive_point_summary": _aggregate_adaptive_points(reports),
         "points_payload_selection_summary": _aggregate_curve_points(reports),
         "baseline_cyclic_transition": _aggregate_baseline_cyclic_transition(reports),

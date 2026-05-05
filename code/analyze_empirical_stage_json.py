@@ -251,6 +251,46 @@ def _parse_traj_file_key(path: str) -> Optional[Tuple[str, int, str]]:
     return (subject, run_idx, alpha_key)
 
 
+def _stage1_reference_summary(trajectories: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
+    if not trajectories:
+        return {}
+    by_stage: Dict[int, Dict[str, np.ndarray]] = {}
+    sample_count = len(trajectories)
+    for sample_idx, row in enumerate(trajectories):
+        stages = [int(x) for x in (row.get("decision_stages") or [])]
+        corrs = np.asarray(row.get("correct_by_stage") or [], dtype=np.float64)
+        for idx, stage_id in enumerate(stages):
+            if stage_id not in by_stage:
+                by_stage[stage_id] = {"corr": np.full((sample_count,), np.nan, dtype=np.float64)}
+            by_stage[stage_id]["corr"][sample_idx] = float(corrs[idx])
+    if 1 not in by_stage:
+        return {}
+    corr_1 = np.asarray(by_stage[1]["corr"], dtype=np.float64)
+    out: Dict[str, Dict[str, float]] = {}
+    for stage_id in sorted(by_stage.keys()):
+        if stage_id == 1:
+            continue
+        corr_t = np.asarray(by_stage[stage_id]["corr"], dtype=np.float64)
+        valid = np.isfinite(corr_1) & np.isfinite(corr_t)
+        c1 = corr_1[valid]
+        ct = corr_t[valid]
+        if c1.size == 0:
+            continue
+        w2c_mask = (c1 < 0.5) & (ct >= 0.5)
+        c2w_mask = (c1 >= 0.5) & (ct < 0.5)
+        out[str(stage_id)] = {
+            "n_samples": int(c1.size),
+            "acc_from": float(np.mean(c1)),
+            "acc_to": float(np.mean(ct)),
+            "delta_acc": float(np.mean(ct - c1)),
+            "w2c_count": int(np.sum(w2c_mask)),
+            "c2w_count": int(np.sum(c2w_mask)),
+            "w2c": float(np.mean(w2c_mask.astype(np.float64))),
+            "c2w": float(np.mean(c2w_mask.astype(np.float64))),
+        }
+    return out
+
+
 def _summarize_stage_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for rec in records:
@@ -413,6 +453,32 @@ def _summarize_adaptive_points(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             out[alpha_key]["points"][sweep_name] = {
                 metric: _stats(values)
                 for metric, values in grouped[alpha_key][sweep_name].items()
+            }
+    return out
+
+
+def _summarize_stage1_reference(
+    records: List[Dict[str, Any]],
+    trajectory_map: Dict[Tuple[str, int, str], List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    for rec in records:
+        rec_key = _record_key(rec.get("subject"), rec.get("run_idx"), rec.get("alpha"))
+        traj_rows = trajectory_map.get(rec_key)
+        if not traj_rows:
+            continue
+        alpha_key = _normalize_alpha(rec.get("alpha"))
+        per_rec = _stage1_reference_summary(traj_rows)
+        for stage_key, row in per_rec.items():
+            for metric, val in row.items():
+                grouped[alpha_key][stage_key][metric].append(val)
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        out[alpha_key] = {}
+        for stage_key in sorted(grouped[alpha_key].keys(), key=_float_key):
+            out[alpha_key][stage_key] = {
+                metric: _stats(values)
+                for metric, values in grouped[alpha_key][stage_key].items()
             }
     return out
 
@@ -694,6 +760,22 @@ def _build_markdown(report: Dict[str, Any]) -> str:
         )
         lines.append("")
 
+    stage1_ref = report.get("stage1_reference_summary") or {}
+    if stage1_ref:
+        lines.append("## Stage1 Reference")
+        lines.append("")
+        for alpha_key, alpha_vals in sorted(stage1_ref.items(), key=lambda kv: _float_key(kv[0])):
+            if "2" not in alpha_vals:
+                continue
+            row = alpha_vals["2"]
+            lines.append(
+                f"- alpha `{alpha_key}` | `1->2` w2c={((row.get('w2c') or {}).get('mean', float('nan'))):.4f}, "
+                f"c2w={((row.get('c2w') or {}).get('mean', float('nan'))):.4f}, "
+                f"w2c_count={((row.get('w2c_count') or {}).get('mean', float('nan'))):.2f}, "
+                f"c2w_count={((row.get('c2w_count') or {}).get('mean', float('nan'))):.2f}"
+            )
+        lines.append("")
+
     learned = report.get("cyclic_learned_summary") or {}
     if learned:
         lines.append("## Cyclic Learned")
@@ -812,6 +894,7 @@ def main() -> None:
         "record_overview": _summarize_record_metadata(records),
         "stage_metric_summary": _summarize_stage_metrics(records),
         "transition_summary": _summarize_transitions(records, trajectory_map=trajectory_map),
+        "stage1_reference_summary": _summarize_stage1_reference(records, trajectory_map),
         "adaptive_point_summary": _summarize_adaptive_points(records),
         "trajectory_summary": _summarize_trajectories(traj_paths),
         "points_payload_summary": _summarize_points_payload(points_path if os.path.exists(points_path) else None),
