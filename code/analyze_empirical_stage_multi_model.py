@@ -201,6 +201,36 @@ def _aggregate_stage_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _aggregate_reliability_bins(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    sample_counts: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for report in reports:
+        payload = report.get("reliability_bin_summary") or {}
+        for alpha_key, alpha_vals in payload.items():
+            for stage_key, stage_payload in (alpha_vals or {}).items():
+                sample_counts[str(alpha_key)][str(stage_key)].append(((stage_payload.get("n_samples") or {}).get("mean")))
+                for bin_key, bin_vals in ((stage_payload.get("bins") or {}).items()):
+                    for metric, metric_stats in (bin_vals or {}).items():
+                        grouped[str(alpha_key)][str(stage_key)][str(bin_key)][str(metric)].append((metric_stats or {}).get("mean"))
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        out[alpha_key] = {}
+        for stage_key in sorted(grouped[alpha_key].keys(), key=_float_key):
+            out[alpha_key][stage_key] = {
+                "n_samples": _stats(sample_counts[alpha_key][stage_key]),
+                "bins": {
+                    bin_key: {
+                        metric: _stats(values)
+                        for metric, values in grouped[alpha_key][stage_key][bin_key].items()
+                    }
+                    for bin_key in sorted(grouped[alpha_key][stage_key].keys())
+                },
+            }
+    return out
+
+
 def _aggregate_transition_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     thresh_grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
@@ -256,6 +286,36 @@ def _aggregate_transition_metrics(reports: List[Dict[str, Any]]) -> Dict[str, An
             if top_payload:
                 entry["top_threshold_analysis"] = top_payload
             out[alpha_key][trans_key] = entry
+    return out
+
+
+def _aggregate_percentile_bin_gains(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    sample_counts: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for report in reports:
+        payload = report.get("percentile_bin_gain_summary") or {}
+        for alpha_key, alpha_vals in payload.items():
+            for trans_key, trans_payload in (alpha_vals or {}).items():
+                sample_counts[str(alpha_key)][str(trans_key)].append(((trans_payload.get("n_samples") or {}).get("mean")))
+                for bin_key, bin_vals in ((trans_payload.get("bins") or {}).items()):
+                    for metric, metric_stats in (bin_vals or {}).items():
+                        grouped[str(alpha_key)][str(trans_key)][str(bin_key)][str(metric)].append((metric_stats or {}).get("mean"))
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        out[alpha_key] = {}
+        for trans_key in sorted(grouped[alpha_key].keys(), key=lambda x: tuple(int(p) for p in str(x).split("->"))):
+            out[alpha_key][trans_key] = {
+                "n_samples": _stats(sample_counts[alpha_key][trans_key]),
+                "bins": {
+                    bin_key: {
+                        metric: _stats(values)
+                        for metric, values in grouped[alpha_key][trans_key][bin_key].items()
+                    }
+                    for bin_key in sorted(grouped[alpha_key][trans_key].keys())
+                },
+            }
     return out
 
 
@@ -470,6 +530,36 @@ def _build_markdown(report: Dict[str, Any]) -> str:
             else:
                 lines.append(f"- stage `{stage_id}`")
         lines.append("")
+    rel_bins = report.get("reliability_bin_summary") or {}
+    if rel_bins:
+        lines.extend([
+            "## Reliability Bins",
+            "",
+        ])
+        for alpha_key, alpha_payload in sorted(rel_bins.items(), key=lambda kv: _float_key(kv[0])):
+            stage_payload = (alpha_payload or {}).get("1") or {}
+            bins_payload = stage_payload.get("bins") or {}
+            if bins_payload:
+                lines.append(f"- alpha `{alpha_key}` stage `1` bins available: {', '.join(sorted(bins_payload.keys()))}")
+        lines.append("")
+    pct_bins = report.get("percentile_bin_gain_summary") or {}
+    if pct_bins:
+        lines.extend([
+            "## Percentile Bin Gains",
+            "",
+        ])
+        for alpha_key, alpha_payload in sorted(pct_bins.items(), key=lambda kv: _float_key(kv[0])):
+            trans_payload = (alpha_payload or {}).get("1->2") or {}
+            bins_payload = trans_payload.get("bins") or {}
+            if not bins_payload:
+                continue
+            row = bins_payload.get("00-10") or {}
+            delta = ((row.get("delta_acc") or {}).get("mean", float("nan")))
+            if math.isfinite(_safe_float(delta)):
+                lines.append(f"- alpha `{alpha_key}` | `1->2` bottom decile delta={float(delta):.4f}")
+            else:
+                lines.append(f"- alpha `{alpha_key}` | `1->2` bins available")
+        lines.append("")
     learned = report.get("cyclic_learned_summary") or {}
     if learned:
         lines.extend([
@@ -559,7 +649,9 @@ def main() -> None:
         },
         "overview": _aggregate_overview(reports),
         "stage_metric_summary": _aggregate_stage_metrics(reports),
+        "reliability_bin_summary": _aggregate_reliability_bins(reports),
         "transition_summary": _aggregate_transition_metrics(reports),
+        "percentile_bin_gain_summary": _aggregate_percentile_bin_gains(reports),
         "stage1_reference_summary": _aggregate_stage1_reference(reports),
         "adaptive_point_summary": _aggregate_adaptive_points(reports),
         "points_payload_selection_summary": _aggregate_curve_points(reports),

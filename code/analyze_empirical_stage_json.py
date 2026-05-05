@@ -165,6 +165,159 @@ def _record_key(subject: Any, run_idx: Any, alpha: Any) -> Tuple[str, int, str]:
     return (str(subject), int(run_idx), _normalize_alpha(alpha))
 
 
+def _collect_stage_arrays(trajectories: List[Dict[str, Any]]) -> Dict[int, Dict[str, np.ndarray]]:
+    by_stage: Dict[int, Dict[str, np.ndarray]] = {}
+    sample_count = len(trajectories)
+    for sample_idx, row in enumerate(trajectories):
+        stages = [int(x) for x in (row.get("decision_stages") or [])]
+        confs = np.asarray(row.get("conf_by_stage") or [], dtype=np.float64)
+        corrs = np.asarray(row.get("correct_by_stage") or [], dtype=np.float64)
+        true_probs = np.asarray(row.get("true_prob_by_stage") or [], dtype=np.float64)
+        preds = np.asarray(row.get("pred_by_stage") or [], dtype=np.float64)
+        for idx, stage_id in enumerate(stages):
+            if stage_id not in by_stage:
+                by_stage[stage_id] = {
+                    "conf": np.full((sample_count,), np.nan, dtype=np.float64),
+                    "corr": np.full((sample_count,), np.nan, dtype=np.float64),
+                    "true_prob": np.full((sample_count,), np.nan, dtype=np.float64),
+                    "pred": np.full((sample_count,), np.nan, dtype=np.float64),
+                }
+            if idx < confs.shape[0]:
+                by_stage[stage_id]["conf"][sample_idx] = float(confs[idx])
+            if idx < corrs.shape[0]:
+                by_stage[stage_id]["corr"][sample_idx] = float(corrs[idx])
+            if idx < true_probs.shape[0]:
+                by_stage[stage_id]["true_prob"][sample_idx] = float(true_probs[idx])
+            if idx < preds.shape[0]:
+                by_stage[stage_id]["pred"][sample_idx] = float(preds[idx])
+    return by_stage
+
+
+def _reliability_bin_summary(trajectories: List[Dict[str, Any]], n_bins: int = 10) -> Dict[str, Any]:
+    if not trajectories:
+        return {}
+    by_stage = _collect_stage_arrays(trajectories)
+    edges = np.linspace(0.0, 1.0, int(max(2, n_bins)) + 1, dtype=np.float64)
+    out: Dict[str, Any] = {}
+    for stage_id in sorted(by_stage.keys()):
+        conf = np.asarray(by_stage[stage_id]["conf"], dtype=np.float64)
+        corr = np.asarray(by_stage[stage_id]["corr"], dtype=np.float64)
+        valid = np.isfinite(conf) & np.isfinite(corr)
+        conf = conf[valid]
+        corr = corr[valid]
+        n = int(conf.size)
+        if n == 0:
+            continue
+        bins_payload: Dict[str, Any] = {}
+        for bin_idx in range(len(edges) - 1):
+            lo = float(edges[bin_idx])
+            hi = float(edges[bin_idx + 1])
+            if bin_idx == len(edges) - 2:
+                mask = (conf >= lo) & (conf <= hi)
+            else:
+                mask = (conf >= lo) & (conf < hi)
+            label = f"{int(round(lo * 100)):02d}-{int(round(hi * 100)):02d}"
+            count = int(np.sum(mask))
+            if count == 0:
+                bins_payload[label] = {
+                    "count": 0,
+                    "ratio": 0.0,
+                    "acc": float("nan"),
+                    "avg_conf": float("nan"),
+                    "gap": float("nan"),
+                }
+                continue
+            acc_b = float(np.mean(corr[mask]))
+            conf_b = float(np.mean(conf[mask]))
+            bins_payload[label] = {
+                "count": count,
+                "ratio": float(count / n),
+                "acc": acc_b,
+                "avg_conf": conf_b,
+                "gap": float(acc_b - conf_b),
+            }
+        out[str(stage_id)] = {
+            "n_samples": n,
+            "bin_edges": [float(x) for x in edges.tolist()],
+            "bins": bins_payload,
+        }
+    return out
+
+
+def _percentile_bin_gain_summary(trajectories: List[Dict[str, Any]], n_bins: int = 10) -> Dict[str, Any]:
+    if not trajectories:
+        return {}
+    by_stage = _collect_stage_arrays(trajectories)
+    ordered_stages = sorted(by_stage.keys())
+    out: Dict[str, Any] = {}
+    quantiles = np.linspace(0.0, 1.0, int(max(2, n_bins)) + 1, dtype=np.float64)
+    for prev_stage, next_stage in zip(ordered_stages[:-1], ordered_stages[1:]):
+        conf_prev = np.asarray(by_stage[prev_stage]["conf"], dtype=np.float64)
+        corr_prev = np.asarray(by_stage[prev_stage]["corr"], dtype=np.float64)
+        corr_next = np.asarray(by_stage[next_stage]["corr"], dtype=np.float64)
+        valid = np.isfinite(conf_prev) & np.isfinite(corr_prev) & np.isfinite(corr_next)
+        conf_prev = conf_prev[valid]
+        corr_prev = corr_prev[valid]
+        corr_next = corr_next[valid]
+        if conf_prev.size == 0:
+            continue
+        cut_vals = np.quantile(conf_prev, quantiles)
+        trans_key = f"{int(prev_stage)}->{int(next_stage)}"
+        bins_payload: Dict[str, Any] = {}
+        for bin_idx in range(len(quantiles) - 1):
+            q_lo = float(quantiles[bin_idx])
+            q_hi = float(quantiles[bin_idx + 1])
+            th_lo = float(cut_vals[bin_idx])
+            th_hi = float(cut_vals[bin_idx + 1])
+            if bin_idx == len(quantiles) - 2:
+                mask = (conf_prev >= th_lo) & (conf_prev <= th_hi)
+            else:
+                mask = (conf_prev >= th_lo) & (conf_prev < th_hi)
+            label = f"{int(round(q_lo * 100)):02d}-{int(round(q_hi * 100)):02d}"
+            count = int(np.sum(mask))
+            if count == 0:
+                bins_payload[label] = {
+                    "count": 0,
+                    "ratio": 0.0,
+                    "threshold_lo": th_lo,
+                    "threshold_hi": th_hi,
+                    "avg_conf_from": float("nan"),
+                    "acc_from": float("nan"),
+                    "acc_to": float("nan"),
+                    "delta_acc": float("nan"),
+                    "w2c_count": 0,
+                    "c2w_count": 0,
+                    "w2c": float("nan"),
+                    "c2w": float("nan"),
+                }
+                continue
+            c_prev = corr_prev[mask]
+            c_next = corr_next[mask]
+            conf_bin = conf_prev[mask]
+            w2c_mask = (c_prev < 0.5) & (c_next >= 0.5)
+            c2w_mask = (c_prev >= 0.5) & (c_next < 0.5)
+            bins_payload[label] = {
+                "count": count,
+                "ratio": float(count / conf_prev.size),
+                "threshold_lo": th_lo,
+                "threshold_hi": th_hi,
+                "avg_conf_from": float(np.mean(conf_bin)),
+                "acc_from": float(np.mean(c_prev)),
+                "acc_to": float(np.mean(c_next)),
+                "delta_acc": float(np.mean(c_next - c_prev)),
+                "w2c_count": int(np.sum(w2c_mask)),
+                "c2w_count": int(np.sum(c2w_mask)),
+                "w2c": float(np.mean(w2c_mask.astype(np.float64))),
+                "c2w": float(np.mean(c2w_mask.astype(np.float64))),
+            }
+        out[trans_key] = {
+            "n_samples": int(conf_prev.size),
+            "percentile_edges": [float(x) for x in quantiles.tolist()],
+            "bins": bins_payload,
+        }
+    return out
+
+
 def _trajectory_top_tail_summary(
     trajectories: List[Dict[str, Any]],
     sweep_mode: str,
@@ -173,21 +326,7 @@ def _trajectory_top_tail_summary(
     grouped: Dict[str, Dict[str, Dict[str, float]]] = {}
     if not trajectories:
         return grouped
-    by_stage: Dict[int, Dict[str, np.ndarray]] = {}
-    sample_count = len(trajectories)
-    for sample_idx, row in enumerate(trajectories):
-        stages = [int(x) for x in (row.get("decision_stages") or [])]
-        confs = np.asarray(row.get("conf_by_stage") or [], dtype=np.float64)
-        corrs = np.asarray(row.get("correct_by_stage") or [], dtype=np.float64)
-        for idx, stage_id in enumerate(stages):
-            if stage_id not in by_stage:
-                by_stage[stage_id] = {
-                    "conf": np.full((sample_count,), np.nan, dtype=np.float64),
-                    "corr": np.full((sample_count,), np.nan, dtype=np.float64),
-                }
-            by_stage[stage_id]["conf"][sample_idx] = float(confs[idx])
-            by_stage[stage_id]["corr"][sample_idx] = float(corrs[idx])
-
+    by_stage = _collect_stage_arrays(trajectories)
     ordered_stages = sorted(by_stage.keys())
     sweep_mode_norm = str(sweep_mode or "percentile").strip().lower()
     if sweep_mode_norm not in {"percentile", "confidence"}:
@@ -479,6 +618,82 @@ def _summarize_stage1_reference(
             out[alpha_key][stage_key] = {
                 metric: _stats(values)
                 for metric, values in grouped[alpha_key][stage_key].items()
+            }
+    return out
+
+
+def _summarize_reliability_bins(
+    records: List[Dict[str, Any]],
+    trajectory_map: Dict[Tuple[str, int, str], List[Dict[str, Any]]],
+    n_bins: int = 10,
+) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    sample_counts: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for rec in records:
+        rec_key = _record_key(rec.get("subject"), rec.get("run_idx"), rec.get("alpha"))
+        traj_rows = trajectory_map.get(rec_key)
+        if not traj_rows:
+            continue
+        alpha_key = _normalize_alpha(rec.get("alpha"))
+        per_rec = _reliability_bin_summary(traj_rows, n_bins=n_bins)
+        for stage_key, stage_payload in per_rec.items():
+            sample_counts[alpha_key][stage_key].append(stage_payload.get("n_samples"))
+            for bin_key, bin_row in (stage_payload.get("bins") or {}).items():
+                for metric, val in bin_row.items():
+                    grouped[alpha_key][stage_key][bin_key][metric].append(val)
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        out[alpha_key] = {}
+        for stage_key in sorted(grouped[alpha_key].keys(), key=_float_key):
+            out[alpha_key][stage_key] = {
+                "n_samples": _stats(sample_counts[alpha_key][stage_key]),
+                "bins": {
+                    bin_key: {
+                        metric: _stats(values)
+                        for metric, values in grouped[alpha_key][stage_key][bin_key].items()
+                    }
+                    for bin_key in sorted(grouped[alpha_key][stage_key].keys())
+                },
+            }
+    return out
+
+
+def _summarize_percentile_bin_gains(
+    records: List[Dict[str, Any]],
+    trajectory_map: Dict[Tuple[str, int, str], List[Dict[str, Any]]],
+    n_bins: int = 10,
+) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    sample_counts: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for rec in records:
+        rec_key = _record_key(rec.get("subject"), rec.get("run_idx"), rec.get("alpha"))
+        traj_rows = trajectory_map.get(rec_key)
+        if not traj_rows:
+            continue
+        alpha_key = _normalize_alpha(rec.get("alpha"))
+        per_rec = _percentile_bin_gain_summary(traj_rows, n_bins=n_bins)
+        for trans_key, trans_payload in per_rec.items():
+            sample_counts[alpha_key][trans_key].append(trans_payload.get("n_samples"))
+            for bin_key, bin_row in (trans_payload.get("bins") or {}).items():
+                for metric, val in bin_row.items():
+                    grouped[alpha_key][trans_key][bin_key][metric].append(val)
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        out[alpha_key] = {}
+        for trans_key in sorted(grouped[alpha_key].keys(), key=lambda x: tuple(int(p) for p in x.split("->"))):
+            out[alpha_key][trans_key] = {
+                "n_samples": _stats(sample_counts[alpha_key][trans_key]),
+                "bins": {
+                    bin_key: {
+                        metric: _stats(values)
+                        for metric, values in grouped[alpha_key][trans_key][bin_key].items()
+                    }
+                    for bin_key in sorted(grouped[alpha_key][trans_key].keys())
+                },
             }
     return out
 
@@ -799,6 +1014,30 @@ def _build_markdown(report: Dict[str, Any]) -> str:
                 else f"- stage `{stage_id}`"
             )
         lines.append("")
+    rel_bins = report.get("reliability_bin_summary") or {}
+    if rel_bins:
+        lines.append("## Reliability Bins")
+        lines.append("")
+        for alpha_key, alpha_payload in sorted(rel_bins.items(), key=lambda kv: _float_key(kv[0])):
+            stage_payload = (alpha_payload or {}).get("1") or {}
+            bins_payload = stage_payload.get("bins") or {}
+            if not bins_payload:
+                continue
+            lines.append(f"- alpha `{alpha_key}` stage `1` bins available: {', '.join(sorted(bins_payload.keys()))}")
+        lines.append("")
+    pct_bins = report.get("percentile_bin_gain_summary") or {}
+    if pct_bins:
+        lines.append("## Percentile Bin Gains")
+        lines.append("")
+        for alpha_key, alpha_payload in sorted(pct_bins.items(), key=lambda kv: _float_key(kv[0])):
+            trans_payload = (alpha_payload or {}).get("1->2") or {}
+            bins_payload = trans_payload.get("bins") or {}
+            if not bins_payload:
+                continue
+            row = bins_payload.get("00-10") or {}
+            delta = ((row.get("delta_acc") or {}).get("mean", float("nan")))
+            lines.append(f"- alpha `{alpha_key}` | `1->2` bottom decile delta={delta:.4f}" if math.isfinite(_safe_float(delta)) else f"- alpha `{alpha_key}` | `1->2` bins available")
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -893,7 +1132,9 @@ def main() -> None:
         },
         "record_overview": _summarize_record_metadata(records),
         "stage_metric_summary": _summarize_stage_metrics(records),
+        "reliability_bin_summary": _summarize_reliability_bins(records, trajectory_map),
         "transition_summary": _summarize_transitions(records, trajectory_map=trajectory_map),
+        "percentile_bin_gain_summary": _summarize_percentile_bin_gains(records, trajectory_map),
         "stage1_reference_summary": _summarize_stage1_reference(records, trajectory_map),
         "adaptive_point_summary": _summarize_adaptive_points(records),
         "trajectory_summary": _summarize_trajectories(traj_paths),
