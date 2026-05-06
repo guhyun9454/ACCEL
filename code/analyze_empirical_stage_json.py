@@ -1501,6 +1501,32 @@ def _summarize_points_payload(points_path: Optional[str]) -> Dict[str, Any]:
     return out
 
 
+def _summarize_cyclic_curve(points_path: Optional[str]) -> Dict[str, Any]:
+    if not points_path or not os.path.exists(points_path):
+        return {}
+    payload = _load_json(points_path)
+    cyclic = (((payload.get("curves") or {}).get("cyclic")) or {})
+    if not cyclic:
+        return {}
+    fracs = list(cyclic.get("fraction") or [])
+    costs = list(cyclic.get("cost") or [])
+    accs = list(cyclic.get("acc") or [])
+    rstds = list(cyclic.get("recall_std") or [])
+    points: Dict[str, Any] = {}
+    for idx, frac in enumerate(fracs):
+        frac_key = f"{int(round(_safe_float(frac)))}"
+        points[frac_key] = {
+            "fraction": _safe_float(frac),
+            "cost": _safe_float(costs[idx]) if idx < len(costs) else float("nan"),
+            "acc": _safe_float(accs[idx]) if idx < len(accs) else float("nan"),
+            "recall_std": _safe_float(rstds[idx]) if idx < len(rstds) else float("nan"),
+        }
+    return {
+        "path": points_path,
+        "points": points,
+    }
+
+
 def _find_baseline_transition_files(results_dir: str, task: str, result_tag: Optional[str]) -> List[Tuple[str, str, str]]:
     parent_dir = os.path.dirname(os.path.abspath(results_dir))
     base_name = os.path.basename(os.path.abspath(results_dir))
@@ -1707,6 +1733,20 @@ def _build_markdown(report: Dict[str, Any]) -> str:
             f"`w2c`: {((baseline.get('w2c') or {}).get('mean', float('nan'))):.4f}, "
             f"`c2w`: {((baseline.get('c2w') or {}).get('mean', float('nan'))):.4f}"
         )
+        lines.append("")
+
+    cyclic_curve = report.get("cyclic_curve_summary") or {}
+    cyclic_points = cyclic_curve.get("points") or {}
+    if cyclic_points:
+        lines.append("## Cyclic Curve")
+        lines.append("")
+        for frac_key in sorted(cyclic_points.keys(), key=_float_key):
+            row = cyclic_points.get(frac_key) or {}
+            cost = _safe_float(row.get("cost"))
+            acc = _safe_float(row.get("acc"))
+            rstd = _safe_float(row.get("recall_std"))
+            if all(math.isfinite(x) for x in [cost, acc, rstd]):
+                lines.append(f"- `{frac_key}%`: cost={cost:.4f}, acc={acc:.4f}, rstd={rstd:.4f}")
         lines.append("")
 
     stage1_ref = report.get("stage1_reference_summary") or {}
@@ -1961,6 +2001,7 @@ def main() -> None:
         "adaptive_point_summary": _summarize_adaptive_points(records),
         "trajectory_summary": _summarize_trajectories(traj_paths),
         "points_payload_summary": _summarize_points_payload(points_path if os.path.exists(points_path) else None),
+        "cyclic_curve_summary": _summarize_cyclic_curve(points_path if os.path.exists(points_path) else None),
         "baseline_cyclic_transition": _summarize_baseline_cyclic_transition(results_dir, task, args.result_tag),
     }
     if args.analyze_cyclic_learned:

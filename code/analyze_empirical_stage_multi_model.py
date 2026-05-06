@@ -519,6 +519,42 @@ def _aggregate_curve_points(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _aggregate_cyclic_curve(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    per_model = []
+    for report in reports:
+        payload = report.get("cyclic_curve_summary") or {}
+        points = payload.get("points") or {}
+        if not points:
+            continue
+        model_name = str((report.get("metadata") or {}).get("model_name", ""))
+        model_row = {"model_name": model_name, "points": {}}
+        for frac_key, row in points.items():
+            model_row["points"][str(frac_key)] = {
+                "cost": _safe_float((row or {}).get("cost")),
+                "acc": _safe_float((row or {}).get("acc")),
+                "recall_std": _safe_float((row or {}).get("recall_std")),
+            }
+            for metric in ["cost", "acc", "recall_std"]:
+                val = _safe_float((row or {}).get(metric))
+                if math.isfinite(val):
+                    grouped[str(frac_key)][metric].append(val)
+        per_model.append(model_row)
+    if not per_model:
+        return {}
+    out_points: Dict[str, Any] = {}
+    for frac_key in sorted(grouped.keys(), key=_float_key):
+        out_points[frac_key] = {
+            metric: _stats(values)
+            for metric, values in grouped[frac_key].items()
+        }
+    return {
+        "n_models": int(len(per_model)),
+        "points": out_points,
+        "per_model": per_model,
+    }
+
+
 def _aggregate_cyclic_learned(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     model_rows = []
     total_selected = Counter()
@@ -639,6 +675,21 @@ def _build_markdown(report: Dict[str, Any]) -> str:
             f"`c2w`: {((baseline.get('c2w') or {}).get('mean', float('nan'))):.4f}",
             "",
         ])
+    cyclic_curve = report.get("cyclic_curve_summary") or {}
+    cyclic_points = cyclic_curve.get("points") or {}
+    if cyclic_points:
+        lines.extend([
+            "## Cyclic Curve",
+            "",
+        ])
+        for frac_key in sorted(cyclic_points.keys(), key=_float_key):
+            row = cyclic_points.get(frac_key) or {}
+            cost = ((row.get("cost") or {}).get("mean", float("nan")))
+            acc = ((row.get("acc") or {}).get("mean", float("nan")))
+            rstd = ((row.get("recall_std") or {}).get("mean", float("nan")))
+            if all(math.isfinite(_safe_float(x)) for x in [cost, acc, rstd]):
+                lines.append(f"- `{frac_key}%`: cost={float(cost):.4f}, acc={float(acc):.4f}, rstd={float(rstd):.4f}")
+        lines.append("")
     lines.extend([
         "## Stage Metrics",
         "",
@@ -871,6 +922,7 @@ def main() -> None:
         "ablation_summary": _aggregate_ablation_summary(reports),
         "adaptive_point_summary": _aggregate_adaptive_points(reports),
         "points_payload_selection_summary": _aggregate_curve_points(reports),
+        "cyclic_curve_summary": _aggregate_cyclic_curve(reports),
         "baseline_cyclic_transition": _aggregate_baseline_cyclic_transition(reports),
     }
     if args.include_cyclic_learned:
