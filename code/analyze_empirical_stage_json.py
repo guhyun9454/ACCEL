@@ -416,6 +416,7 @@ def _simulate_policy_stops_from_trajectories(
     stage_schedule: str = "flat",
     stage_gamma: float = 0.5,
     percentile_mode: str = "online",
+    max_stop_stage: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     rows = sorted(list(trajectories), key=lambda r: int(r.get("sample_pos", 0)))
     if not rows:
@@ -462,10 +463,15 @@ def _simulate_policy_stops_from_trajectories(
     for row in rows:
         confs = [float(x) for x in (row.get("conf_by_stage") or [])]
         stages = [int(x) for x in (row.get("decision_stages") or [])]
+        eligible_stages = [int(stage_id) for stage_id in stages if max_stop_stage is None or int(stage_id) <= int(max_stop_stage)]
+        if not eligible_stages:
+            eligible_stages = [int(stages[0])] if stages else [1]
         forced_prefix = bool(row.get("prefix_forced", False))
-        stop_stage = int(stages[-1])
+        stop_stage = int(eligible_stages[-1])
         if not forced_prefix:
             for local_idx, stage_id in enumerate(stages):
+                if max_stop_stage is not None and int(stage_id) > int(max_stop_stage):
+                    break
                 if sweep_mode_norm == "percentile":
                     if percentile_mode == "fixed_prefix":
                         thr = float(fixed_thresholds[int(stage_id) - 1])
@@ -497,6 +503,8 @@ def _simulate_policy_stops_from_trajectories(
         })
         if sweep_mode_norm == "percentile" and percentile_mode == "online":
             for local_idx, stage_id in enumerate(stages[: stop_local_idx + 1]):
+                if max_stop_stage is not None and int(stage_id) > int(max_stop_stage):
+                    break
                 histories[int(stage_id) - 1].append(float(confs[local_idx]))
     return out
 
@@ -942,6 +950,198 @@ def _summarize_adaptive_points(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 metric: _stats(values)
                 for metric, values in grouped[alpha_key][sweep_name].items()
             }
+    return out
+
+
+def _extract_stage_metric_row(
+    trajectories: List[Dict[str, Any]],
+    stage_id: int,
+    *,
+    ece_bins: int = 10,
+    eps: float = 1e-12,
+) -> Dict[str, float]:
+    by_stage = _collect_stage_arrays(trajectories)
+    payload = by_stage.get(int(stage_id))
+    if not payload:
+        return {
+            "n_samples": 0,
+            "acc": float("nan"),
+            "nll": float("nan"),
+            "ece": float("nan"),
+            "avg_conf": float("nan"),
+            "conf_correct": float("nan"),
+            "conf_wrong": float("nan"),
+            "cost": float(stage_id),
+        }
+    conf = np.asarray(payload["conf"], dtype=np.float64)
+    corr = np.asarray(payload["corr"], dtype=np.float64)
+    true_prob = np.asarray(payload["true_prob"], dtype=np.float64)
+    valid = np.isfinite(conf) & np.isfinite(corr) & np.isfinite(true_prob)
+    conf = conf[valid]
+    corr = corr[valid]
+    true_prob = true_prob[valid]
+    correct_mask = corr >= 0.5
+    wrong_mask = ~correct_mask
+    n = int(conf.size)
+    return {
+        "n_samples": n,
+        "acc": float(np.mean(corr)) if n > 0 else float("nan"),
+        "nll": float(np.mean(-np.log(np.clip(true_prob, eps, 1.0)))) if n > 0 else float("nan"),
+        "ece": _compute_ece(conf, corr, n_bins=ece_bins) if n > 0 else float("nan"),
+        "avg_conf": float(np.mean(conf)) if n > 0 else float("nan"),
+        "conf_correct": _masked_mean(conf, correct_mask),
+        "conf_wrong": _masked_mean(conf, wrong_mask),
+        "cost": float(stage_id),
+    }
+
+
+def _simulate_policy_overall_metrics(
+    trajectories: List[Dict[str, Any]],
+    *,
+    k: int,
+    sweep_mode: str,
+    sweep_value: float,
+    stage_schedule: str,
+    stage_gamma: float,
+    percentile_mode: str,
+    max_stop_stage: Optional[int] = None,
+    ece_bins: int = 10,
+    eps: float = 1e-12,
+) -> Dict[str, float]:
+    rows = sorted(list(trajectories), key=lambda r: int(r.get("sample_pos", 0)))
+    policy_rows = _simulate_policy_stops_from_trajectories(
+        rows,
+        k=k,
+        sweep_mode=sweep_mode,
+        sweep_value=float(sweep_value),
+        stage_schedule=stage_schedule,
+        stage_gamma=stage_gamma,
+        percentile_mode=percentile_mode,
+        max_stop_stage=max_stop_stage,
+    )
+    final_conf = []
+    final_corr = []
+    final_true_prob = []
+    stage_counts = Counter()
+    total_cost = 0.0
+    for row, prow in zip(rows, policy_rows):
+        stop_stage = int(prow["stop_stage"])
+        stop_local_idx = int(prow["stop_local_idx"])
+        conf_by_stage = row.get("conf_by_stage") or []
+        corr_by_stage = row.get("correct_by_stage") or []
+        true_prob_by_stage = row.get("true_prob_by_stage") or []
+        if stop_local_idx >= len(conf_by_stage) or stop_local_idx >= len(corr_by_stage) or stop_local_idx >= len(true_prob_by_stage):
+            continue
+        final_conf.append(float(conf_by_stage[stop_local_idx]))
+        final_corr.append(float(corr_by_stage[stop_local_idx]))
+        final_true_prob.append(float(true_prob_by_stage[stop_local_idx]))
+        stage_counts[int(stop_stage)] += 1
+        total_cost += float(stop_stage)
+    conf_arr = np.asarray(final_conf, dtype=np.float64)
+    corr_arr = np.asarray(final_corr, dtype=np.float64)
+    true_prob_arr = np.asarray(final_true_prob, dtype=np.float64)
+    n = int(conf_arr.size)
+    return {
+        "n_samples": n,
+        "acc": float(np.mean(corr_arr)) if n > 0 else float("nan"),
+        "nll": float(np.mean(-np.log(np.clip(true_prob_arr, eps, 1.0)))) if n > 0 else float("nan"),
+        "ece": _compute_ece(conf_arr, corr_arr, n_bins=ece_bins) if n > 0 else float("nan"),
+        "avg_conf": float(np.mean(conf_arr)) if n > 0 else float("nan"),
+        "cost": float(total_cost / n) if n > 0 else float("nan"),
+        "routing": {f"n_stage_{int(stage_id)}": int(count) for stage_id, count in sorted(stage_counts.items())},
+    }
+
+
+def _summarize_ablation_metrics(
+    records: List[Dict[str, Any]],
+    trajectory_map: Dict[Tuple[str, int, str], List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    routing_grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    sweep_key_by_alpha: Dict[str, str] = {}
+
+    for rec in records:
+        rec_key = _record_key(rec.get("subject"), rec.get("run_idx"), rec.get("alpha"))
+        traj_rows = trajectory_map.get(rec_key)
+        if not traj_rows:
+            continue
+        alpha_key = _normalize_alpha(rec.get("alpha"))
+        summary = rec.get("summary") or {}
+        sweep_mode = str(summary.get("sweep_mode", rec.get("sweep_mode", "percentile"))).strip().lower()
+        sweep_values = list(summary.get("sweep_values") or [])
+        k = int(summary.get("k", rec.get("k", 0)) or 0)
+        ece_bins = int(summary.get("ece_bins", 10) or 10)
+        if k <= 0:
+            continue
+        stage_schedule = str(rec.get("threshold_schedule", rec.get("stage_schedule", "flat")))
+        stage_gamma = float(rec.get("threshold_gamma", rec.get("stage_gamma", 0.5)) or 0.5)
+        percentile_mode = str(rec.get("percentile_mode", "online"))
+        ordered_stages = sorted({int(x) for row in traj_rows for x in (row.get("decision_stages") or [])})
+        if not ordered_stages:
+            continue
+        full_stage = int(ordered_stages[-1])
+        flip_stage = 2 if 2 in ordered_stages else int(full_stage)
+
+        always_flip = _extract_stage_metric_row(traj_rows, flip_stage, ece_bins=ece_bins)
+        always_full = _extract_stage_metric_row(traj_rows, full_stage, ece_bins=ece_bins)
+        for metric, val in always_flip.items():
+            if metric == "n_samples":
+                continue
+            grouped[alpha_key]["always_flip"][metric].append(val)
+        for metric, val in always_full.items():
+            if metric == "n_samples":
+                continue
+            grouped[alpha_key]["always_full"][metric].append(val)
+
+        if sweep_values:
+            sweep_key = "p" if sweep_mode == "percentile" else "confidence"
+            sweep_key_by_alpha[alpha_key] = sweep_key
+            for sweep_value in sweep_values:
+                point_key = f"{float(sweep_value):g}"
+                adaptive_flip_only = _simulate_policy_overall_metrics(
+                    traj_rows,
+                    k=k,
+                    sweep_mode=sweep_mode,
+                    sweep_value=float(sweep_value),
+                    stage_schedule=stage_schedule,
+                    stage_gamma=stage_gamma,
+                    percentile_mode=percentile_mode,
+                    max_stop_stage=flip_stage,
+                    ece_bins=ece_bins,
+                )
+                for metric, val in adaptive_flip_only.items():
+                    if metric in {"n_samples", "routing"}:
+                        continue
+                    grouped[alpha_key][f"adaptive_flip_only::{point_key}"][metric].append(val)
+                for rkey, rval in (adaptive_flip_only.get("routing") or {}).items():
+                    routing_grouped[alpha_key][f"adaptive_flip_only::{point_key}"][rkey].append(rval)
+
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        alpha_payload: Dict[str, Any] = {
+            "always_flip": {
+                metric: _stats(values)
+                for metric, values in grouped[alpha_key].get("always_flip", {}).items()
+            },
+            "always_full": {
+                metric: _stats(values)
+                for metric, values in grouped[alpha_key].get("always_full", {}).items()
+            },
+        }
+        adaptive_payload = {"sweep_key": sweep_key_by_alpha.get(alpha_key, "p"), "points": {}}
+        for bucket, metrics in grouped[alpha_key].items():
+            if not bucket.startswith("adaptive_flip_only::"):
+                continue
+            point_key = bucket.split("::", 1)[1]
+            row = {
+                metric: _stats(values)
+                for metric, values in metrics.items()
+            }
+            for rkey, rvals in routing_grouped[alpha_key].get(bucket, {}).items():
+                row[rkey] = _stats(rvals)
+            adaptive_payload["points"][point_key] = row
+        alpha_payload["adaptive_flip_only"] = adaptive_payload
+        out[alpha_key] = alpha_payload
     return out
 
 
@@ -1590,6 +1790,34 @@ def _build_markdown(report: Dict[str, Any]) -> str:
             if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece]):
                 lines.append(f"- alpha `{alpha_key}` | `{sweep_key}={focus_key}` overall_final acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
         lines.append("")
+    ablation = report.get("ablation_summary") or {}
+    if ablation:
+        lines.append("## Ablation")
+        lines.append("")
+        for alpha_key, alpha_payload in sorted(ablation.items(), key=lambda kv: _float_key(kv[0])):
+            lines.append(f"### alpha={alpha_key}")
+            for tag, label in (("always_flip", "Always Flip"), ("always_full", "Always Flip+Latin")):
+                row = alpha_payload.get(tag) or {}
+                acc = ((row.get("acc") or {}).get("mean", float("nan")))
+                nll = ((row.get("nll") or {}).get("mean", float("nan")))
+                ece = ((row.get("ece") or {}).get("mean", float("nan")))
+                cost = ((row.get("cost") or {}).get("mean", float("nan")))
+                if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost]):
+                    lines.append(f"- {label}: cost={float(cost):.4f}, acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
+            adaptive = alpha_payload.get("adaptive_flip_only") or {}
+            sweep_key = str(adaptive.get("sweep_key", "p"))
+            points = adaptive.get("points") or {}
+            if points:
+                focus_key = "80" if "80" in points else next(iter(sorted(points.keys(), key=_float_key)), None)
+                if focus_key is not None:
+                    row = points.get(focus_key) or {}
+                    acc = ((row.get("acc") or {}).get("mean", float("nan")))
+                    nll = ((row.get("nll") or {}).get("mean", float("nan")))
+                    ece = ((row.get("ece") or {}).get("mean", float("nan")))
+                    cost = ((row.get("cost") or {}).get("mean", float("nan")))
+                    if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost]):
+                        lines.append(f"- Adaptive Flip-Only (`{sweep_key}={focus_key}`): cost={float(cost):.4f}, acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
+            lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1691,6 +1919,7 @@ def main() -> None:
         "actual_policy_stage1_fourway_summary": _summarize_actual_policy_stage1_fourway(records, trajectory_map),
         "actual_policy_stage_metrics_summary": _summarize_actual_policy_stage_metrics(records, trajectory_map),
         "stage1_reference_summary": _summarize_stage1_reference(records, trajectory_map),
+        "ablation_summary": _summarize_ablation_metrics(records, trajectory_map),
         "adaptive_point_summary": _summarize_adaptive_points(records),
         "trajectory_summary": _summarize_trajectories(traj_paths),
         "points_payload_summary": _summarize_points_payload(points_path if os.path.exists(points_path) else None),

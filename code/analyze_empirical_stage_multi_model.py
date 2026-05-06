@@ -425,6 +425,46 @@ def _aggregate_adaptive_points(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+def _aggregate_ablation_summary(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    adaptive_grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    sweep_key_by_alpha: Dict[str, str] = {}
+    for report in reports:
+        payload = report.get("ablation_summary") or {}
+        for alpha_key, alpha_vals in payload.items():
+            for tag in ("always_flip", "always_full"):
+                row = (alpha_vals or {}).get(tag) or {}
+                for metric, metric_stats in row.items():
+                    grouped[str(alpha_key)][str(tag)][str(metric)].append((metric_stats or {}).get("mean"))
+            adaptive = (alpha_vals or {}).get("adaptive_flip_only") or {}
+            sweep_key_by_alpha[str(alpha_key)] = str(adaptive.get("sweep_key", sweep_key_by_alpha.get(str(alpha_key), "p")))
+            for point_key, point_vals in ((adaptive.get("points") or {}).items()):
+                for metric, metric_stats in (point_vals or {}).items():
+                    adaptive_grouped[str(alpha_key)][str(point_key)][str(metric)].append((metric_stats or {}).get("mean"))
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        alpha_payload: Dict[str, Any] = {}
+        for tag in ("always_flip", "always_full"):
+            alpha_payload[tag] = {
+                metric: _stats(values)
+                for metric, values in grouped[alpha_key].get(tag, {}).items()
+            }
+        alpha_payload["adaptive_flip_only"] = {
+            "sweep_key": sweep_key_by_alpha.get(alpha_key, "p"),
+            "points": {
+                point_key: {
+                    metric: _stats(values)
+                    for metric, values in adaptive_grouped[alpha_key][point_key].items()
+                }
+                for point_key in sorted(adaptive_grouped[alpha_key].keys(), key=_float_key)
+            },
+        }
+        out[alpha_key] = alpha_payload
+    return out
+
+
 def _aggregate_stage1_reference(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for report in reports:
@@ -700,6 +740,36 @@ def _build_markdown(report: Dict[str, Any]) -> str:
             if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece]):
                 lines.append(f"- alpha `{alpha_key}` | `{sweep_key}={focus_key}` overall_final acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
         lines.append("")
+    ablation = report.get("ablation_summary") or {}
+    if ablation:
+        lines.extend([
+            "## Ablation",
+            "",
+        ])
+        for alpha_key, alpha_payload in sorted(ablation.items(), key=lambda kv: _float_key(kv[0])):
+            lines.append(f"### alpha={alpha_key}")
+            for tag, label in (("always_flip", "Always Flip"), ("always_full", "Always Flip+Latin")):
+                row = alpha_payload.get(tag) or {}
+                acc = ((row.get("acc") or {}).get("mean", float("nan")))
+                nll = ((row.get("nll") or {}).get("mean", float("nan")))
+                ece = ((row.get("ece") or {}).get("mean", float("nan")))
+                cost = ((row.get("cost") or {}).get("mean", float("nan")))
+                if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost]):
+                    lines.append(f"- {label}: cost={float(cost):.4f}, acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
+            adaptive = alpha_payload.get("adaptive_flip_only") or {}
+            sweep_key = str(adaptive.get("sweep_key", "p"))
+            points = adaptive.get("points") or {}
+            if points:
+                focus_key = "80" if "80" in points else next(iter(sorted(points.keys(), key=_float_key)), None)
+                if focus_key is not None:
+                    row = points.get(focus_key) or {}
+                    acc = ((row.get("acc") or {}).get("mean", float("nan")))
+                    nll = ((row.get("nll") or {}).get("mean", float("nan")))
+                    ece = ((row.get("ece") or {}).get("mean", float("nan")))
+                    cost = ((row.get("cost") or {}).get("mean", float("nan")))
+                    if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost]):
+                        lines.append(f"- Adaptive Flip-Only (`{sweep_key}={focus_key}`): cost={float(cost):.4f}, acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
+            lines.append("")
     learned = report.get("cyclic_learned_summary") or {}
     if learned:
         lines.extend([
@@ -796,6 +866,7 @@ def main() -> None:
         "actual_policy_stage1_fourway_summary": _aggregate_actual_policy_stage1_fourway(reports),
         "actual_policy_stage_metrics_summary": _aggregate_actual_policy_stage_metrics(reports),
         "stage1_reference_summary": _aggregate_stage1_reference(reports),
+        "ablation_summary": _aggregate_ablation_summary(reports),
         "adaptive_point_summary": _aggregate_adaptive_points(reports),
         "points_payload_selection_summary": _aggregate_curve_points(reports),
         "baseline_cyclic_transition": _aggregate_baseline_cyclic_transition(reports),
