@@ -117,6 +117,32 @@ def _masked_mean(values: np.ndarray, mask: np.ndarray) -> float:
     return float(np.mean(vals[m]))
 
 
+def _compute_ece(confidences: np.ndarray, correct: np.ndarray, n_bins: int = 10) -> float:
+    conf = np.asarray(confidences, dtype=np.float64).ravel()
+    corr = np.asarray(correct, dtype=np.float64).ravel()
+    mask = np.isfinite(conf) & np.isfinite(corr)
+    if np.sum(mask) <= 0:
+        return float("nan")
+    conf = conf[mask]
+    corr = corr[mask]
+    n = float(conf.shape[0])
+    edges = np.linspace(0.0, 1.0, int(max(2, n_bins)) + 1, dtype=np.float64)
+    ece = 0.0
+    for bin_idx in range(len(edges) - 1):
+        lo = float(edges[bin_idx])
+        hi = float(edges[bin_idx + 1])
+        if bin_idx == len(edges) - 2:
+            bmask = (conf >= lo) & (conf <= hi)
+        else:
+            bmask = (conf >= lo) & (conf < hi)
+        if not np.any(bmask):
+            continue
+        acc_b = float(np.mean(corr[bmask]))
+        conf_b = float(np.mean(conf[bmask]))
+        ece += (float(np.sum(bmask)) / n) * abs(acc_b - conf_b)
+    return float(ece)
+
+
 def _normalize_alpha(alpha: Any) -> str:
     f = _safe_float(alpha)
     if not math.isfinite(f):
