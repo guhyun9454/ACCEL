@@ -427,8 +427,8 @@ def _aggregate_adaptive_points(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _aggregate_ablation_summary(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
-    adaptive_grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
-        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    adaptive_grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(list))
     )
     sweep_key_by_alpha: Dict[str, str] = {}
     for report in reports:
