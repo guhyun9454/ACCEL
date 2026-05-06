@@ -378,6 +378,32 @@ def _aggregate_actual_policy_stage1_fourway(reports: List[Dict[str, Any]]) -> Di
     return out
 
 
+def _aggregate_actual_policy_stage_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    sweep_key_by_alpha: Dict[str, str] = {}
+    for report in reports:
+        payload = report.get("actual_policy_stage_metrics_summary") or {}
+        for alpha_key, alpha_vals in payload.items():
+            sweep_key_by_alpha[str(alpha_key)] = str((alpha_vals or {}).get("sweep_key", "p"))
+            for point_key, point_payload in ((alpha_vals or {}).get("points") or {}).items():
+                for stage_key, stage_vals in (point_payload or {}).items():
+                    for metric, metric_stats in (stage_vals or {}).items():
+                        grouped[str(alpha_key)][str(point_key)][str(stage_key)][str(metric)].append((metric_stats or {}).get("mean"))
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        out[alpha_key] = {"sweep_key": sweep_key_by_alpha.get(alpha_key, "p"), "points": {}}
+        for point_key in sorted(grouped[alpha_key].keys(), key=_float_key):
+            out[alpha_key]["points"][point_key] = {}
+            for stage_key in sorted(grouped[alpha_key][point_key].keys(), key=lambda x: (x != "overall_final", _float_key(x))):
+                out[alpha_key]["points"][point_key][stage_key] = {
+                    metric: _stats(values)
+                    for metric, values in grouped[alpha_key][point_key][stage_key].items()
+                }
+    return out
+
+
 def _aggregate_adaptive_points(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     sweep_key_by_alpha: Dict[str, str] = {}
@@ -653,6 +679,27 @@ def _build_markdown(report: Dict[str, Any]) -> str:
             else:
                 lines.append(f"- alpha `{alpha_key}` | `{sweep_key}={focus_key}` routed summary available")
         lines.append("")
+    policy_stage = report.get("actual_policy_stage_metrics_summary") or {}
+    if policy_stage:
+        lines.extend([
+            "## Actual Policy Stage Metrics",
+            "",
+        ])
+        for alpha_key, alpha_payload in sorted(policy_stage.items(), key=lambda kv: _float_key(kv[0])):
+            sweep_key = str((alpha_payload or {}).get("sweep_key", "p"))
+            points = (alpha_payload or {}).get("points") or {}
+            if not points:
+                continue
+            focus_key = "80" if "80" in points else next(iter(sorted(points.keys(), key=_float_key)), None)
+            if focus_key is None:
+                continue
+            overall = ((points.get(focus_key) or {}).get("overall_final") or {})
+            acc = ((overall.get("acc") or {}).get("mean", float("nan")))
+            nll = ((overall.get("nll") or {}).get("mean", float("nan")))
+            ece = ((overall.get("ece") or {}).get("mean", float("nan")))
+            if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece]):
+                lines.append(f"- alpha `{alpha_key}` | `{sweep_key}={focus_key}` overall_final acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
+        lines.append("")
     learned = report.get("cyclic_learned_summary") or {}
     if learned:
         lines.extend([
@@ -747,6 +794,7 @@ def main() -> None:
         "transition_summary": _aggregate_transition_metrics(reports),
         "percentile_bin_gain_summary": _aggregate_percentile_bin_gains(reports),
         "actual_policy_stage1_fourway_summary": _aggregate_actual_policy_stage1_fourway(reports),
+        "actual_policy_stage_metrics_summary": _aggregate_actual_policy_stage_metrics(reports),
         "stage1_reference_summary": _aggregate_stage1_reference(reports),
         "adaptive_point_summary": _aggregate_adaptive_points(reports),
         "points_payload_selection_summary": _aggregate_curve_points(reports),
