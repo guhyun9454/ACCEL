@@ -231,6 +231,39 @@ def _aggregate_reliability_bins(reports: List[Dict[str, Any]]) -> Dict[str, Any]
     return out
 
 
+def _aggregate_percentile_reliability(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    sample_counts: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    ece_grouped: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for report in reports:
+        payload = report.get("percentile_reliability_summary") or {}
+        for alpha_key, alpha_vals in payload.items():
+            for stage_key, stage_payload in (alpha_vals or {}).items():
+                sample_counts[str(alpha_key)][str(stage_key)].append(((stage_payload.get("n_samples") or {}).get("mean")))
+                ece_grouped[str(alpha_key)][str(stage_key)].append(((stage_payload.get("ece") or {}).get("mean")))
+                for bin_key, bin_vals in ((stage_payload.get("bins") or {}).items()):
+                    for metric, metric_stats in (bin_vals or {}).items():
+                        grouped[str(alpha_key)][str(stage_key)][str(bin_key)][str(metric)].append((metric_stats or {}).get("mean"))
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        out[alpha_key] = {}
+        for stage_key in sorted(grouped[alpha_key].keys(), key=_float_key):
+            out[alpha_key][stage_key] = {
+                "n_samples": _stats(sample_counts[alpha_key][stage_key]),
+                "ece": _stats(ece_grouped[alpha_key][stage_key]),
+                "bins": {
+                    bin_key: {
+                        metric: _stats(values)
+                        for metric, values in grouped[alpha_key][stage_key][bin_key].items()
+                    }
+                    for bin_key in sorted(grouped[alpha_key][stage_key].keys())
+                },
+            }
+    return out
+
+
 def _aggregate_transition_metrics(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     thresh_grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
@@ -316,6 +349,32 @@ def _aggregate_percentile_bin_gains(reports: List[Dict[str, Any]]) -> Dict[str, 
                     for bin_key in sorted(grouped[alpha_key][trans_key].keys())
                 },
             }
+    return out
+
+
+def _aggregate_actual_policy_stage1_fourway(reports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    sweep_key_by_alpha: Dict[str, str] = {}
+    for report in reports:
+        payload = report.get("actual_policy_stage1_fourway_summary") or {}
+        for alpha_key, alpha_vals in payload.items():
+            sweep_key_by_alpha[str(alpha_key)] = str((alpha_vals or {}).get("sweep_key", "p"))
+            for point_key, point_payload in ((alpha_vals or {}).get("points") or {}).items():
+                for trans_key, trans_vals in (point_payload or {}).items():
+                    for metric, metric_stats in (trans_vals or {}).items():
+                        grouped[str(alpha_key)][str(point_key)][str(trans_key)][str(metric)].append((metric_stats or {}).get("mean"))
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        out[alpha_key] = {"sweep_key": sweep_key_by_alpha.get(alpha_key, "p"), "points": {}}
+        for point_key in sorted(grouped[alpha_key].keys(), key=_float_key):
+            out[alpha_key]["points"][point_key] = {}
+            for trans_key in sorted(grouped[alpha_key][point_key].keys(), key=lambda x: tuple(int(p) for p in str(x).split("->"))):
+                out[alpha_key]["points"][point_key][trans_key] = {
+                    metric: _stats(values)
+                    for metric, values in grouped[alpha_key][point_key][trans_key].items()
+                }
     return out
 
 
@@ -542,6 +601,18 @@ def _build_markdown(report: Dict[str, Any]) -> str:
             if bins_payload:
                 lines.append(f"- alpha `{alpha_key}` stage `1` bins available: {', '.join(sorted(bins_payload.keys()))}")
         lines.append("")
+    pct_rel = report.get("percentile_reliability_summary") or {}
+    if pct_rel:
+        lines.extend([
+            "## Percentile Reliability",
+            "",
+        ])
+        for alpha_key, alpha_payload in sorted(pct_rel.items(), key=lambda kv: _float_key(kv[0])):
+            stage_payload = (alpha_payload or {}).get("1") or {}
+            ece = ((stage_payload.get("ece") or {}).get("mean", float("nan")))
+            if math.isfinite(_safe_float(ece)):
+                lines.append(f"- alpha `{alpha_key}` stage `1` percentile-bin ece={float(ece):.4f}")
+        lines.append("")
     pct_bins = report.get("percentile_bin_gain_summary") or {}
     if pct_bins:
         lines.extend([
@@ -559,6 +630,28 @@ def _build_markdown(report: Dict[str, Any]) -> str:
                 lines.append(f"- alpha `{alpha_key}` | `1->2` bottom decile delta={float(delta):.4f}")
             else:
                 lines.append(f"- alpha `{alpha_key}` | `1->2` bins available")
+        lines.append("")
+    routed = report.get("actual_policy_stage1_fourway_summary") or {}
+    if routed:
+        lines.extend([
+            "## Actual Routed Stage1 Four-Way",
+            "",
+        ])
+        for alpha_key, alpha_payload in sorted(routed.items(), key=lambda kv: _float_key(kv[0])):
+            sweep_key = str((alpha_payload or {}).get("sweep_key", "p"))
+            points = (alpha_payload or {}).get("points") or {}
+            if not points:
+                continue
+            focus_key = "80" if "80" in points else next(iter(sorted(points.keys(), key=_float_key)), None)
+            if focus_key is None:
+                continue
+            trans_row = ((points.get(focus_key) or {}).get("1->2") or {})
+            wc = ((trans_row.get("wc") or {}).get("mean", float("nan")))
+            cw = ((trans_row.get("cw") or {}).get("mean", float("nan")))
+            if all(math.isfinite(_safe_float(x)) for x in [wc, cw]):
+                lines.append(f"- alpha `{alpha_key}` | `{sweep_key}={focus_key}` `1->2` wc={float(wc):.4f}, cw={float(cw):.4f}")
+            else:
+                lines.append(f"- alpha `{alpha_key}` | `{sweep_key}={focus_key}` routed summary available")
         lines.append("")
     learned = report.get("cyclic_learned_summary") or {}
     if learned:
@@ -650,8 +743,10 @@ def main() -> None:
         "overview": _aggregate_overview(reports),
         "stage_metric_summary": _aggregate_stage_metrics(reports),
         "reliability_bin_summary": _aggregate_reliability_bins(reports),
+        "percentile_reliability_summary": _aggregate_percentile_reliability(reports),
         "transition_summary": _aggregate_transition_metrics(reports),
         "percentile_bin_gain_summary": _aggregate_percentile_bin_gains(reports),
+        "actual_policy_stage1_fourway_summary": _aggregate_actual_policy_stage1_fourway(reports),
         "stage1_reference_summary": _aggregate_stage1_reference(reports),
         "adaptive_point_summary": _aggregate_adaptive_points(reports),
         "points_payload_selection_summary": _aggregate_curve_points(reports),

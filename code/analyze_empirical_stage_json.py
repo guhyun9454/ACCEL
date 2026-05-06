@@ -318,6 +318,244 @@ def _percentile_bin_gain_summary(trajectories: List[Dict[str, Any]], n_bins: int
     return out
 
 
+def _percentile_reliability_summary(trajectories: List[Dict[str, Any]], n_bins: int = 10) -> Dict[str, Any]:
+    if not trajectories:
+        return {}
+    by_stage = _collect_stage_arrays(trajectories)
+    quantiles = np.linspace(0.0, 1.0, int(max(2, n_bins)) + 1, dtype=np.float64)
+    out: Dict[str, Any] = {}
+    for stage_id in sorted(by_stage.keys()):
+        conf = np.asarray(by_stage[stage_id]["conf"], dtype=np.float64)
+        corr = np.asarray(by_stage[stage_id]["corr"], dtype=np.float64)
+        valid = np.isfinite(conf) & np.isfinite(corr)
+        conf = conf[valid]
+        corr = corr[valid]
+        n = int(conf.size)
+        if n == 0:
+            continue
+        cut_vals = np.quantile(conf, quantiles)
+        bins_payload: Dict[str, Any] = {}
+        ece_val = 0.0
+        for bin_idx in range(len(quantiles) - 1):
+            q_lo = float(quantiles[bin_idx])
+            q_hi = float(quantiles[bin_idx + 1])
+            th_lo = float(cut_vals[bin_idx])
+            th_hi = float(cut_vals[bin_idx + 1])
+            if bin_idx == len(quantiles) - 2:
+                mask = (conf >= th_lo) & (conf <= th_hi)
+            else:
+                mask = (conf >= th_lo) & (conf < th_hi)
+            label = f"{int(round(q_lo * 100)):02d}-{int(round(q_hi * 100)):02d}"
+            count = int(np.sum(mask))
+            if count == 0:
+                bins_payload[label] = {
+                    "count": 0,
+                    "ratio": 0.0,
+                    "threshold_lo": th_lo,
+                    "threshold_hi": th_hi,
+                    "acc": float("nan"),
+                    "avg_conf": float("nan"),
+                    "gap": float("nan"),
+                }
+                continue
+            acc_b = float(np.mean(corr[mask]))
+            conf_b = float(np.mean(conf[mask]))
+            ratio = float(count / n)
+            gap = float(acc_b - conf_b)
+            ece_val += ratio * abs(gap)
+            bins_payload[label] = {
+                "count": count,
+                "ratio": ratio,
+                "threshold_lo": th_lo,
+                "threshold_hi": th_hi,
+                "acc": acc_b,
+                "avg_conf": conf_b,
+                "gap": gap,
+            }
+        out[str(stage_id)] = {
+            "n_samples": n,
+            "ece": float(ece_val),
+            "percentile_edges": [float(x) for x in quantiles.tolist()],
+            "bins": bins_payload,
+        }
+    return out
+
+
+def _simulate_policy_stops_from_trajectories(
+    trajectories: List[Dict[str, Any]],
+    *,
+    k: int,
+    sweep_mode: str,
+    sweep_value: float,
+    stage_schedule: str = "flat",
+    stage_gamma: float = 0.5,
+    percentile_mode: str = "online",
+) -> List[Dict[str, Any]]:
+    rows = sorted(list(trajectories), key=lambda r: int(r.get("sample_pos", 0)))
+    if not rows:
+        return []
+    max_stage = max(
+        max([int(x) for x in (row.get("decision_stages") or [1])])
+        for row in rows
+    )
+    stage_schedule = str(stage_schedule or "flat").strip().lower()
+    if stage_schedule not in {"flat", "sqrt"}:
+        stage_schedule = "flat"
+    percentile_mode = str(percentile_mode or "online").strip().lower()
+    if percentile_mode not in {"online", "fixed_prefix"}:
+        percentile_mode = "online"
+    gamma = float(stage_gamma) if np.isfinite(float(stage_gamma)) and float(stage_gamma) > 0.0 else 0.5
+    histories: List[List[float]] = [[] for _ in range(int(max_stage))]
+    fixed_thresholds: List[float] = [0.0 for _ in range(int(max_stage))]
+    sweep_mode_norm = str(sweep_mode or "percentile").strip().lower()
+    if sweep_mode_norm not in {"percentile", "confidence"}:
+        sweep_mode_norm = "percentile"
+
+    if sweep_mode_norm == "percentile" and percentile_mode == "fixed_prefix":
+        fixed_histories: List[List[float]] = [[] for _ in range(int(max_stage))]
+        for row in rows:
+            if not bool(row.get("prefix_forced", False)):
+                continue
+            confs = [float(x) for x in (row.get("conf_by_stage") or [])]
+            stages = [int(x) for x in (row.get("decision_stages") or [])]
+            if len(confs) != len(stages):
+                continue
+            for local_idx, stage_id in enumerate(stages):
+                fixed_histories[int(stage_id) - 1].append(float(confs[local_idx]))
+        for stage_idx in range(int(max_stage)):
+            stage_id = stage_idx + 1
+            if stage_schedule == "sqrt":
+                stage_value = float(sweep_value) / (float(stage_id) ** gamma)
+            else:
+                stage_value = float(sweep_value)
+            q = max(0.0, min(1.0, stage_value / 100.0))
+            hist = fixed_histories[stage_idx]
+            fixed_thresholds[stage_idx] = float(np.quantile(np.asarray(hist, dtype=np.float64), q)) if hist else 0.0
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        confs = [float(x) for x in (row.get("conf_by_stage") or [])]
+        stages = [int(x) for x in (row.get("decision_stages") or [])]
+        forced_prefix = bool(row.get("prefix_forced", False))
+        stop_stage = int(stages[-1])
+        if not forced_prefix:
+            for local_idx, stage_id in enumerate(stages):
+                if sweep_mode_norm == "percentile":
+                    if percentile_mode == "fixed_prefix":
+                        thr = float(fixed_thresholds[int(stage_id) - 1])
+                    else:
+                        hist = histories[int(stage_id) - 1]
+                        if stage_schedule == "sqrt":
+                            stage_value = float(sweep_value) / (float(stage_id) ** gamma)
+                        else:
+                            stage_value = float(sweep_value)
+                        q = max(0.0, min(1.0, stage_value / 100.0))
+                        thr = float(np.quantile(np.asarray(hist, dtype=np.float64), q)) if hist else 0.0
+                else:
+                    base_tau = float(sweep_value)
+                    if stage_schedule == "sqrt":
+                        chance = 1.0 / float(k)
+                        thr = chance + (base_tau - chance) / (float(stage_id) ** gamma)
+                    else:
+                        thr = base_tau
+                    thr = max(0.0, min(1.0, float(thr)))
+                if float(confs[local_idx]) >= thr:
+                    stop_stage = int(stage_id)
+                    break
+        stop_local_idx = stages.index(int(stop_stage))
+        out.append({
+            "sample_pos": int(row.get("sample_pos", len(out))),
+            "sample_id": int(row.get("sample_id", len(out))),
+            "stop_stage": int(stop_stage),
+            "stop_local_idx": int(stop_local_idx),
+        })
+        if sweep_mode_norm == "percentile" and percentile_mode == "online":
+            for local_idx, stage_id in enumerate(stages[: stop_local_idx + 1]):
+                histories[int(stage_id) - 1].append(float(confs[local_idx]))
+    return out
+
+
+def _actual_routed_stage1_fourway_summary(
+    trajectories: List[Dict[str, Any]],
+    *,
+    k: int,
+    sweep_mode: str,
+    sweep_values: List[float],
+    stage_schedule: str = "flat",
+    stage_gamma: float = 0.5,
+    percentile_mode: str = "online",
+) -> Dict[str, Any]:
+    if not trajectories:
+        return {}
+    rows = sorted(list(trajectories), key=lambda r: int(r.get("sample_pos", 0)))
+    stage_maps: List[Dict[int, int]] = []
+    for row in rows:
+        stages = [int(x) for x in (row.get("decision_stages") or [])]
+        corrs = [int(x) for x in (row.get("correct_by_stage") or [])]
+        stage_maps.append({int(stage_id): int(corrs[idx]) for idx, stage_id in enumerate(stages) if idx < len(corrs)})
+    ordered_stages = sorted({stage_id for row in rows for stage_id in (row.get("decision_stages") or [])})
+    if 1 not in ordered_stages:
+        return {}
+    sweep_mode_norm = str(sweep_mode or "percentile").strip().lower()
+    if sweep_mode_norm not in {"percentile", "confidence"}:
+        sweep_mode_norm = "percentile"
+    out: Dict[str, Any] = {"sweep_key": "p" if sweep_mode_norm == "percentile" else "confidence", "points": {}}
+    for sweep_value in sweep_values:
+        policy_rows = _simulate_policy_stops_from_trajectories(
+            rows,
+            k=k,
+            sweep_mode=sweep_mode_norm,
+            sweep_value=float(sweep_value),
+            stage_schedule=stage_schedule,
+            stage_gamma=stage_gamma,
+            percentile_mode=percentile_mode,
+        )
+        point_key = f"{float(sweep_value):g}"
+        point_payload: Dict[str, Any] = {}
+        for prev_stage, next_stage in zip(ordered_stages[:-1], ordered_stages[1:]):
+            routed_indices = [i for i, prow in enumerate(policy_rows) if int(prow["stop_stage"]) > int(prev_stage)]
+            if not routed_indices:
+                point_payload[f"{int(prev_stage)}->{int(next_stage)}"] = {
+                    "n_routed": 0,
+                    "routed_ratio": 0.0,
+                    "cc_count": 0,
+                    "wc_count": 0,
+                    "ww_count": 0,
+                    "cw_count": 0,
+                    "cc": float("nan"),
+                    "wc": float("nan"),
+                    "ww": float("nan"),
+                    "cw": float("nan"),
+                }
+                continue
+            c1 = np.asarray([stage_maps[i].get(1, 0) for i in routed_indices], dtype=np.float64)
+            ct = np.asarray([stage_maps[i].get(int(next_stage), np.nan) for i in routed_indices], dtype=np.float64)
+            valid = np.isfinite(c1) & np.isfinite(ct)
+            c1 = c1[valid]
+            ct = ct[valid]
+            if c1.size == 0:
+                continue
+            cc_mask = (c1 >= 0.5) & (ct >= 0.5)
+            wc_mask = (c1 < 0.5) & (ct >= 0.5)
+            ww_mask = (c1 < 0.5) & (ct < 0.5)
+            cw_mask = (c1 >= 0.5) & (ct < 0.5)
+            denom = float(c1.size)
+            point_payload[f"{int(prev_stage)}->{int(next_stage)}"] = {
+                "n_routed": int(c1.size),
+                "routed_ratio": float(c1.size / len(rows)),
+                "cc_count": int(np.sum(cc_mask)),
+                "wc_count": int(np.sum(wc_mask)),
+                "ww_count": int(np.sum(ww_mask)),
+                "cw_count": int(np.sum(cw_mask)),
+                "cc": float(np.mean(cc_mask.astype(np.float64))),
+                "wc": float(np.mean(wc_mask.astype(np.float64))),
+                "ww": float(np.mean(ww_mask.astype(np.float64))),
+                "cw": float(np.mean(cw_mask.astype(np.float64))),
+            }
+        out["points"][point_key] = point_payload
+    return out
+
+
 def _trajectory_top_tail_summary(
     trajectories: List[Dict[str, Any]],
     sweep_mode: str,
@@ -698,6 +936,100 @@ def _summarize_percentile_bin_gains(
     return out
 
 
+def _summarize_percentile_reliability(
+    records: List[Dict[str, Any]],
+    trajectory_map: Dict[Tuple[str, int, str], List[Dict[str, Any]]],
+    n_bins: int = 10,
+) -> Dict[str, Any]:
+    grouped: Dict[str, Dict[str, Dict[str, Dict[str, List[float]]]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    )
+    ece_grouped: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    sample_counts: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for rec in records:
+        rec_key = _record_key(rec.get("subject"), rec.get("run_idx"), rec.get("alpha"))
+        traj_rows = trajectory_map.get(rec_key)
+        if not traj_rows:
+            continue
+        alpha_key = _normalize_alpha(rec.get("alpha"))
+        per_rec = _percentile_reliability_summary(traj_rows, n_bins=n_bins)
+        for stage_key, stage_payload in per_rec.items():
+            sample_counts[alpha_key][stage_key].append(stage_payload.get("n_samples"))
+            ece_grouped[alpha_key][stage_key].append(stage_payload.get("ece"))
+            for bin_key, bin_row in (stage_payload.get("bins") or {}).items():
+                for metric, val in bin_row.items():
+                    grouped[alpha_key][stage_key][bin_key][metric].append(val)
+    out: Dict[str, Any] = {}
+    for alpha_key in sorted(grouped.keys(), key=_float_key):
+        out[alpha_key] = {}
+        for stage_key in sorted(grouped[alpha_key].keys(), key=_float_key):
+            out[alpha_key][stage_key] = {
+                "n_samples": _stats(sample_counts[alpha_key][stage_key]),
+                "ece": _stats(ece_grouped[alpha_key][stage_key]),
+                "bins": {
+                    bin_key: {
+                        metric: _stats(values)
+                        for metric, values in grouped[alpha_key][stage_key][bin_key].items()
+                    }
+                    for bin_key in sorted(grouped[alpha_key][stage_key].keys())
+                },
+            }
+    return out
+
+
+def _summarize_actual_policy_stage1_fourway(
+    records: List[Dict[str, Any]],
+    trajectory_map: Dict[Tuple[str, int, str], List[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for rec in records:
+        rec_key = _record_key(rec.get("subject"), rec.get("run_idx"), rec.get("alpha"))
+        traj_rows = trajectory_map.get(rec_key)
+        if not traj_rows:
+            continue
+        alpha_key = _normalize_alpha(rec.get("alpha"))
+        summary = rec.get("summary") or {}
+        sweep_mode = str(summary.get("sweep_mode", rec.get("sweep_mode", "percentile")))
+        sweep_values = list(summary.get("sweep_values") or [])
+        k = int(summary.get("k", rec.get("k", 0)) or 0)
+        if k <= 0:
+            continue
+        stage_schedule = str(rec.get("threshold_schedule", rec.get("stage_schedule", "flat")))
+        stage_gamma = float(rec.get("threshold_gamma", rec.get("stage_gamma", 0.5)) or 0.5)
+        percentile_mode = str(rec.get("percentile_mode", "online"))
+        per_rec = _actual_routed_stage1_fourway_summary(
+            traj_rows,
+            k=k,
+            sweep_mode=sweep_mode,
+            sweep_values=sweep_values,
+            stage_schedule=stage_schedule,
+            stage_gamma=stage_gamma,
+            percentile_mode=percentile_mode,
+        )
+        alpha_entry = out.setdefault(alpha_key, {
+            "sweep_key": per_rec.get("sweep_key", "p"),
+            "points": defaultdict(lambda: defaultdict(lambda: defaultdict(list))),
+        })
+        alpha_entry["sweep_key"] = per_rec.get("sweep_key", alpha_entry.get("sweep_key", "p"))
+        points_store = alpha_entry["points"]
+        for point_key, point_payload in (per_rec.get("points") or {}).items():
+            for trans_key, trans_row in (point_payload or {}).items():
+                for metric, val in trans_row.items():
+                    points_store[str(point_key)][str(trans_key)][str(metric)].append(val)
+    finalized: Dict[str, Any] = {}
+    for alpha_key in sorted(out.keys(), key=_float_key):
+        alpha_entry = out[alpha_key]
+        finalized[alpha_key] = {"sweep_key": alpha_entry.get("sweep_key", "p"), "points": {}}
+        for point_key in sorted(alpha_entry["points"].keys(), key=_float_key):
+            finalized[alpha_key]["points"][point_key] = {}
+            for trans_key in sorted(alpha_entry["points"][point_key].keys(), key=lambda x: tuple(int(p) for p in x.split("->"))):
+                finalized[alpha_key]["points"][point_key][trans_key] = {
+                    metric: _stats(values)
+                    for metric, values in alpha_entry["points"][point_key][trans_key].items()
+                }
+    return finalized
+
+
 def _summarize_trajectories(traj_paths: List[str]) -> Dict[str, Any]:
     pattern_counts: Counter[str] = Counter()
     total_rows = 0
@@ -1025,6 +1357,16 @@ def _build_markdown(report: Dict[str, Any]) -> str:
                 continue
             lines.append(f"- alpha `{alpha_key}` stage `1` bins available: {', '.join(sorted(bins_payload.keys()))}")
         lines.append("")
+    pct_rel = report.get("percentile_reliability_summary") or {}
+    if pct_rel:
+        lines.append("## Percentile Reliability")
+        lines.append("")
+        for alpha_key, alpha_payload in sorted(pct_rel.items(), key=lambda kv: _float_key(kv[0])):
+            stage_payload = (alpha_payload or {}).get("1") or {}
+            ece = ((stage_payload.get("ece") or {}).get("mean", float("nan")))
+            if math.isfinite(_safe_float(ece)):
+                lines.append(f"- alpha `{alpha_key}` stage `1` percentile-bin ece={float(ece):.4f}")
+        lines.append("")
     pct_bins = report.get("percentile_bin_gain_summary") or {}
     if pct_bins:
         lines.append("## Percentile Bin Gains")
@@ -1036,7 +1378,32 @@ def _build_markdown(report: Dict[str, Any]) -> str:
                 continue
             row = bins_payload.get("00-10") or {}
             delta = ((row.get("delta_acc") or {}).get("mean", float("nan")))
-            lines.append(f"- alpha `{alpha_key}` | `1->2` bottom decile delta={delta:.4f}" if math.isfinite(_safe_float(delta)) else f"- alpha `{alpha_key}` | `1->2` bins available")
+            lines.append(
+                f"- alpha `{alpha_key}` | `1->2` bottom decile delta={delta:.4f}"
+                if math.isfinite(_safe_float(delta))
+                else f"- alpha `{alpha_key}` | `1->2` bins available"
+            )
+        lines.append("")
+    routed = report.get("actual_policy_stage1_fourway_summary") or {}
+    if routed:
+        lines.append("## Actual Routed Stage1 Four-Way")
+        lines.append("")
+        for alpha_key, alpha_payload in sorted(routed.items(), key=lambda kv: _float_key(kv[0])):
+            sweep_key = str((alpha_payload or {}).get("sweep_key", "p"))
+            points = (alpha_payload or {}).get("points") or {}
+            if not points:
+                continue
+            focus_key = "80" if "80" in points else next(iter(sorted(points.keys(), key=_float_key)), None)
+            if focus_key is None:
+                continue
+            trans_row = ((points.get(focus_key) or {}).get("1->2") or {})
+            wc = ((trans_row.get("wc") or {}).get("mean", float("nan")))
+            cw = ((trans_row.get("cw") or {}).get("mean", float("nan")))
+            lines.append(
+                f"- alpha `{alpha_key}` | `{sweep_key}={focus_key}` `1->2` wc={float(wc):.4f} cw={float(cw):.4f}"
+                if all(math.isfinite(_safe_float(x)) for x in [wc, cw]) else
+                f"- alpha `{alpha_key}` | `{sweep_key}={focus_key}` routed summary available"
+            )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1133,8 +1500,10 @@ def main() -> None:
         "record_overview": _summarize_record_metadata(records),
         "stage_metric_summary": _summarize_stage_metrics(records),
         "reliability_bin_summary": _summarize_reliability_bins(records, trajectory_map),
+        "percentile_reliability_summary": _summarize_percentile_reliability(records, trajectory_map),
         "transition_summary": _summarize_transitions(records, trajectory_map=trajectory_map),
         "percentile_bin_gain_summary": _summarize_percentile_bin_gains(records, trajectory_map),
+        "actual_policy_stage1_fourway_summary": _summarize_actual_policy_stage1_fourway(records, trajectory_map),
         "stage1_reference_summary": _summarize_stage1_reference(records, trajectory_map),
         "adaptive_point_summary": _summarize_adaptive_points(records),
         "trajectory_summary": _summarize_trajectories(traj_paths),
