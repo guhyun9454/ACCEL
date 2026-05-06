@@ -117,6 +117,27 @@ def _masked_mean(values: np.ndarray, mask: np.ndarray) -> float:
     return float(np.mean(vals[m]))
 
 
+def _recall_std(labels: List[int], preds: List[int], k: int) -> float:
+    if int(k) <= 0:
+        return float("nan")
+    positives = [0] * int(k)
+    true_pos = [0] * int(k)
+    for y, p in zip(labels, preds):
+        yi = int(y)
+        pi = int(p)
+        if 0 <= yi < int(k):
+            positives[yi] += 1
+            if pi == yi:
+                true_pos[yi] += 1
+    recalls = []
+    for cls_idx in range(int(k)):
+        if positives[cls_idx] > 0:
+            recalls.append(true_pos[cls_idx] / float(positives[cls_idx]))
+    if not recalls:
+        return float("nan")
+    return float(np.std(np.asarray(recalls, dtype=np.float64)))
+
+
 def _compute_ece(confidences: np.ndarray, correct: np.ndarray, n_bins: int = 10) -> float:
     conf = np.asarray(confidences, dtype=np.float64).ravel()
     corr = np.asarray(correct, dtype=np.float64).ravel()
@@ -957,6 +978,7 @@ def _extract_stage_metric_row(
     trajectories: List[Dict[str, Any]],
     stage_id: int,
     *,
+    k: int,
     ece_bins: int = 10,
     eps: float = 1e-12,
 ) -> Dict[str, float]:
@@ -976,10 +998,16 @@ def _extract_stage_metric_row(
     conf = np.asarray(payload["conf"], dtype=np.float64)
     corr = np.asarray(payload["corr"], dtype=np.float64)
     true_prob = np.asarray(payload["true_prob"], dtype=np.float64)
+    pred = np.asarray(payload["pred"], dtype=np.float64)
+    labels = []
+    for row in trajectories:
+        labels.append(int(row.get("label_idx", -1)))
     valid = np.isfinite(conf) & np.isfinite(corr) & np.isfinite(true_prob)
     conf = conf[valid]
     corr = corr[valid]
     true_prob = true_prob[valid]
+    pred = pred[valid]
+    labels_arr = np.asarray(labels, dtype=np.int64)[valid] if len(labels) == valid.shape[0] else np.asarray([], dtype=np.int64)
     correct_mask = corr >= 0.5
     wrong_mask = ~correct_mask
     n = int(conf.size)
@@ -989,6 +1017,7 @@ def _extract_stage_metric_row(
         "nll": float(np.mean(-np.log(np.clip(true_prob, eps, 1.0)))) if n > 0 else float("nan"),
         "ece": _compute_ece(conf, corr, n_bins=ece_bins) if n > 0 else float("nan"),
         "avg_conf": float(np.mean(conf)) if n > 0 else float("nan"),
+        "recall_std": _recall_std(labels_arr.tolist(), pred.astype(np.int64).tolist(), int(k)) if n > 0 and labels_arr.size == pred.size else float("nan"),
         "conf_correct": _masked_mean(conf, correct_mask),
         "conf_wrong": _masked_mean(conf, wrong_mask),
         "cost": float(stage_id),
@@ -1022,6 +1051,8 @@ def _simulate_policy_overall_metrics(
     final_conf = []
     final_corr = []
     final_true_prob = []
+    final_pred = []
+    final_label = []
     stage_counts = Counter()
     total_cost = 0.0
     for row, prow in zip(rows, policy_rows):
@@ -1030,11 +1061,15 @@ def _simulate_policy_overall_metrics(
         conf_by_stage = row.get("conf_by_stage") or []
         corr_by_stage = row.get("correct_by_stage") or []
         true_prob_by_stage = row.get("true_prob_by_stage") or []
-        if stop_local_idx >= len(conf_by_stage) or stop_local_idx >= len(corr_by_stage) or stop_local_idx >= len(true_prob_by_stage):
+        pred_by_stage = row.get("pred_by_stage") or []
+        label_idx = int(row.get("label_idx", -1))
+        if stop_local_idx >= len(conf_by_stage) or stop_local_idx >= len(corr_by_stage) or stop_local_idx >= len(true_prob_by_stage) or stop_local_idx >= len(pred_by_stage):
             continue
         final_conf.append(float(conf_by_stage[stop_local_idx]))
         final_corr.append(float(corr_by_stage[stop_local_idx]))
         final_true_prob.append(float(true_prob_by_stage[stop_local_idx]))
+        final_pred.append(int(pred_by_stage[stop_local_idx]))
+        final_label.append(int(label_idx))
         stage_counts[int(stop_stage)] += 1
         total_cost += float(stop_stage)
     conf_arr = np.asarray(final_conf, dtype=np.float64)
@@ -1047,6 +1082,7 @@ def _simulate_policy_overall_metrics(
         "nll": float(np.mean(-np.log(np.clip(true_prob_arr, eps, 1.0)))) if n > 0 else float("nan"),
         "ece": _compute_ece(conf_arr, corr_arr, n_bins=ece_bins) if n > 0 else float("nan"),
         "avg_conf": float(np.mean(conf_arr)) if n > 0 else float("nan"),
+        "recall_std": _recall_std(final_label, final_pred, int(k)) if n > 0 else float("nan"),
         "cost": float(total_cost / n) if n > 0 else float("nan"),
         "routing": {f"n_stage_{int(stage_id)}": int(count) for stage_id, count in sorted(stage_counts.items())},
     }
@@ -1082,8 +1118,8 @@ def _summarize_ablation_metrics(
         full_stage = int(ordered_stages[-1])
         flip_stage = 2 if 2 in ordered_stages else int(full_stage)
 
-        always_flip = _extract_stage_metric_row(traj_rows, flip_stage, ece_bins=ece_bins)
-        always_full = _extract_stage_metric_row(traj_rows, full_stage, ece_bins=ece_bins)
+        always_flip = _extract_stage_metric_row(traj_rows, flip_stage, k=k, ece_bins=ece_bins)
+        always_full = _extract_stage_metric_row(traj_rows, full_stage, k=k, ece_bins=ece_bins)
         for metric, val in always_flip.items():
             if metric == "n_samples":
                 continue
@@ -1802,8 +1838,9 @@ def _build_markdown(report: Dict[str, Any]) -> str:
                 nll = ((row.get("nll") or {}).get("mean", float("nan")))
                 ece = ((row.get("ece") or {}).get("mean", float("nan")))
                 cost = ((row.get("cost") or {}).get("mean", float("nan")))
-                if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost]):
-                    lines.append(f"- {label}: cost={float(cost):.4f}, acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
+                rstd = ((row.get("recall_std") or {}).get("mean", float("nan")))
+                if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost, rstd]):
+                    lines.append(f"- {label}: cost={float(cost):.4f}, acc={float(acc):.4f}, rstd={float(rstd):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
             adaptive = alpha_payload.get("adaptive_flip_only") or {}
             sweep_key = str(adaptive.get("sweep_key", "p"))
             points = adaptive.get("points") or {}
@@ -1815,8 +1852,9 @@ def _build_markdown(report: Dict[str, Any]) -> str:
                     nll = ((row.get("nll") or {}).get("mean", float("nan")))
                     ece = ((row.get("ece") or {}).get("mean", float("nan")))
                     cost = ((row.get("cost") or {}).get("mean", float("nan")))
-                    if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost]):
-                        lines.append(f"- Adaptive Flip-Only (`{sweep_key}={focus_key}`): cost={float(cost):.4f}, acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
+                    rstd = ((row.get("recall_std") or {}).get("mean", float("nan")))
+                    if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost, rstd]):
+                        lines.append(f"- Adaptive Flip-Only (`{sweep_key}={focus_key}`): cost={float(cost):.4f}, acc={float(acc):.4f}, rstd={float(rstd):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

@@ -754,8 +754,9 @@ def _build_markdown(report: Dict[str, Any]) -> str:
                 nll = ((row.get("nll") or {}).get("mean", float("nan")))
                 ece = ((row.get("ece") or {}).get("mean", float("nan")))
                 cost = ((row.get("cost") or {}).get("mean", float("nan")))
-                if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost]):
-                    lines.append(f"- {label}: cost={float(cost):.4f}, acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
+                rstd = ((row.get("recall_std") or {}).get("mean", float("nan")))
+                if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost, rstd]):
+                    lines.append(f"- {label}: cost={float(cost):.4f}, acc={float(acc):.4f}, rstd={float(rstd):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
             adaptive = alpha_payload.get("adaptive_flip_only") or {}
             sweep_key = str(adaptive.get("sweep_key", "p"))
             points = adaptive.get("points") or {}
@@ -767,8 +768,9 @@ def _build_markdown(report: Dict[str, Any]) -> str:
                     nll = ((row.get("nll") or {}).get("mean", float("nan")))
                     ece = ((row.get("ece") or {}).get("mean", float("nan")))
                     cost = ((row.get("cost") or {}).get("mean", float("nan")))
-                    if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost]):
-                        lines.append(f"- Adaptive Flip-Only (`{sweep_key}={focus_key}`): cost={float(cost):.4f}, acc={float(acc):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
+                    rstd = ((row.get("recall_std") or {}).get("mean", float("nan")))
+                    if all(math.isfinite(_safe_float(x)) for x in [acc, nll, ece, cost, rstd]):
+                        lines.append(f"- Adaptive Flip-Only (`{sweep_key}={focus_key}`): cost={float(cost):.4f}, acc={float(acc):.4f}, rstd={float(rstd):.4f}, nll={float(nll):.4f}, ece={float(ece):.4f}")
             lines.append("")
     learned = report.get("cyclic_learned_summary") or {}
     if learned:
