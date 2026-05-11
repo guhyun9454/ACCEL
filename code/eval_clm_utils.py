@@ -177,6 +177,12 @@ def parse_arguments():
                         help="Overwrite existing results files if they exist")
     parser.add_argument("--result_tag", type=str, default=None,
                         help="Optional suffix appended to local results directories to separate experiment variants. Legacy path is unchanged when omitted.")
+    parser.add_argument("--wall_clock_benchmark", action="store_true",
+                        help="Run paper-oriented inference-only wall-clock benchmarks for selected methods.")
+    parser.add_argument("--wall_clock_methods", type=str, default="pride,cyclic,accel",
+                        help="Comma-separated wall-clock benchmark methods: pride,cyclic,accel.")
+    parser.add_argument("--wall_clock_percentiles", type=str, default=None,
+                        help="Comma-separated ACCEL percentile points for wall-clock benchmarking. Defaults to --plot_pride_ours_fractions.")
     parser.add_argument("--develop", action="store_true",
                         help="Dev mode: skip model/data eval and generate dummy numeric logs/plots (for W&B/Streamlit pipeline test).")
 

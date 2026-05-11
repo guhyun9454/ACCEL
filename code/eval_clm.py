@@ -2284,6 +2284,487 @@ def _parse_float_value_list(v, default: Optional[List[float]] = None) -> List[fl
     return fallback
 
 
+def _wall_clock_sync_cuda() -> None:
+    try:
+        if torch.cuda.is_available():
+            for dev_idx in range(int(torch.cuda.device_count())):
+                torch.cuda.synchronize(dev_idx)
+    except Exception:
+        pass
+
+
+def _wall_clock_methods(args) -> List[str]:
+    raw = str(getattr(args, "wall_clock_methods", "pride,cyclic,accel") or "pride,cyclic,accel")
+    allowed = {"pride", "cyclic", "accel"}
+    methods = []
+    for tok in raw.split(","):
+        method = tok.strip().lower()
+        if method in allowed and method not in methods:
+            methods.append(method)
+    return methods or ["pride", "cyclic", "accel"]
+
+
+def _wall_clock_prefix_ids(N: int, prefix_ratio: float, seed: int) -> List[int]:
+    if int(N) <= 0:
+        return []
+    ratio = max(0.0, min(1.0, float(prefix_ratio)))
+    m = int(max(1, int(round(int(N) * ratio))))
+    rng = np.random.default_rng(int(seed))
+    return [int(x) for x in rng.choice(np.arange(int(N), dtype=np.int64), size=min(m, int(N)), replace=False).tolist()]
+
+
+def _wall_clock_sample_parts(sample_entry: Tuple[Any, Any, Any]) -> Tuple[List[Any], List[str], str]:
+    probing_inputs_raw, raw_options, raw_ideal = sample_entry
+    if isinstance(probing_inputs_raw, list) and probing_inputs_raw and isinstance(probing_inputs_raw[0], list):
+        prompts = probing_inputs_raw
+    elif isinstance(probing_inputs_raw, list) and len(probing_inputs_raw) >= 2:
+        prompts = [probing_inputs_raw]
+    else:
+        prompts = []
+    return prompts, list(raw_options), str(raw_ideal)
+
+
+def _wall_clock_prompts_for_schedule(
+    sample_entry: Tuple[Any, Any, Any],
+    slot_to_content_schedule: List[Tuple[int, ...]],
+    option_ids: List[str],
+) -> List[List[str]]:
+    prompts_raw, raw_options, _ideal = _wall_clock_sample_parts(sample_entry)
+    if not prompts_raw:
+        raise ValueError("Cannot build wall-clock prompts from empty sample entry")
+    first_prompt = prompts_raw[0]
+    sys_msg_i = str(first_prompt[0])
+    question_i = _extract_question_from_user_prompt(str(first_prompt[1]))
+    out = []
+    for slot_to_content in slot_to_content_schedule:
+        permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
+        out.append([sys_msg_i, _build_option_user_prompt(question_i, permuted_options, option_ids)])
+    return out
+
+
+def _wall_clock_eval_prompts(
+    eval_fn,
+    sample_idx: int,
+    prompts: List[List[str]],
+    raw_options: List[str],
+    ideal: str,
+    seed: int = 0,
+) -> Tuple[np.ndarray, float, int]:
+    sample = (int(sample_idx), (prompts, raw_options, str(ideal)))
+    _wall_clock_sync_cuda()
+    t0 = time.perf_counter()
+    result = eval_fn(sample, random.Random(int(seed)))
+    _wall_clock_sync_cuda()
+    elapsed = float(time.perf_counter() - t0)
+    probs = np.asarray(((result.get("data") or {}).get("probs") or []), dtype=np.float64)
+    if probs.ndim == 1:
+        probs = probs.reshape(1, -1)
+    return probs, elapsed, int(len(prompts))
+
+
+def _wall_clock_prefix_prior_from_probs(
+    prefix_probs: Dict[int, np.ndarray],
+    k: int,
+    eps: float = 1e-12,
+) -> Tuple[np.ndarray, np.ndarray]:
+    priors = []
+    for probs in prefix_probs.values():
+        observed = np.asarray(probs, dtype=np.float64)
+        if observed.shape[0] < int(k):
+            continue
+        try:
+            _, _, prior_i = debias_simple(observed[: int(k)])
+        except Exception:
+            continue
+        prior_i = np.asarray(prior_i, dtype=np.float64)
+        prior_i = prior_i / (float(np.sum(prior_i)) + eps)
+        priors.append(prior_i)
+    if not priors:
+        prior = np.ones((int(k),), dtype=np.float64) / float(k)
+        return prior, np.zeros((0, int(k)), dtype=np.float64)
+    priors_arr = np.asarray(priors, dtype=np.float64)
+    prior = np.mean(priors_arr, axis=0)
+    prior = prior / (float(np.sum(prior)) + eps)
+    return np.asarray(prior, dtype=np.float64), priors_arr
+
+
+def _wall_clock_residual_bank_from_priors(
+    priors_arr: np.ndarray,
+    k: int,
+    args,
+) -> Tuple[np.ndarray, np.ndarray]:
+    residual_model = str(getattr(args, "empirical_residual_model", "logistic_normal")).strip().lower()
+    delta = max(float(getattr(args, "empirical_logit_delta", 1e-12)), 1e-18)
+    if priors_arr.size == 0:
+        return np.zeros((int(k),), dtype=np.float64), np.zeros((1, int(k)), dtype=np.float64)
+    log_priors = np.log(np.asarray(priors_arr, dtype=np.float64) + delta)
+    centered = log_priors - np.mean(log_priors, axis=1, keepdims=True)
+    mu_hat = np.mean(centered, axis=0)
+    residuals = centered - mu_hat[None, :]
+    if residual_model != "logistic_normal":
+        return np.asarray(mu_hat, dtype=np.float64), np.asarray(residuals, dtype=np.float64)
+
+    n_mc = max(1, int(getattr(args, "empirical_mc_samples", 64)))
+    lam = min(max(float(getattr(args, "empirical_cov_shrinkage", 0.1)), 0.0), 1.0)
+    if residuals.shape[0] <= 1:
+        return np.asarray(mu_hat, dtype=np.float64), np.zeros((n_mc, int(k)), dtype=np.float64)
+    cov = np.cov(residuals, rowvar=False)
+    cov = np.asarray(cov, dtype=np.float64)
+    projection = np.eye(int(k), dtype=np.float64) - np.ones((int(k), int(k)), dtype=np.float64) / float(k)
+    sigma2 = float(np.trace(cov) / max(1, int(k) - 1))
+    cov = (1.0 - lam) * cov + lam * sigma2 * projection
+    cov = (cov + cov.T) / 2.0
+    rng = np.random.default_rng(_stable_u32_seed("wall_clock_logistic_normal", int(getattr(args, "pride_seed", 0))))
+    samples = rng.multivariate_normal(np.zeros((int(k),), dtype=np.float64), cov + 1e-9 * projection, size=n_mc)
+    samples = np.asarray(samples, dtype=np.float64)
+    samples = samples - np.mean(samples, axis=1, keepdims=True)
+    return np.asarray(mu_hat, dtype=np.float64), samples
+
+
+def _wall_clock_row(
+    *,
+    args,
+    subject: str,
+    run_idx: int,
+    method: str,
+    n_samples: int,
+    n_forward_calls: int,
+    wall_clock_sec: float,
+    preds: List[int],
+    labels_idx: List[int],
+    k: int,
+    alpha: Optional[float] = None,
+    p: Optional[float] = None,
+) -> Dict[str, Any]:
+    correct = [int(p_i) == int(y_i) for p_i, y_i in zip(preds, labels_idx)]
+    acc = float(np.mean(np.asarray(correct, dtype=np.float64))) if correct else float("nan")
+    return {
+        "task": str(getattr(args, "task", "")),
+        "subject": str(subject),
+        "run_idx": int(run_idx),
+        "method": str(method),
+        "alpha": None if alpha is None else float(alpha),
+        "p": None if p is None else float(p),
+        "n_samples": int(n_samples),
+        "n_forward_calls": int(n_forward_calls),
+        "wall_clock_sec": float(wall_clock_sec),
+        "sec_per_sample": float(wall_clock_sec) / float(n_samples) if int(n_samples) > 0 else float("nan"),
+        "sec_per_forward": float(wall_clock_sec) / float(n_forward_calls) if int(n_forward_calls) > 0 else float("nan"),
+        "acc": acc,
+        "recall_std": float(_recall_std(labels_idx, preds, k)) if preds else float("nan"),
+        "avg_cost": float(n_forward_calls) / float(n_samples) if int(n_samples) > 0 else float("nan"),
+    }
+
+
+def _run_wall_clock_cyclic(args, subject: str, run_idx: int, eval_fn, samples, option_ids: List[str]) -> Dict[str, Any]:
+    k = int(len(option_ids))
+    schedule = _rotations(k)
+    labels_idx: List[int] = []
+    preds: List[int] = []
+    wall = 0.0
+    n_forward = 0
+    for sample_pos, sample_entry in enumerate(samples):
+        _prompts_raw, raw_options, ideal = _wall_clock_sample_parts(sample_entry)
+        labels_idx.append(int(option_ids.index(str(ideal))))
+        prompts = _wall_clock_prompts_for_schedule(sample_entry, schedule, option_ids)
+        probs, elapsed, calls = _wall_clock_eval_prompts(eval_fn, sample_pos, prompts, raw_options, ideal, seed=run_idx)
+        wall += elapsed
+        n_forward += calls
+        agg = _aggregate_probs_over_permutations(probs[:k].tolist(), schedule, k)
+        preds.append(int(np.argmax(agg)))
+    return _wall_clock_row(args=args, subject=subject, run_idx=run_idx, method="cyclic", n_samples=len(samples), n_forward_calls=n_forward, wall_clock_sec=wall, preds=preds, labels_idx=labels_idx, k=k)
+
+
+def _run_wall_clock_pride(args, subject: str, run_idx: int, eval_fn, samples, option_ids: List[str], alpha: float) -> Dict[str, Any]:
+    k = int(len(option_ids))
+    N = int(len(samples))
+    seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)) + int(run_idx))
+    prefix_ids = set(_wall_clock_prefix_ids(N, float(alpha) / 100.0, seed))
+    cyclic_schedule = _rotations(k)
+    prefix_probs: Dict[int, np.ndarray] = {}
+    wall = 0.0
+    n_forward = 0
+    labels_idx: List[int] = []
+    preds: List[int] = []
+
+    for sample_pos in sorted(prefix_ids):
+        sample_entry = samples[int(sample_pos)]
+        _prompts_raw, raw_options, ideal = _wall_clock_sample_parts(sample_entry)
+        prompts = _wall_clock_prompts_for_schedule(sample_entry, cyclic_schedule, option_ids)
+        probs, elapsed, calls = _wall_clock_eval_prompts(eval_fn, sample_pos, prompts, raw_options, ideal, seed=run_idx)
+        prefix_probs[int(sample_pos)] = probs[:k]
+        wall += elapsed
+        n_forward += calls
+
+    prior, _priors_arr = _wall_clock_prefix_prior_from_probs(prefix_probs, k)
+    for sample_pos, sample_entry in enumerate(samples):
+        _prompts_raw, raw_options, ideal = _wall_clock_sample_parts(sample_entry)
+        labels_idx.append(int(option_ids.index(str(ideal))))
+        if int(sample_pos) in prefix_probs:
+            corrected = np.asarray([_pride_correct_row(row, prior) for row in prefix_probs[int(sample_pos)]], dtype=np.float64)
+            agg = _aggregate_probs_over_permutations(corrected.tolist(), cyclic_schedule, k)
+            preds.append(int(np.argmax(agg)))
+        else:
+            prompts = _wall_clock_prompts_for_schedule(sample_entry, [tuple(range(k))], option_ids)
+            probs, elapsed, calls = _wall_clock_eval_prompts(eval_fn, sample_pos, prompts, raw_options, ideal, seed=run_idx)
+            wall += elapsed
+            n_forward += calls
+            corrected = _pride_correct_row(np.asarray(probs[0], dtype=np.float64), prior)
+            preds.append(int(np.argmax(corrected)))
+
+    return _wall_clock_row(args=args, subject=subject, run_idx=run_idx, method="pride", alpha=float(alpha), n_samples=N, n_forward_calls=n_forward, wall_clock_sec=wall, preds=preds, labels_idx=labels_idx, k=k)
+
+
+def _run_wall_clock_accel(args, subject: str, run_idx: int, eval_fn, samples, option_ids: List[str], alpha: float, percentile: float) -> Dict[str, Any]:
+    k = int(len(option_ids))
+    N = int(len(samples))
+    seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)) + int(run_idx))
+    prefix_ids = set(_wall_clock_prefix_ids(N, float(alpha) / 100.0, seed))
+    cyclic_schedule = _rotations(k)
+    prefix_probs: Dict[int, np.ndarray] = {}
+    wall = 0.0
+    n_forward = 0
+    labels_idx: List[int] = []
+    preds: List[int] = []
+
+    for sample_pos in sorted(prefix_ids):
+        sample_entry = samples[int(sample_pos)]
+        _prompts_raw, raw_options, ideal = _wall_clock_sample_parts(sample_entry)
+        prompts = _wall_clock_prompts_for_schedule(sample_entry, cyclic_schedule, option_ids)
+        probs, elapsed, calls = _wall_clock_eval_prompts(eval_fn, sample_pos, prompts, raw_options, ideal, seed=run_idx)
+        prefix_probs[int(sample_pos)] = probs[:k]
+        wall += elapsed
+        n_forward += calls
+
+    _prior, priors_arr = _wall_clock_prefix_prior_from_probs(prefix_probs, k)
+    mu_hat, residual_bank = _wall_clock_residual_bank_from_priors(priors_arr, k, args)
+    stage_schedule_name = str(getattr(args, "empirical_stage_schedule", "sqrt")).strip().lower()
+    if stage_schedule_name not in {"flat", "sqrt"}:
+        stage_schedule_name = "sqrt"
+    gamma = float(getattr(args, "empirical_stage_gamma", 0.5))
+    if not np.isfinite(gamma) or gamma <= 0.0:
+        gamma = 0.5
+    transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
+    percentile_mode = str(getattr(args, "empirical_percentile_mode", "online")).strip().lower()
+    if percentile_mode != "online":
+        percentile_mode = "online"
+    histories: List[List[float]] = [[] for _ in range(k)]
+    base_percentile = max(0.0, min(100.0, float(percentile)))
+
+    for sample_pos, sample_entry in enumerate(samples):
+        prompts_raw, raw_options, ideal = _wall_clock_sample_parts(sample_entry)
+        labels_idx.append(int(option_ids.index(str(ideal))))
+        base_prompts = _wall_clock_prompts_for_schedule(sample_entry, [tuple(range(k))], option_ids)
+        base_probs, elapsed, calls = _wall_clock_eval_prompts(eval_fn, sample_pos, base_prompts, raw_options, ideal, seed=run_idx)
+        wall += elapsed
+        n_forward += calls
+
+        base_post, base_pred_stage, _base_conf_stage = _compute_empirical_stage_posteriors(
+            stage_probs=np.asarray(base_probs[:1], dtype=np.float64),
+            slot_to_content_schedule=[tuple(range(k))],
+            mu_hat=mu_hat,
+            residual_bank=residual_bank,
+        )
+        corrected_stage1 = np.asarray(base_post[0], dtype=np.float64)
+        sorted_idx = np.argsort(corrected_stage1)[::-1]
+        top1_idx = int(base_pred_stage[0])
+        runner_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else int((top1_idx + 1) % k)
+
+        if transition_mode in {"cyclic_random", "cyclic_targeted"}:
+            transition_seed = _stable_u32_seed(f"{subject}:{sample_pos}:{top1_idx}:{runner_idx}:{transition_mode}", seed)
+            stage_schedule = _build_incremental_cyclic_schedule(k, top1_idx, runner_idx, transition_mode, transition_seed)
+        else:
+            stage_schedule = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
+
+        stage_probs_rows = [np.asarray(base_probs[0], dtype=np.float64)]
+        confs_reached: List[float] = []
+        preds_reached: List[int] = []
+        stages_reached: List[int] = []
+        stop_stage = int(k)
+        forced_prefix = int(sample_pos) in prefix_ids
+
+        for stage_idx in range(k):
+            stage_id = stage_idx + 1
+            if stage_idx > 0:
+                prompts = _wall_clock_prompts_for_schedule(sample_entry, [stage_schedule[stage_idx]], option_ids)
+                probs, elapsed, calls = _wall_clock_eval_prompts(eval_fn, sample_pos, prompts, raw_options, ideal, seed=run_idx)
+                wall += elapsed
+                n_forward += calls
+                stage_probs_rows.append(np.asarray(probs[0], dtype=np.float64))
+
+            post_by_stage, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
+                stage_probs=np.asarray(stage_probs_rows, dtype=np.float64),
+                slot_to_content_schedule=stage_schedule[: len(stage_probs_rows)],
+                mu_hat=mu_hat,
+                residual_bank=residual_bank,
+            )
+            pred_cur = int(pred_by_stage[-1])
+            conf_cur = float(conf_by_stage[-1])
+            confs_reached.append(conf_cur)
+            preds_reached.append(pred_cur)
+            stages_reached.append(stage_id)
+
+            if forced_prefix:
+                continue
+            hist = histories[stage_id - 1]
+            stage_percentile = base_percentile / (float(stage_id) ** gamma) if stage_schedule_name == "sqrt" else base_percentile
+            q = max(0.0, min(1.0, float(stage_percentile) / 100.0))
+            thr = float(np.quantile(np.asarray(hist, dtype=np.float64), q)) if hist else 0.0
+            if conf_cur >= thr:
+                stop_stage = stage_id
+                break
+
+        if forced_prefix:
+            stop_stage = int(k)
+        stop_local_idx = stages_reached.index(int(stop_stage))
+        preds.append(int(preds_reached[stop_local_idx]))
+        for local_idx, stage_id in enumerate(stages_reached[: stop_local_idx + 1]):
+            histories[int(stage_id) - 1].append(float(confs_reached[local_idx]))
+
+    return _wall_clock_row(args=args, subject=subject, run_idx=run_idx, method="accel", alpha=float(alpha), p=float(percentile), n_samples=N, n_forward_calls=n_forward, wall_clock_sec=wall, preds=preds, labels_idx=labels_idx, k=k)
+
+
+def _run_wall_clock_benchmark_for_subject(args, subject: str, run_idx: int, eval_fn, eval_samples: List[Any], option_ids: List[str]) -> List[Dict[str, Any]]:
+    if not bool(getattr(args, "wall_clock_benchmark", False)):
+        return []
+    samples = list(eval_samples)
+    if bool(getattr(args, "test", False)):
+        samples = samples[:100]
+    if not samples:
+        return []
+    methods = set(_wall_clock_methods(args))
+    rows: List[Dict[str, Any]] = []
+    if "cyclic" in methods:
+        logger.info(_blue(f"Wall-clock benchmark: cyclic | subject={subject} run={run_idx}"))
+        rows.append(_run_wall_clock_cyclic(args, subject, run_idx, eval_fn, samples, option_ids))
+
+    pride_alphas = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_prefix_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
+    if not pride_alphas:
+        pride_alphas = [2.0]
+    empirical_alphas = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_empirical_prefix_fractions", None)) if 0.0 <= float(x) <= 100.0]
+    if not empirical_alphas:
+        empirical_alphas = [2.0]
+    wall_clock_percentiles = _parse_percent_value_list(getattr(args, "wall_clock_percentiles", None) or getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100"))
+    wall_clock_percentiles = [float(x) for x in wall_clock_percentiles if 0.0 <= float(x) <= 100.0] or [50.0]
+
+    if "pride" in methods:
+        for alpha in pride_alphas:
+            logger.info(_blue(f"Wall-clock benchmark: PriDe alpha={alpha:g} | subject={subject} run={run_idx}"))
+            rows.append(_run_wall_clock_pride(args, subject, run_idx, eval_fn, samples, option_ids, alpha=float(alpha)))
+    if "accel" in methods:
+        for alpha in empirical_alphas:
+            for percentile in wall_clock_percentiles:
+                logger.info(_blue(f"Wall-clock benchmark: ACCEL alpha={alpha:g} p={percentile:g} | subject={subject} run={run_idx}"))
+                rows.append(_run_wall_clock_accel(args, subject, run_idx, eval_fn, samples, option_ids, alpha=float(alpha), percentile=float(percentile)))
+    return rows
+
+
+def _wall_clock_stats(values: List[Any]) -> Dict[str, Any]:
+    finite_vals = []
+    for v in values:
+        try:
+            fv = float(v)
+        except Exception:
+            continue
+        if np.isfinite(fv):
+            finite_vals.append(fv)
+    arr = np.asarray(finite_vals, dtype=np.float64)
+    if arr.size == 0:
+        return {"n": 0, "mean": float("nan"), "std": float("nan"), "min": float("nan"), "max": float("nan")}
+    return {"n": int(arr.size), "mean": float(np.mean(arr)), "std": float(np.std(arr)), "min": float(np.min(arr)), "max": float(np.max(arr))}
+
+
+def _safe_sort_float(v: Any) -> float:
+    if v in (None, ""):
+        return float("-inf")
+    try:
+        return float(v)
+    except Exception:
+        return float("inf")
+
+
+def _build_wall_clock_summary(args, eval_name: str, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    grouped: Dict[Tuple[str, str, str], Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        alpha_key = "" if row.get("alpha") is None else f"{float(row.get('alpha')):g}"
+        p_key = "" if row.get("p") is None else f"{float(row.get('p')):g}"
+        key = (str(row.get("method")), alpha_key, p_key)
+        for metric in ["n_samples", "n_forward_calls", "wall_clock_sec", "sec_per_sample", "sec_per_forward", "acc", "recall_std", "avg_cost"]:
+            grouped[key][metric].append(row.get(metric, float("nan")))
+    aggregate = []
+    for (method, alpha_key, p_key), metric_vals in sorted(grouped.items(), key=lambda kv: (kv[0][0], _safe_sort_float(kv[0][1]), _safe_sort_float(kv[0][2]))):
+        aggregate.append({
+            "method": method,
+            "alpha": None if alpha_key == "" else float(alpha_key),
+            "p": None if p_key == "" else float(p_key),
+            **{metric: _wall_clock_stats(vals) for metric, vals in metric_vals.items()},
+        })
+    return {
+        "version": 1,
+        "task": str(getattr(args, "task", "")),
+        "eval_name": str(eval_name),
+        "model_name": str(getattr(args, "model_name", "")),
+        "measurement": "inference_only_actual_rerun",
+        "calibration_cost": "included",
+        "rows": rows,
+        "aggregate": aggregate,
+    }
+
+
+def _save_wall_clock_summary(args, eval_name: str, rows: List[Dict[str, Any]], wandb_ok: bool, wandb_run) -> None:
+    if not rows:
+        return
+    out_dir = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="full")
+    os.makedirs(out_dir, exist_ok=True)
+    payload = _build_wall_clock_summary(args, eval_name, rows)
+    json_path = os.path.join(out_dir, f"{args.task}_wall_clock_summary.json")
+    md_path = os.path.join(out_dir, f"{args.task}_wall_clock_summary.md")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    lines = [
+        f"# Wall-Clock Summary: {args.task}",
+        "",
+        f"- `model`: `{getattr(args, 'model_name', '')}`",
+        "- `measurement`: `inference_only_actual_rerun`",
+        "- `calibration_cost`: `included`",
+        "",
+        "| method | alpha | p | wall sec | sec/sample | sec/forward | avg cost | acc | rstd |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in payload.get("aggregate", []):
+        def _m(metric: str) -> float:
+            return float(((row.get(metric) or {}).get("mean", float("nan"))))
+        alpha = "" if row.get("alpha") is None else f"{float(row.get('alpha')):g}"
+        p = "" if row.get("p") is None else f"{float(row.get('p')):g}"
+        lines.append(
+            f"| {row.get('method')} | {alpha} | {p} | {_m('wall_clock_sec'):.4f} | "
+            f"{_m('sec_per_sample'):.6f} | {_m('sec_per_forward'):.6f} | {_m('avg_cost'):.4f} | "
+            f"{_m('acc'):.4f} | {_m('recall_std'):.4f} |"
+        )
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+    logger.info(_purple(f"Saved wall-clock summary: {json_path}"))
+    logger.info(_purple(f"Saved wall-clock markdown: {md_path}"))
+    if wandb_ok and wandb_run is not None:
+        try:
+            existing = wandb_run.summary.get("wall_clock_summary_v1", {})
+            if not isinstance(existing, dict):
+                existing = {}
+            existing = dict(existing)
+            existing[str(args.task)] = {
+                "version": payload.get("version"),
+                "task": payload.get("task"),
+                "eval_name": payload.get("eval_name"),
+                "model_name": payload.get("model_name"),
+                "measurement": payload.get("measurement"),
+                "calibration_cost": payload.get("calibration_cost"),
+                "aggregate": payload.get("aggregate", []),
+            }
+            wandb_run.summary["wall_clock_summary_v1"] = existing
+        except Exception as e:
+            logger.warning(f"W&B wall-clock summary logging failed: {e}")
+
+
 # =========================================================
 # Curves: baseline (all methods)
 # =========================================================
@@ -2889,6 +3370,7 @@ def main():
         derived_records_pride_by_alpha: Dict[float, List[dict]] = {}  # alpha(0.5,1.0,2,5,...) -> list of PRIDE curve_obj
         derived_records_empirical_by_alpha: Dict[float, List[dict]] = {}  # alpha -> list of empirical PriDe curve_obj
         empirical_analysis_records: List[dict] = []
+        wall_clock_rows: List[dict] = []
         pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
         recall_std_vs_p_records: List[dict] = []  # [{'subject':str,'p':float,'method':str,'kind':str,'rstd':float}]
         n_runs = max(1, int(getattr(args, "n_runs", 1)))
@@ -3985,6 +4467,30 @@ def main():
                         import traceback
                         traceback.print_exc()
 
+                if bool(getattr(args, "wall_clock_benchmark", False)) and args.setting in ("full", "cyclic"):
+                    try:
+                        if getattr(args, "option_id_set", None):
+                            bench_option_ids = list(args.option_id_set)
+                        else:
+                            try:
+                                _prompts0, opts0, _ideal0 = _wall_clock_sample_parts(eval_samples[0])
+                                bench_option_ids = list("ABCDE" if len(opts0) == 5 else "ABCD")
+                            except Exception:
+                                bench_option_ids = list("ABCD")
+                        rows_wc = _run_wall_clock_benchmark_for_subject(
+                            args=args,
+                            subject=str(subject),
+                            run_idx=int(run_idx),
+                            eval_fn=eval_fn,
+                            eval_samples=eval_samples,
+                            option_ids=bench_option_ids,
+                        )
+                        wall_clock_rows.extend(rows_wc)
+                    except Exception as e:
+                        logger.warning(f"Wall-clock benchmark failed for subject '{subject}': {e}")
+                        import traceback
+                        traceback.print_exc()
+
             logging_cuda_memory_usage()
 
         # 논문 작성용 T->F/F->T Empirical Analysis (이미지 업로드 전에 먼저 출력)
@@ -4197,6 +4703,12 @@ def main():
                 )
             except Exception as ex:
                 logger.warning(f"Three-curves plot failed: {ex}")
+
+        if bool(getattr(args, "wall_clock_benchmark", False)) and wall_clock_rows:
+            try:
+                _save_wall_clock_summary(args, eval_name, wall_clock_rows, wandb_ok, wandb_run)
+            except Exception as ex:
+                logger.warning(f"Wall-clock summary save failed: {ex}")
 
         # =========================================================
         # 커스텀 최종 요약 리포트 (사용자 맞춤형 포맷)
