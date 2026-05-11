@@ -3427,6 +3427,33 @@ def main():
                     shuffler.shuffle(eval_samples)
                 eval_fn = prepare_eval_fn(model, toker, few_shot_samples)
 
+                if bool(getattr(args, "wall_clock_only", False)):
+                    if not bool(getattr(args, "wall_clock_benchmark", False)):
+                        logger.warning("--wall_clock_only was set without --wall_clock_benchmark; enabling benchmark mode for this run.")
+                        setattr(args, "wall_clock_benchmark", True)
+                    if args.setting not in ("full", "cyclic"):
+                        logger.warning(f"Wall-clock-only benchmark requires full/cyclic setting, got {args.setting}; skipping {subject}.")
+                        continue
+                    if getattr(args, "option_id_set", None):
+                        bench_option_ids = list(args.option_id_set)
+                    else:
+                        try:
+                            _prompts0, opts0, _ideal0 = _wall_clock_sample_parts(eval_samples[0])
+                            bench_option_ids = list("ABCDE" if len(opts0) == 5 else "ABCD")
+                        except Exception:
+                            bench_option_ids = list("ABCD")
+                    rows_wc = _run_wall_clock_benchmark_for_subject(
+                        args=args,
+                        subject=str(subject),
+                        run_idx=int(run_idx),
+                        eval_fn=eval_fn,
+                        eval_samples=eval_samples,
+                        option_ids=bench_option_ids,
+                    )
+                    wall_clock_rows.extend(rows_wc)
+                    logger.info(_orange(f"Wall-clock-only completed: {subject}" + (f" [run {run_idx+1}/{n_runs}]" if use_run_suffix else "")))
+                    continue
+
                 if use_cached:
                     logger.info(_blue(f"Using cached results: {cached_path}"))
                     results = _read_results_file(cached_path) or []
@@ -4709,6 +4736,9 @@ def main():
                 _save_wall_clock_summary(args, eval_name, wall_clock_rows, wandb_ok, wandb_run)
             except Exception as ex:
                 logger.warning(f"Wall-clock summary save failed: {ex}")
+
+        if bool(getattr(args, "wall_clock_only", False)):
+            continue
 
         # =========================================================
         # 커스텀 최종 요약 리포트 (사용자 맞춤형 포맷)

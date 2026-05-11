@@ -179,6 +179,8 @@ def parse_arguments():
                         help="Optional suffix appended to local results directories to separate experiment variants. Legacy path is unchanged when omitted.")
     parser.add_argument("--wall_clock_benchmark", action="store_true",
                         help="Run paper-oriented inference-only wall-clock benchmarks for selected methods.")
+    parser.add_argument("--wall_clock_only", action="store_true",
+                        help="When benchmarking wall clock, skip legacy evaluation, sigma analysis, curves, plots, and non-timing reports.")
     parser.add_argument("--wall_clock_methods", type=str, default="pride,cyclic,accel",
                         help="Comma-separated wall-clock benchmark methods: pride,cyclic,accel.")
     parser.add_argument("--wall_clock_percentiles", type=str, default=None,
