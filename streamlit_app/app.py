@@ -1,9 +1,17 @@
 import os
 from dataclasses import dataclass
 import json
+import re
 import tempfile
 import time
 from typing import Dict, List, Optional, Tuple
+
+_mpl_dir = os.path.join(
+    tempfile.gettempdir(),
+    f"matplotlib-{os.getuid()}" if hasattr(os, "getuid") else "matplotlib",
+)
+os.environ.setdefault("MPLCONFIGDIR", _mpl_dir)
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 
 import numpy as np
 import pandas as pd
@@ -71,14 +79,53 @@ CURVE_DEFS = {
         "linestyle": "-.",
         "marker": "D",
     },
-    "empirical_pride_primary": {
+    # Empirical PriDe curves split by residual_model
+    "empirical_pride_empirical": {
         "x_key": "p",
         "label": "Empirical PriDe",
-        "color": _PAL["reddish_purple"],
+        "color": _PAL["blue"],
         "linestyle": "-",
         "marker": "X",
     },
+    "empirical_pride_logistic_normal": {
+        "x_key": "p",
+        "label": "Empirical PriDe (logistic_normal)",
+        "color": _PAL["vermillion"],
+        "linestyle": "--",
+        "marker": "X",
+    },
+    # Empirical PriDe additional splits by permutation_mode (cyclic variants)
+    "empirical_pride_empirical_cyclic_runnerup": {
+        "x_key": "p",
+        "label": "Empirical PriDe (cyclic runner-up)",
+        "color": _PAL["bluish_green"],
+        "linestyle": "-.",
+        "marker": "X",
+    },
+    "empirical_pride_empirical_cyclic_random": {
+        "x_key": "p",
+        "label": "Empirical PriDe (cyclic random)",
+        "color": _PAL["orange"],
+        "linestyle": ":",
+        "marker": "X",
+    },
 }
+
+# --- Legend label normalization ---
+def _clean_legend_label(s: str) -> str:
+    """
+    Backward-compatible cleanup for labels that used to include debug suffixes like:
+      - "[Avail: 2]"
+      - "(view=percentile)"
+      - "[percentile, empirical, latin, ...]"
+    """
+    txt = str(s or "")
+    # remove known suffix fragments anywhere in the string
+    txt = re.sub(r"\s*\(view=[^)]+\)", "", txt)
+    txt = re.sub(r"\s*\[Avail:[^\]]*\]", "", txt)
+    # remove trailing bracketed meta (keep this conservative: only strip at the end)
+    txt = re.sub(r"\s*\[[^\]]*\]\s*$", "", txt)
+    return txt.strip()
 
 # Ours+PRIDE 다중 α 곡선용 색상 팔레트 (α·variant별 구분)
 ALPHA_COLOR_PALETTE = [
@@ -268,8 +315,54 @@ def _curve_series_from_payload(
                         )
                 else:
                     curve = alpha_curves
-    elif curve_key == "empirical_pride_primary":
+    elif curve_key.startswith("empirical_pride_"):
         empirical_data = curves.get("empirical_pride", {}) or {}
+        got_model = str(empirical_data.get("residual_model", "empirical")).strip().lower()
+        def _norm_empirical_perm_mode(raw: Optional[str]) -> str:
+            """
+            Normalize various naming conventions across runs/code versions.
+            Target outputs: 'targeted_latin' | 'cyclic_random' | 'cyclic_runnerup'
+            """
+            s = str(raw or "").strip().lower()
+            if not s:
+                return "targeted_latin"
+            # common typos / variants
+            s = s.replace("runner_up", "runnerup").replace("runner-up", "runnerup")
+            s = s.replace("cylic", "cyclic")
+            if "random" in s:
+                return "cyclic_random"
+            if "runnerup" in s or "targeted" in s:
+                # some runs use 'cyclic_targeted' to mean "make runner-up move to top"
+                return "cyclic_runnerup"
+            if "latin" in s:
+                return "targeted_latin"
+            if s in ("cyclic_random", "cyclic_runnerup", "targeted_latin"):
+                return s
+            return "targeted_latin"
+
+        # Prefer permutation_mode; fall back to transition_mode if older runs stored it there.
+        got_perm = _norm_empirical_perm_mode(empirical_data.get("permutation_mode", None))
+        if got_perm == "targeted_latin":
+            got_perm = _norm_empirical_perm_mode(empirical_data.get("transition_mode", None))
+
+        # Split by residual_model (empirical vs logistic_normal)
+        want_model: Optional[str] = None
+        if "logistic_normal" in curve_key:
+            want_model = "logistic_normal"
+        elif curve_key.startswith("empirical_pride_empirical"):
+            want_model = "empirical"
+        if want_model is not None and got_model != want_model:
+            return {}
+
+        # Optional split by permutation_mode (cyclic variants)
+        want_perm: Optional[str] = None
+        if curve_key.endswith("_cyclic_random"):
+            want_perm = "cyclic_random"
+        elif curve_key.endswith("_cyclic_runnerup"):
+            want_perm = "cyclic_runnerup"
+        if want_perm is not None and got_perm != want_perm:
+            return {}
+
         empirical_mode = str(empirical_data.get("sweep_mode", "percentile")).strip().lower()
         if empirical_mode not in ("percentile", "confidence"):
             empirical_mode = "percentile"
@@ -278,14 +371,35 @@ def _curve_series_from_payload(
             return {}
         by_alpha = empirical_data.get("by_alpha") or {}
         alpha_src = empirical_pride_alpha if empirical_pride_alpha is not None else ours_pride_alpha
-        alpha_key = (f"{float(alpha_src):g}" if alpha_src is not None else (list(by_alpha.keys())[0] if by_alpha else None))
+        def _pick_alpha_key(_by_alpha: dict, desired: Optional[float]) -> Optional[str]:
+            if not _by_alpha:
+                return None
+            keys = list(_by_alpha.keys())
+            if desired is None:
+                return keys[0]
+            try:
+                d = float(desired)
+            except Exception:
+                return keys[0]
+            parsed = []
+            for k in keys:
+                try:
+                    parsed.append((abs(float(k) - d), str(k)))
+                except Exception:
+                    continue
+            if parsed:
+                parsed.sort(key=lambda t: t[0])
+                return parsed[0][1]
+            return keys[0]
+
+        alpha_key = _pick_alpha_key(by_alpha, float(alpha_src) if alpha_src is not None else None)
         if alpha_key and alpha_key in by_alpha:
-            alpha_curves = by_alpha[alpha_key]
+            alpha_curves = by_alpha.get(alpha_key) or {}
             if isinstance(alpha_curves, dict):
                 curve = alpha_curves.get("primary") or alpha_curves
             else:
                 curve = alpha_curves
-    if curve_key == "empirical_pride_primary":
+    if curve_key.startswith("empirical_pride_"):
         x_key = "confidence" if str((curves.get("empirical_pride", {}) or {}).get("sweep_mode", "percentile")).strip().lower() == "confidence" else "p"
     else:
         x_key = CURVE_DEFS.get(curve_key, {}).get("x_key") or "p"
@@ -302,16 +416,58 @@ def _curve_series_from_payload(
         if not ys or len(ys) != len(xs):
             ys = curve.get("acc", []) or []
     elif y_key == "delta_recall_std":
-        ys = curve.get("delta_recall_std", []) or []
+        # Convention for plotting: negative ΔRstd means improvement (Rstd decreased),
+        # i.e., ΔRstd = current_rstd - baseline_rstd. (So -3.5 means 3.5%p improvement.)
+        # To avoid sign confusion across payload variants, derive from recall_std directly.
+        ys = []
         default = _get_default_baseline(payload, curves, "recall_std")
-        if not ys or (len(ys) != len(xs) and np.isfinite(default)):
-            rstds = curve.get("recall_std", []) or []
-            if len(rstds) == len(xs):
-                ys = [float(default) - float(r) if np.isfinite(r) else float("nan") for r in rstds]
+        rstds = curve.get("recall_std", []) or []
+        if len(rstds) == len(xs) and np.isfinite(default):
+            ys = [float(r) - float(default) if np.isfinite(r) else float("nan") for r in rstds]
         if not ys or len(ys) != len(xs):
             ys = curve.get("recall_std", []) or []
     else:
         ys = curve.get(y_key, []) or []
+
+    def _infer_scale_from_metric(metric_key: str) -> float:
+        """
+        Decide whether to scale by 100 based on the *native* metric scale in payload:
+        - If metric values look like fractions (0~1), return 100.
+        - If metric values already look like percents (0~100), return 1.
+        IMPORTANT: Do NOT infer from delta magnitude (deltas can be small even in percent units).
+        """
+        # Prefer the curve's raw metric list if present
+        raw = curve.get(metric_key, []) or []
+        vals = []
+        for v in raw:
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            if np.isfinite(fv):
+                vals.append(abs(fv))
+        if vals:
+            m = float(np.max(vals))
+            return 100.0 if m <= 1.5 else 1.0
+
+        # Fallback to baseline (single number)
+        base = _get_default_baseline(payload, curves, metric_key)
+        try:
+            fb = float(base)
+        except Exception:
+            fb = float("nan")
+        if np.isfinite(fb):
+            return 100.0 if abs(fb) <= 1.5 else 1.0
+
+        # Final fallback: keep current display (no scaling)
+        return 1.0
+
+    if y_key in ("acc", "delta_acc"):
+        y_scale = _infer_scale_from_metric("acc")
+    elif y_key in ("recall_std", "delta_recall_std"):
+        y_scale = _infer_scale_from_metric("recall_std")
+    else:
+        y_scale = 1.0
 
     out: Dict[float, Dict[str, float]] = {}
     n = min(len(xs), len(costs), len(ys))
@@ -320,6 +476,8 @@ def _curve_series_from_payload(
             xf = float(xs[i])
             cf = float(costs[i])
             yf = float(ys[i])
+            if np.isfinite(yf) and float(y_scale) != 1.0:
+                yf = float(yf) * float(y_scale)
         except Exception:
             continue
         out[xf] = {"cost": cf, "y": yf}
@@ -439,6 +597,8 @@ def _plot_groups(
     y_key: str,
     show_group_std: bool,
     overall_mode: Optional[str],
+    payloads_by_model: Optional[Dict[str, List[dict]]] = None,
+    dedupe_mean_by_model: bool = False,
     overall_curve_label: str = "Overall mean",
     curve_label_overrides: Optional[Dict[str, str]] = None,
     plot_individual: bool = True,
@@ -457,14 +617,22 @@ def _plot_groups(
     max_by = max_pct_by_curve or {}
     min_by = min_pct_by_curve or {}
 
-    _pride_keys = ("ours_pride_primary", "ours_pride_th1_2", "ours_pride_online_sqrt", "empirical_pride_primary")
+    _pride_keys = (
+        "ours_pride_primary",
+        "ours_pride_th1_2",
+        "ours_pride_online_sqrt",
+        "empirical_pride_empirical",
+        "empirical_pride_logistic_normal",
+        "empirical_pride_empirical_cyclic_runnerup",
+        "empirical_pride_empirical_cyclic_random",
+    )
     if plot_individual:
         for gname, payloads in group_payloads.items():
             if not payloads:
                 continue
             for ck in curve_keys:
                 if ck in _pride_keys:
-                    alphas = (empirical_pride_alphas or [2]) if ck == "empirical_pride_primary" else (ours_pride_alphas or [2])
+                    alphas = (empirical_pride_alphas or [2]) if ck.startswith("empirical_pride_") else (ours_pride_alphas or [2])
                     _show_alpha = len(alphas) >= 2
                     for i, alpha in enumerate(alphas):
                         series_list = [
@@ -472,9 +640,9 @@ def _plot_groups(
                                 p,
                                 ck,
                                 y_key,
-                                ours_pride_alpha=(None if ck == "empirical_pride_primary" else alpha),
+                                ours_pride_alpha=(None if ck.startswith("empirical_pride_") else alpha),
                                 empirical_sweep_preference=empirical_sweep_preference,
-                                empirical_pride_alpha=(alpha if ck == "empirical_pride_primary" else None),
+                                empirical_pride_alpha=(alpha if ck.startswith("empirical_pride_") else None),
                             )
                             for p in payloads
                         ]
@@ -493,11 +661,14 @@ def _plot_groups(
                             "ours_pride_primary": 0,
                             "ours_pride_th1_2": len(alphas),
                             "ours_pride_online_sqrt": 2 * len(alphas),
-                            "empirical_pride_primary": 3 * len(alphas),
+                            "empirical_pride_empirical": 3 * len(alphas),
+                            "empirical_pride_logistic_normal": 4 * len(alphas),
+                            "empirical_pride_empirical_cyclic_runnerup": 5 * len(alphas),
+                            "empirical_pride_empirical_cyclic_random": 6 * len(alphas),
                         }
                         color_idx = base_offset.get(ck, 0) + i
                         line_color = cd["color"] if len(alphas) == 1 else ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
-                        if ck == "empirical_pride_primary":
+                        if ck.startswith("empirical_pride_"):
                             base_lab = str((curve_label_overrides or {}).get(ck) or CURVE_DEFS[ck]["label"])
                         else:
                             base_lab = str(ours_pride_base_label or "Ours").strip()
@@ -505,25 +676,17 @@ def _plot_groups(
                             "ours_pride_primary": "th1/sqrt2",
                             "ours_pride_th1_2": "th1/2",
                             "ours_pride_online_sqrt": "Online Sqrt",
-                            "empirical_pride_primary": "Empirical PriDe",
+                            "empirical_pride_empirical": "Empirical PriDe",
+                            "empirical_pride_logistic_normal": "Empirical PriDe (logistic_normal)",
+                            "empirical_pride_empirical_cyclic_runnerup": "Empirical PriDe (cyclic runner-up)",
+                            "empirical_pride_empirical_cyclic_random": "Empirical PriDe (cyclic random)",
                         }
                         suffix = suffix_map.get(ck)
                         if suffix:
-                            if ck == "empirical_pride_primary":
+                            if ck.startswith("empirical_pride_"):
                                 base_lab = str((curve_label_overrides or {}).get(ck) or suffix)
                             else:
                                 base_lab = f"{base_lab} {suffix}"
-                        if ck == "empirical_pride_primary" and payloads:
-                            mode_meta, schedule_meta, gamma_meta, transition_meta, permutation_meta, skip_residual_meta, residual_model_meta = _get_empirical_payload_meta(payloads[0])
-                            if schedule_meta == "sqrt":
-                                sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, {permutation_meta}, sqrt(g={gamma_meta:g})"
-                            else:
-                                sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, {permutation_meta}, flat"
-                            if skip_residual_meta:
-                                sched_suffix += ", no-resid-fallback"
-                            base_lab = f"{base_lab} [{sched_suffix}]"
-                        if ck == "empirical_pride_primary" and empirical_sweep_preference in ("percentile", "confidence"):
-                            base_lab = f"{base_lab} (view={empirical_sweep_preference})"
                         if _show_alpha:
                             base_lab = f"{base_lab} (α={alpha})"
                         label = f"{gname} • {base_lab}" if (len(group_payloads) > 1 and (gname or "").strip()) else base_lab
@@ -557,27 +720,44 @@ def _plot_groups(
 
     # overall mean (optional)
     if overall_mode in ("flatten_equal_run_weight",):
+        mean_payload_groups = (
+            payloads_by_model
+            if (dedupe_mean_by_model and isinstance(payloads_by_model, dict) and payloads_by_model)
+            else group_payloads
+        )
         for ck in curve_keys:
             if ck in _pride_keys:
-                alphas = (empirical_pride_alphas or [2]) if ck == "empirical_pride_primary" else (ours_pride_alphas or [2])
+                alphas = (empirical_pride_alphas or [2]) if ck.startswith("empirical_pride_") else (ours_pride_alphas or [2])
                 _show_alpha = len(alphas) >= 2
                 for i, alpha in enumerate(alphas):
                     all_series = []
-                    for payloads in group_payloads.values():
-                        for p in payloads:
-                            s = _curve_series_from_payload(
+                    for payloads in mean_payload_groups.values():
+                        if not payloads:
+                            continue
+                        series_list = [
+                            _curve_series_from_payload(
                                 p,
                                 ck,
                                 y_key,
-                                ours_pride_alpha=(None if ck == "empirical_pride_primary" else alpha),
+                                ours_pride_alpha=(None if ck.startswith("empirical_pride_") else alpha),
                                 empirical_sweep_preference=empirical_sweep_preference,
-                                empirical_pride_alpha=(alpha if ck == "empirical_pride_primary" else None),
+                                empirical_pride_alpha=(alpha if ck.startswith("empirical_pride_") else None),
                             )
-                            m = max_by.get(ck)
-                            mn = min_by.get(ck)
-                            s = _filter_series_by_max_pct(s, m, ck, min_pct=mn) if s else {}
-                            if s:
-                                all_series.append(s)
+                            for p in payloads
+                        ]
+                        m = max_by.get(ck)
+                        mn = min_by.get(ck)
+                        series_list = [_filter_series_by_max_pct(s, m, ck, min_pct=mn) for s in series_list if s]
+                        series_list = [s for s in series_list if s]
+                        if not series_list:
+                            continue
+                        # Average within one model (or one run-group), then add to overall
+                        agg_model = _aggregate_series(series_list)
+                        model_series = {k: {"cost": float(v.get("cost_mean", float("nan"))), "y": float(v.get("y_mean", float("nan")))}
+                                        for k, v in (agg_model or {}).items()}
+                        model_series = {k: v for k, v in model_series.items() if np.isfinite(v.get("cost", float("nan"))) and np.isfinite(v.get("y", float("nan")))}
+                        if model_series:
+                            all_series.append(model_series)
                     agg_all = _aggregate_series(all_series) if all_series else {}
                     x, y, ystd = _series_to_xy(agg_all)
                     if x.size == 0:
@@ -587,11 +767,14 @@ def _plot_groups(
                         "ours_pride_primary": 0,
                         "ours_pride_th1_2": len(alphas),
                         "ours_pride_online_sqrt": 2 * len(alphas),
-                        "empirical_pride_primary": 3 * len(alphas),
+                        "empirical_pride_empirical": 3 * len(alphas),
+                        "empirical_pride_logistic_normal": 4 * len(alphas),
+                        "empirical_pride_empirical_cyclic_runnerup": 5 * len(alphas),
+                        "empirical_pride_empirical_cyclic_random": 6 * len(alphas),
                     }
                     color_idx = base_offset.get(ck, 0) + i
                     line_color = cd["color"] if len(alphas) == 1 else ALPHA_COLOR_PALETTE[color_idx % len(ALPHA_COLOR_PALETTE)]
-                    if ck == "empirical_pride_primary":
+                    if ck.startswith("empirical_pride_"):
                         base_lab = str((curve_label_overrides or {}).get(ck) or CURVE_DEFS[ck]["label"])
                     else:
                         base_lab = str(ours_pride_base_label or "Ours").strip()
@@ -599,30 +782,17 @@ def _plot_groups(
                         "ours_pride_primary": "th1/sqrt2",
                         "ours_pride_th1_2": "th1/2",
                         "ours_pride_online_sqrt": "Online Sqrt",
-                        "empirical_pride_primary": "Empirical PriDe",
+                        "empirical_pride_empirical": "Empirical PriDe",
+                        "empirical_pride_logistic_normal": "Empirical PriDe (logistic_normal)",
+                        "empirical_pride_empirical_cyclic_runnerup": "Empirical PriDe (cyclic runner-up)",
+                        "empirical_pride_empirical_cyclic_random": "Empirical PriDe (cyclic random)",
                     }
                     suffix = suffix_map.get(ck)
                     if suffix:
-                        if ck == "empirical_pride_primary":
+                        if ck.startswith("empirical_pride_"):
                             base_lab = str((curve_label_overrides or {}).get(ck) or suffix)
                         else:
                             base_lab = f"{base_lab} {suffix}"
-                    if ck == "empirical_pride_primary":
-                        sample_payload = None
-                        for payloads in group_payloads.values():
-                            if payloads:
-                                sample_payload = payloads[0]
-                                break
-                        mode_meta, schedule_meta, gamma_meta, transition_meta, permutation_meta, skip_residual_meta, residual_model_meta = _get_empirical_payload_meta(sample_payload or {})
-                        if schedule_meta == "sqrt":
-                            sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, {permutation_meta}, sqrt(g={gamma_meta:g})"
-                        else:
-                            sched_suffix = f"{mode_meta}, {residual_model_meta}, {transition_meta}, {permutation_meta}, flat"
-                        if skip_residual_meta:
-                            sched_suffix += ", no-resid-fallback"
-                        base_lab = f"{base_lab} [{sched_suffix}]"
-                    if ck == "empirical_pride_primary" and empirical_sweep_preference in ("percentile", "confidence"):
-                        base_lab = f"{base_lab} (view={empirical_sweep_preference})"
                     if _show_alpha:
                         base_lab = f"{base_lab} (α={alpha})"
                     if show_overall_band and ystd.size == y.size:
@@ -634,14 +804,22 @@ def _plot_groups(
                             label=f"{overall_curve_label} • {base_lab}" if (overall_curve_label or "").strip() else base_lab)
             else:
                 all_series = []
-                for payloads in group_payloads.values():
-                    for p in payloads:
-                        s = _curve_series_from_payload(p, ck, y_key)
-                        m = max_by.get(ck)
-                        mn = min_by.get(ck)
-                        s = _filter_series_by_max_pct(s, m, ck, min_pct=mn) if s else {}
-                        if s:
-                            all_series.append(s)
+                for payloads in mean_payload_groups.values():
+                    if not payloads:
+                        continue
+                    series_list = [_curve_series_from_payload(p, ck, y_key) for p in payloads]
+                    m = max_by.get(ck)
+                    mn = min_by.get(ck)
+                    series_list = [_filter_series_by_max_pct(s, m, ck, min_pct=mn) for s in series_list if s]
+                    series_list = [s for s in series_list if s]
+                    if not series_list:
+                        continue
+                    agg_model = _aggregate_series(series_list)
+                    model_series = {k: {"cost": float(v.get("cost_mean", float("nan"))), "y": float(v.get("y_mean", float("nan")))}
+                                    for k, v in (agg_model or {}).items()}
+                    model_series = {k: v for k, v in model_series.items() if np.isfinite(v.get("cost", float("nan"))) and np.isfinite(v.get("y", float("nan")))}
+                    if model_series:
+                        all_series.append(model_series)
                 agg_all = _aggregate_series(all_series) if all_series else {}
                 x, y, ystd = _series_to_xy(agg_all)
                 if x.size == 0:
@@ -656,14 +834,18 @@ def _plot_groups(
                         linewidth=2.5, markersize=8, alpha=0.95,
                         label=f"{overall_curve_label} • {base_lab}" if (overall_curve_label or "").strip() else base_lab)
 
-    _y_labels = {"acc": "Accuracy (%)", "delta_acc": "Δ Accuracy (%)", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
-    _y_titles = {"acc": "Accuracy", "delta_acc": "Δ Accuracy", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
+    _y_labels = {"acc": "Accuracy (%)", "delta_acc": "Δ Accuracy (%)", "recall_std": "Rstd (%)", "delta_recall_std": "Δ Rstd (%)"}
+    _y_titles = {"acc": "Accuracy", "delta_acc": "Δ Accuracy", "recall_std": "Rstd", "delta_recall_std": "Δ Rstd"}
     subtitle = ""
     ax.set_xlabel("Computational Cost (× of default)", fontsize=20)
     ax.set_ylabel(_y_labels.get(y_key, y_key), fontsize=20)
     ax.set_title(f"{task} — {_y_titles.get(y_key, y_key)}{subtitle}", fontsize=20)
     if y_key in ("delta_acc", "delta_recall_std"):
         ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
+    # For ΔRstd, we use the "negative is better" convention.
+    # Invert y-axis so improvements (more negative) appear higher, like accuracy curves.
+    if y_key == "delta_recall_std":
+        ax.invert_yaxis()
     ax.grid(True, linestyle="--", alpha=0.35)
     ax.legend(loc="lower right", fontsize=24, ncol=1)
     fig.tight_layout()
@@ -941,6 +1123,7 @@ if use_custom_run_labels and selected_runs:
 
 # Build payload map: label -> [payload] (keep list type to reuse plotting code)
 group_payloads: Dict[str, List[dict]] = {}
+payloads_by_model: Dict[str, List[dict]] = {}
 for rp in selected_runs:
     rec = records.get(rp)
     if rec is None:
@@ -950,6 +1133,8 @@ for rp in selected_runs:
         continue
     prefix = run_label_overrides.get(rp) if use_custom_run_labels else (rec.model_name or rec.display_name or rec.run_id or rp)
     group_payloads[str(prefix)] = [payload]
+    model_key = str((rec.model_name or "").strip() or (rec.pretrained_model_path or "").split("/")[-1] or rec.display_name or rec.run_id or rp)
+    payloads_by_model.setdefault(model_key, []).append(payload)
 
 st.subheader("그래프 옵션")
 st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 기본 비교는 `cyclic`, `PriDe`, `Ours+PriDe (th1/2)`, `Empirical PriDe`입니다.")
@@ -957,9 +1142,11 @@ st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X�
 curve_keys = st.multiselect(
     "그릴 곡선",
     options=list(CURVE_DEFS.keys()),
-    default=["cyclic", "default_pride", "ours_pride_th1_2", "empirical_pride_primary"],
+    default=["cyclic", "default_pride", "ours_pride_th1_2", "empirical_pride_empirical"],
     help="기본 비교군은 `cyclic`, `PriDe`, `Ours+PriDe (th1/2)`, `Empirical PriDe`입니다. 나머지 곡선은 필요할 때만 추가로 보세요.",
 )
+# Overall mean은 항상 model 단위로 1번만 카운트 (중복 run dedupe)
+dedupe_mean_by_model = True
 empirical_sweep_view = st.selectbox(
     "Empirical PriDe sweep",
     options=["auto", "percentile", "confidence"],
@@ -1087,13 +1274,46 @@ with col_m6:
 with col_m7:
     min_pct_empirical_pride = st.number_input(
         "Empirical PriDe 하한",
-        min_value=0.0,
         value=0.0,
         step=1.0 if empirical_sweep_view != "confidence" else 0.01,
         key="min_empirical_pride",
     )
 
+def _extract_available_empirical_alphas(
+    selected_run_paths: List[str],
+    records: Dict[str, RunRecord],
+    task: str,
+) -> List[float]:
+    out = set()
+    for rp in selected_run_paths:
+        rec = records.get(rp)
+        if rec is None:
+            continue
+        payload = rec.points_by_task.get(str(task))
+        if not isinstance(payload, dict):
+            continue
+        curves = payload.get("curves", {}) or {}
+        emp = curves.get("empirical_pride", {}) or {}
+        by_alpha = emp.get("by_alpha") or {}
+        if not isinstance(by_alpha, dict):
+            continue
+        for k in by_alpha.keys():
+            try:
+                out.add(float(k))
+            except Exception:
+                continue
+    return sorted(out)
+
+
 pride_alpha_options = [0.5, 1.0, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+empirical_alpha_options = sorted(set(pride_alpha_options).union(set(_extract_available_empirical_alphas(selected_runs, records, str(task)))))
+
+# If the stored selection contains values not in options, sanitize it.
+if "empirical_pride_alphas" in st.session_state:
+    kept = [a for a in (st.session_state.get("empirical_pride_alphas") or []) if a in empirical_alpha_options]
+    if not kept and empirical_alpha_options:
+        kept = [empirical_alpha_options[0]]
+    st.session_state["empirical_pride_alphas"] = kept
 ours_pride_alphas = st.multiselect(
     "Ours+PriDe α (prefix)",
     options=pride_alpha_options,
@@ -1104,8 +1324,8 @@ ours_pride_alphas = st.multiselect(
 )
 empirical_pride_alphas = st.multiselect(
     "Empirical PriDe α (prefix)",
-    options=pride_alpha_options,
-    default=[2],
+    options=empirical_alpha_options,
+    default=([2] if 2 in empirical_alpha_options else (empirical_alpha_options[:1] if empirical_alpha_options else [2])),
     format_func=lambda x: f"α={x}%",
     key="empirical_pride_alphas",
     help="Empirical PriDe 전용 prefix 비율입니다. 여러 α 선택 시 각 α별 empirical 곡선이 함께 표시됩니다.",
@@ -1118,7 +1338,10 @@ max_pct_by_curve = {
     "ours_pride_primary": float(max_pct_ours_pride_primary),
     "ours_pride_th1_2": float(max_pct_ours_pride_th1_2),
     "ours_pride_online_sqrt": float(max_pct_ours_pride_online_sqrt),
-    "empirical_pride_primary": float(max_pct_empirical_pride),
+    "empirical_pride_empirical": float(max_pct_empirical_pride),
+    "empirical_pride_logistic_normal": float(max_pct_empirical_pride),
+    "empirical_pride_empirical_cyclic_runnerup": float(max_pct_empirical_pride),
+    "empirical_pride_empirical_cyclic_random": float(max_pct_empirical_pride),
 }
 min_pct_by_curve = {
     "cyclic": float(min_pct_cyclic),
@@ -1127,7 +1350,10 @@ min_pct_by_curve = {
     "ours_pride_primary": float(min_pct_ours_pride_primary),
     "ours_pride_th1_2": float(min_pct_ours_pride_th1_2),
     "ours_pride_online_sqrt": float(min_pct_ours_pride_online_sqrt),
-    "empirical_pride_primary": float(min_pct_empirical_pride),
+    "empirical_pride_empirical": float(min_pct_empirical_pride),
+    "empirical_pride_logistic_normal": float(min_pct_empirical_pride),
+    "empirical_pride_empirical_cyclic_runnerup": float(min_pct_empirical_pride),
+    "empirical_pride_empirical_cyclic_random": float(min_pct_empirical_pride),
 }
 
 overall_mode = st.radio(
@@ -1153,11 +1379,22 @@ with col_b:
 with col_c:
     lab_pride = st.text_input("Default+PRIDE 라벨", value=CURVE_DEFS["default_pride"]["label"])
 with col_d:
-    lab_ours = st.text_input("OURS 라벨", value=CURVE_DEFS["ours"]["label"])
+    lab_ours = st.text_input("OURS 라벨", value="previous Ours")
 with col_e:
-    lab_ours_pride = st.text_input("Ours (PriDe 붙은 곡선) 라벨", value="Ours")
+    lab_ours_pride = st.text_input("Ours (PriDe 붙은 곡선) 라벨", value="previous Ours")
 with col_f:
-    lab_empirical = st.text_input("Empirical PriDe 라벨", value=CURVE_DEFS["empirical_pride_primary"]["label"])
+    lab_empirical = st.text_input("Empirical PriDe 라벨", value="Empirical PriDe (Ours)")
+    lab_logitnorm = st.text_input("logistic_normal 라벨", value="Empirical PriDe (logistic_normal)")
+
+with st.expander("Empirical PriDe (cyclic variants) 라벨", expanded=False):
+    lab_emp_runnerup = st.text_input(
+        "Empirical PriDe (cyclic runner-up) 라벨",
+        value=CURVE_DEFS["empirical_pride_empirical_cyclic_runnerup"]["label"],
+    )
+    lab_emp_random = st.text_input(
+        "Empirical PriDe (cyclic random) 라벨",
+        value=CURVE_DEFS["empirical_pride_empirical_cyclic_random"]["label"],
+    )
 
 curve_label_overrides = {
     "cyclic": lab_cyclic,
@@ -1166,8 +1403,12 @@ curve_label_overrides = {
     "ours_pride_primary": lab_ours_pride,
     "ours_pride_th1_2": lab_ours_pride,
     "ours_pride_online_sqrt": lab_ours_pride,
-    "empirical_pride_primary": lab_empirical,
+    "empirical_pride_empirical": lab_empirical,
+    "empirical_pride_logistic_normal": lab_logitnorm,
+    "empirical_pride_empirical_cyclic_runnerup": lab_emp_runnerup,
+    "empirical_pride_empirical_cyclic_random": lab_emp_random,
 }
+curve_label_overrides = {k: _clean_legend_label(v) for k, v in (curve_label_overrides or {}).items()}
 
 show_overall_band = st.checkbox(
     "평균 곡선 밴드 표시",
@@ -1190,6 +1431,8 @@ if plot_clicked:
         n_runs_flattened = sum(len(p) for p in nonempty.values()) if overall_mode_key else 0
         fig_acc = _plot_groups(
             group_payloads=nonempty,
+            payloads_by_model=payloads_by_model,
+            dedupe_mean_by_model=dedupe_mean_by_model,
             task=str(task),
             curve_keys=curve_keys,
             y_key="delta_acc",
@@ -1211,6 +1454,8 @@ if plot_clicked:
     with c_right:
         fig_rstd = _plot_groups(
             group_payloads=nonempty,
+            payloads_by_model=payloads_by_model,
+            dedupe_mean_by_model=dedupe_mean_by_model,
             task=str(task),
             curve_keys=curve_keys,
             y_key="delta_recall_std",

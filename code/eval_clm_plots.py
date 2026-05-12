@@ -264,8 +264,8 @@ def _plot_three_curves_acc_recall_std(
             try:
                 import wandb
                 wandb_run.log({f"plots/{task}/three_curves_acc": wandb.Image(out_acc)})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"W&B log failed (three_curves_acc) task={task}: {e}", exc_info=True)
 
         fig2, ax2 = plt.subplots(figsize=(10, 6.5), dpi=160)
         _plot_curve(ax2, cost_cyc, delta_rstd_cyc, "o", color_cyclic, "-", "Cyclic")
@@ -287,8 +287,8 @@ def _plot_three_curves_acc_recall_std(
             try:
                 import wandb
                 wandb_run.log({f"plots/{task}/three_curves_recall_std": wandb.Image(out_rstd)})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"W&B log failed (three_curves_recall_std) task={task}: {e}", exc_info=True)
 
         fig3, ax3 = plt.subplots(figsize=(10, 6.5), dpi=160)
         _plot_curve(ax3, cost_ours, delta_acc_ours, "^", color_ours, "-.", "Ours")
@@ -308,8 +308,8 @@ def _plot_three_curves_acc_recall_std(
             try:
                 import wandb
                 wandb_run.log({f"plots/{task}/ours_vs_ours_pride_acc": wandb.Image(out_ours_acc)})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"W&B log failed (ours_vs_ours_pride_acc) task={task}: {e}", exc_info=True)
 
         fig4, ax4 = plt.subplots(figsize=(10, 6.5), dpi=160)
         _plot_curve(ax4, cost_ours, delta_rstd_ours, "^", color_ours, "-.", "Ours")
@@ -329,8 +329,8 @@ def _plot_three_curves_acc_recall_std(
             try:
                 import wandb
                 wandb_run.log({f"plots/{task}/ours_vs_ours_pride_recall_std": wandb.Image(out_ours_rstd)})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"W&B log failed (ours_vs_ours_pride_recall_std) task={task}: {e}", exc_info=True)
     except Exception as e:
         logger.warning(f"Three-curves figure rendering failed for task={task}: {e}")
 
