@@ -101,6 +101,7 @@ class RunRecord:
     tasks: List[str]
     points_by_task: Dict[str, dict]  # task -> payload
     sigma_by_task: Dict[str, dict]   # task -> sigma summary payload
+    settings_by_task: Dict[str, str]
 
 
 def _parse_run_paths(text: str) -> List[str]:
@@ -170,7 +171,9 @@ def _fetch_run_record(run_path: str, refresh_token: int = 0) -> Tuple[Optional[R
                                     payload = json.load(f)
                                 task = str(payload.get("task", "")).strip()
                                 if task:
-                                    recovered[task] = payload
+                                    setting = str(payload.get("setting", "") or "").strip()
+                                    task_key = task if not setting or setting == "full" else f"{task}_{setting}"
+                                    recovered[task_key] = payload
                     except Exception:
                         continue
                 if recovered:
@@ -178,6 +181,18 @@ def _fetch_run_record(run_path: str, refresh_token: int = 0) -> Tuple[Optional[R
             except Exception:
                 pass
         tasks = sorted([str(k) for k in points_by_task.keys()])
+        settings_by_task = {}
+        for task_key, payload in points_by_task.items():
+            if not isinstance(payload, dict):
+                continue
+            setting = str(payload.get("setting", "") or "").strip()
+            prob_alignment = str(payload.get("prob_alignment", "") or "").strip()
+            bits = []
+            if setting:
+                bits.append(setting)
+            if prob_alignment:
+                bits.append(prob_alignment)
+            settings_by_task[str(task_key)] = " / ".join(bits)
 
         # lightweight identity fields
         parts = run_path.split("/")
@@ -197,6 +212,7 @@ def _fetch_run_record(run_path: str, refresh_token: int = 0) -> Tuple[Optional[R
             tasks=tasks,
             points_by_task=points_by_task,
             sigma_by_task=sigma_by_task,
+            settings_by_task=settings_by_task,
         )
         if len(tasks) == 0:
             return rec, "W&B summary에 `three_curves_points_v1`가 없어요. (이 기능을 넣은 이후의 run이어야 평균을 낼 수 있어요.)"
@@ -892,6 +908,7 @@ for rp, rec in records.items():
             "model_name": rec.model_name,
             "pretrained_model_path": rec.pretrained_model_path,
             "tasks": ", ".join(rec.tasks),
+            "settings": ", ".join([f"{t}: {rec.settings_by_task.get(t, '')}" for t in rec.tasks if rec.settings_by_task.get(t, "")]),
             "sigma_tasks": ", ".join(sorted(rec.sigma_by_task.keys())),
         }
     )
@@ -904,7 +921,16 @@ if len(task_list) == 0:
     st.error("선택 가능한 task가 없어요 (run summary에 `three_curves_points_v1`가 비어있음).")
     st.stop()
 
-task = st.selectbox("Task 선택", options=task_list, index=0)
+task_meta = {}
+for t in task_list:
+    metas = sorted({rec.settings_by_task.get(str(t), "") for rec in records.values() if rec.settings_by_task.get(str(t), "")})
+    task_meta[str(t)] = metas[0] if metas else ""
+
+def _task_label(task_key: str) -> str:
+    meta = task_meta.get(str(task_key), "")
+    return f"{task_key}  ({meta})" if meta else str(task_key)
+
+task = st.selectbox("Task 선택", options=task_list, index=0, format_func=_task_label)
 
 available_run_paths = list(records.keys())
 st.subheader("모델 선택 (각 run = 한 모델 결과)")

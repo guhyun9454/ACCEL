@@ -182,6 +182,15 @@ def _stable_u32_seed(s: str, base_seed: int = 0) -> int:
     return (int(zlib.crc32(s.encode("utf-8"))) + int(base_seed)) & 0xFFFFFFFF
 
 
+def _sample_prefix_ids(N: int, prefix_ratio: float, seed: int) -> List[int]:
+    if int(N) <= 0:
+        return []
+    ratio = float(max(0.0, min(1.0, prefix_ratio)))
+    m = int(max(1, int(round(int(N) * ratio))))
+    rng = np.random.default_rng(int(seed))
+    return [int(x) for x in rng.choice(np.arange(int(N), dtype=np.int64), size=m, replace=False).tolist()]
+
+
 def _estimate_pride_prior_random_prefix_mean(
     per_sample_probs: List[np.ndarray],
     cyclic_indices: List[int],
@@ -415,6 +424,25 @@ def _build_option_user_prompt(question: str, options: List[str], option_ids: Lis
     )
 
 
+def _build_permuted_option_user_prompt(
+    question: str,
+    raw_options: List[str],
+    option_ids: List[str],
+    slot_to_content: Tuple[int, ...],
+    prob_alignment: str = "content_only",
+) -> str:
+    permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
+    if str(prob_alignment) == "paired_id_content":
+        display_option_ids = [option_ids[int(content_idx)] for content_idx in slot_to_content]
+    else:
+        display_option_ids = option_ids
+    return _build_option_user_prompt(str(question), permuted_options, display_option_ids)
+
+
+def _prob_alignment_for_setting(setting: Optional[str]) -> str:
+    return "paired_id_content" if str(setting or "").strip().lower() == "shuffle_both" else "content_only"
+
+
 def _invert_slot_to_content_perm(slot_to_content: Tuple[int, ...]) -> np.ndarray:
     inv = np.zeros(len(slot_to_content), dtype=np.int64)
     for slot_idx, content_idx in enumerate(slot_to_content):
@@ -587,6 +615,7 @@ def _select_best_relative_cyclic_sequence(
     mu_hat: np.ndarray,
     residual_bank: np.ndarray,
     labels_idx: List[int],
+    prob_alignment: str = "content_only",
     eps: float = 1e-12,
 ) -> Dict[str, Any]:
     """
@@ -618,6 +647,7 @@ def _select_best_relative_cyclic_sequence(
                 slot_to_content_schedule=[identity_perm],
                 mu_hat=mu_hat,
                 residual_bank=residual_bank,
+                prob_alignment=prob_alignment,
             )
             stage1_post = np.asarray(base_posteriors[0], dtype=np.float64)
             initial_rank = [int(x) for x in np.argsort(stage1_post)[::-1]]
@@ -628,6 +658,7 @@ def _select_best_relative_cyclic_sequence(
                 slot_to_content_schedule=schedule,
                 mu_hat=mu_hat,
                 residual_bank=residual_bank,
+                prob_alignment=prob_alignment,
             )
             label_idx = int(labels_idx[sample_idx_i])
             for stage_idx in range(len(posteriors) - 1):
@@ -667,6 +698,7 @@ def _compute_empirical_stage_posteriors(
     slot_to_content_schedule: List[Tuple[int, ...]],
     mu_hat: np.ndarray,
     residual_bank: np.ndarray,
+    prob_alignment: str = "content_only",
     eps: float = 1e-12,
 ) -> Tuple[List[np.ndarray], List[int], List[float]]:
     """
@@ -685,6 +717,7 @@ def _compute_empirical_stage_posteriors(
     posterior_by_stage: List[np.ndarray] = []
     pred_idx_by_stage: List[int] = []
     conf_by_stage: List[float] = []
+    paired_id_content = str(prob_alignment or "content_only") == "paired_id_content"
 
     for stage_idx in range(len(slot_to_content_schedule)):
         per_residual = []
@@ -694,7 +727,10 @@ def _compute_empirical_stage_posteriors(
             for inner_idx in range(stage_idx + 1):
                 inv = inverse_assignments[inner_idx]
                 stage_row = probs[inner_idx]
-                scores += stage_row[inv] * prior_factor[inv]
+                if paired_id_content:
+                    scores += stage_row * prior_factor
+                else:
+                    scores += stage_row[inv] * prior_factor[inv]
             total = float(np.sum(scores))
             if not np.isfinite(total) or total <= eps:
                 post = np.ones((k,), dtype=np.float64) / float(k)
@@ -1178,6 +1214,30 @@ def _aggregate_probs_over_permutations(probs_seq, permuted_indices, k: int):
     if len(permuted_indices) > 0:
         agg /= float(len(permuted_indices))
     return agg
+
+
+def _aggregate_probs_for_alignment(
+    probs_seq,
+    permuted_indices,
+    k: int,
+    prob_alignment: str = "content_only",
+):
+    """
+    Convert per-prompt option-token probabilities into content-space scores.
+
+    content_only: row j has the fixed option ID for slot j, so permutation p maps
+    slot j -> content p[j].
+    paired_id_content: the option ID moves with its content, so option-token
+    index c already corresponds to content c for every row-order permutation.
+    """
+    if str(prob_alignment or "content_only") == "paired_id_content":
+        arr = np.asarray(probs_seq, dtype=np.float64)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.size == 0:
+            return np.zeros(int(k), dtype=np.float64)
+        return np.mean(arr[:, : int(k)], axis=0)
+    return _aggregate_probs_over_permutations(probs_seq, permuted_indices, k)
 
 
 def _probe_shift_cyclic_put_top2_into_top1_slot(base_probs: np.ndarray, k: int) -> Tuple[int, int, int]:
@@ -2688,7 +2748,16 @@ def main():
                 "model_name": getattr(args, "model_name", None),
                 "eval_names": getattr(args, "eval_names", None),
                 "option_id_set": getattr(args, "option_id_set", None),
+                "skip_full": getattr(args, "skip_full", None),
+                "pride_mix": getattr(args, "pride_mix", None),
+                "n_runs": getattr(args, "n_runs", None),
                 "ours_low_conf_percent": getattr(args, "ours_low_conf_percent", None),
+                "empirical_pride": getattr(args, "empirical_pride", None),
+                "empirical_residual_model": getattr(args, "empirical_residual_model", None),
+                "plot_empirical_prefix_fractions": getattr(args, "plot_empirical_prefix_fractions", None),
+                "empirical_sweep_mode": getattr(args, "empirical_sweep_mode", None),
+                "empirical_stage_schedule": getattr(args, "empirical_stage_schedule", None),
+                "empirical_transition_mode": getattr(args, "empirical_transition_mode", None),
             }
             wandb_run = wandb.init(project=project, entity=entity, name=run_name, config=cfg)
             logger.info(_blue(f"W&B init ok: project={project}, entity={entity}, name={run_name}"))
@@ -2722,10 +2791,13 @@ def main():
                 parts = str(eval_name).split(",")
                 task = str(parts[0]).strip()
                 num_few_shot = int(parts[1]) if len(parts) > 1 and str(parts[1]).strip() else 0
+                setting = str(parts[2]).strip() if len(parts) > 2 and str(parts[2]).strip() else None
                 args.task = task
                 args.num_few_shot = num_few_shot
+                args.setting = setting
 
-                out_dir = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="full")
+                curve_setting = "shuffle_both" if args.setting == "shuffle_both" else "full"
+                out_dir = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting=curve_setting)
                 os.makedirs(out_dir, exist_ok=True)
 
                 # Randomness per eval_name, mixed with base_seed
@@ -2825,6 +2897,8 @@ def main():
                     empirical_prefix_list=empirical_prefix,
                     wandb_ok=wandb_ok,
                     wandb_run=wandb_run,
+                    setting=args.setting,
+                    prob_alignment=_prob_alignment_for_setting(args.setting),
                 )
             except Exception as e:
                 logger.warning(f"[develop] Failed to write dummy plots for eval_name='{eval_name}': {e}")
@@ -2965,13 +3039,16 @@ def main():
 
                 metrics = None
                 if len(results) > 0:
-                    if args.setting in ['perm', 'full', 'cyclic']:
+                    if args.setting in ['perm', 'full', 'cyclic', 'shuffle_both']:
                         if getattr(args, 'option_id_set', None):
                             option_ids = list(args.option_id_set)
                         else:
                             k_guess = len(results[0]['data']['options'])
                             option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
                         k = len(option_ids)
+                        prob_alignment = _prob_alignment_for_setting(args.setting)
+                        if prob_alignment == "paired_id_content":
+                            logger.info(_blue("[shuffle_both] Option IDs move with their contents; probabilities are treated as content-aligned. PriDe residual correction uses a uniform/zero prior because ID priors are no longer separately identifiable from paired permutations."))
 
                         # If results contain only k rotations (e.g., k>=5 full-permutation disabled),
                         # aggregate with rotations instead of factorial permutations.
@@ -2981,7 +3058,7 @@ def main():
                         except Exception:
                             probs_len0 = None
 
-                        if args.setting in ['perm', 'full']:
+                        if args.setting in ['perm', 'full', 'shuffle_both']:
                             if probs_len0 == k:
                                 logger.info(_orange(f"[Auto] Full permutation disabled or not provided (k={k}). Using cyclic rotations for aggregation."))
                                 perm_list = _rotations(k)
@@ -3000,7 +3077,7 @@ def main():
                             probs_seq = data.get('probs', None)
                             if not isinstance(probs_seq, list) or len(probs_seq) != len(perm_list):
                                 continue
-                            agg = _aggregate_probs_over_permutations(probs_seq, perm_list, k)
+                            agg = _aggregate_probs_for_alignment(probs_seq, perm_list, k, prob_alignment)
                             pred_letter = option_ids[int(np.argmax(agg))]
                             if pred_letter == data['ideal']:
                                 corrects += 1
@@ -3055,7 +3132,7 @@ def main():
                 # =========================================================
                 # Derived policies & PRIDE_FREE (full or cyclic for MMLU aggregate plots)
                 # =========================================================
-                if args.setting in ('full', 'cyclic') and len(results) > 0:
+                if args.setting in ('full', 'cyclic', 'shuffle_both') and len(results) > 0:
                     try:
                         if getattr(args, 'option_id_set', None):
                             option_ids = list(args.option_id_set)
@@ -3063,6 +3140,7 @@ def main():
                             k_guess = len(results[0]['data']['options'])
                             option_ids = list('ABCDE' if k_guess == 5 else 'ABCD')
                         k = len(option_ids)
+                        prob_alignment = _prob_alignment_for_setting(args.setting)
 
                         # Determine whether full permutations exist in cached results.
                         probs_len0 = None
@@ -3165,7 +3243,7 @@ def main():
                                     'ideal': data['ideal'],
                                 },
                             })
-                            agg_cyc = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs], cyc_perms, k)
+                            agg_cyc = _aggregate_probs_for_alignment([cp.tolist() for cp in cyc_probs], cyc_perms, k, prob_alignment)
                             pred_cyc = option_ids[int(np.argmax(agg_cyc))]
                             cyclic_pred_idx_list.append(int(np.argmax(agg_cyc)))
                             corr_cyc = (pred_cyc == data['ideal'])
@@ -3195,7 +3273,7 @@ def main():
 
                             # full (all perms) - only if available
                             if full_enabled:
-                                agg_full = _aggregate_probs_over_permutations(probs_seq_np, perm_list, k)
+                                agg_full = _aggregate_probs_for_alignment(probs_seq_np, perm_list, k, prob_alignment)
                                 pred_full_idx = int(np.argmax(agg_full))
                                 pred_full = option_ids[pred_full_idx]
                                 full_pred_idx_list.append(pred_full_idx)
@@ -3224,14 +3302,15 @@ def main():
                             probe_perm_idx = cyclic_indices[shift]
 
                             probs_base_raw = per_sample_probs[i][identity_idx]
-                            agg_base = _aggregate_probs_over_permutations([probs_base_raw.tolist()], [tuple(range(k))], k)
+                            agg_base = _aggregate_probs_for_alignment([probs_base_raw.tolist()], [tuple(range(k))], k, prob_alignment)
 
                             cyc_gaps_i = []
                             for cyc_local_idx, perm_idx in enumerate(cyclic_indices):
-                                agg_cyc_single = _aggregate_probs_over_permutations(
+                                agg_cyc_single = _aggregate_probs_for_alignment(
                                     [per_sample_probs[i][perm_idx].tolist()],
                                     [cyc_perms[cyc_local_idx]],
                                     k,
+                                    prob_alignment,
                                 )
                                 cyc_gaps_i.append(_gap_of_distribution(np.asarray(agg_cyc_single, dtype=np.float64)))
                             cyc_gaps_arr = np.asarray(cyc_gaps_i, dtype=np.float64)
@@ -3239,7 +3318,7 @@ def main():
                             cyclic_gap_std_list.append(float(np.std(cyc_gaps_arr)) if cyc_gaps_arr.size > 0 else 0.0)
 
                             probs_probe_raw = per_sample_probs[i][probe_perm_idx]
-                            agg_probe = _aggregate_probs_over_permutations([probs_probe_raw.tolist()], [cyc_perms[shift]], k)
+                            agg_probe = _aggregate_probs_for_alignment([probs_probe_raw.tolist()], [cyc_perms[shift]], k, prob_alignment)
 
                             mean_probs = (agg_base + agg_probe) / 2.0
                             vals_mean = np.sort(mean_probs)[::-1]
@@ -3424,13 +3503,26 @@ def main():
                         if pride_enabled:
                             for pride_alpha in pride_prefix_list:
                                 seed = _stable_u32_seed(str(subject), int(getattr(args, "pride_seed", 0)) + run_idx_inner)
-                                pride_prior, pride_meta = _estimate_pride_prior_random_prefix_mean(
-                                    per_sample_probs=per_sample_probs,
-                                    cyclic_indices=cyclic_indices,
-                                    k=k,
-                                    prefix_ratio=float(pride_alpha) / 100.0,
-                                    seed=seed,
-                                )
+                                if prob_alignment == "paired_id_content":
+                                    prefix_ids = _sample_prefix_ids(len(per_sample_probs), float(pride_alpha) / 100.0, seed)
+                                    pride_prior = np.ones((k,), dtype=np.float64) / float(k)
+                                    pride_meta = {
+                                        "N": int(len(per_sample_probs)),
+                                        "m": int(len(prefix_ids)),
+                                        "used": int(len(prefix_ids)),
+                                        "ratio": float(pride_alpha) / 100.0,
+                                        "seed": int(seed),
+                                        "prefix_ids": prefix_ids,
+                                        "prior_mode": "uniform_for_paired_id_content",
+                                    }
+                                else:
+                                    pride_prior, pride_meta = _estimate_pride_prior_random_prefix_mean(
+                                        per_sample_probs=per_sample_probs,
+                                        cyclic_indices=cyclic_indices,
+                                        k=k,
+                                        prefix_ratio=float(pride_alpha) / 100.0,
+                                        seed=seed,
+                                    )
                                 prefix_ids_set = set(int(x) for x in (pride_meta.get("prefix_ids") or []))
 
                                 base_correct_list_pr = []
@@ -3453,7 +3545,7 @@ def main():
 
                                     # Cyclic
                                     cyc_probs_corr = [ps_corr[idx] for idx in cyclic_indices]
-                                    agg_cyc_corr = _aggregate_probs_over_permutations([cp.tolist() for cp in cyc_probs_corr], cyc_perms, k)
+                                    agg_cyc_corr = _aggregate_probs_for_alignment([cp.tolist() for cp in cyc_probs_corr], cyc_perms, k, prob_alignment)
                                     pred_cyc_corr = option_ids[int(np.argmax(agg_cyc_corr))]
                                     cyclic_pred_idx_list_pr.append(int(np.argmax(agg_cyc_corr)))
                                     cyclic_correct_list_pr.append(pred_cyc_corr == ideals[i])
@@ -3466,7 +3558,7 @@ def main():
 
                                     # Full
                                     if full_enabled:
-                                        agg_full_corr = _aggregate_probs_over_permutations(ps_corr, perm_list, k)
+                                        agg_full_corr = _aggregate_probs_for_alignment(ps_corr, perm_list, k, prob_alignment)
                                         pred_full_idx_pr = int(np.argmax(agg_full_corr))
                                         full_pred_idx_list_pr.append(pred_full_idx_pr)
                                         full_correct_list_pr.append(option_ids[pred_full_idx_pr] == ideals[i])
@@ -3477,14 +3569,15 @@ def main():
 
                                     shift, _, _ = _probe_shift_cyclic_put_top2_into_top1_slot(base_row_corr, k)
                                     probe_perm_idx = cyclic_indices[shift]
-                                    agg_base = _aggregate_probs_over_permutations([base_row_corr.tolist()], [tuple(range(k))], k)
+                                    agg_base = _aggregate_probs_for_alignment([base_row_corr.tolist()], [tuple(range(k))], k, prob_alignment)
 
                                     cyc_gaps_i_pr = []
                                     for cyc_local_idx, perm_idx in enumerate(cyclic_indices):
-                                        agg_cyc_single_pr = _aggregate_probs_over_permutations(
+                                        agg_cyc_single_pr = _aggregate_probs_for_alignment(
                                             [ps_corr[perm_idx].tolist()],
                                             [cyc_perms[cyc_local_idx]],
                                             k,
+                                            prob_alignment,
                                         )
                                         cyc_gaps_i_pr.append(_gap_of_distribution(np.asarray(agg_cyc_single_pr, dtype=np.float64)))
                                     cyc_gaps_arr_pr = np.asarray(cyc_gaps_i_pr, dtype=np.float64)
@@ -3492,7 +3585,7 @@ def main():
                                     cyclic_gap_std_list_pr.append(float(np.std(cyc_gaps_arr_pr)) if cyc_gaps_arr_pr.size > 0 else 0.0)
 
                                     probe_row_corr = np.asarray(ps_corr[probe_perm_idx], dtype=np.float64)
-                                    agg_probe = _aggregate_probs_over_permutations([probe_row_corr.tolist()], [cyc_perms[shift]], k)
+                                    agg_probe = _aggregate_probs_for_alignment([probe_row_corr.tolist()], [cyc_perms[shift]], k, prob_alignment)
 
                                     mean_probs = (np.asarray(agg_base, dtype=np.float64) + np.asarray(agg_probe, dtype=np.float64)) / 2.0
                                     vals_mean = np.sort(mean_probs)[::-1]
@@ -3610,7 +3703,21 @@ def main():
                             empirical_base_seed = int(getattr(args, "pride_seed", 0))
                             for pride_alpha in empirical_prefix_list:
                                 empirical_seed = _stable_u32_seed(str(subject), empirical_base_seed + run_idx_inner)
-                                if empirical_residual_model == "logistic_normal":
+                                if prob_alignment == "paired_id_content":
+                                    empirical_prefix_ids_list = _sample_prefix_ids(len(per_sample_probs), float(pride_alpha) / 100.0, empirical_seed)
+                                    empirical_mu_hat = np.zeros((k,), dtype=np.float64)
+                                    empirical_residual_bank = np.zeros((1, k), dtype=np.float64)
+                                    empirical_covariance = np.zeros((k, k), dtype=np.float64)
+                                    empirical_meta = {
+                                        "N": int(len(per_sample_probs)),
+                                        "m": int(len(empirical_prefix_ids_list)),
+                                        "used": int(len(empirical_prefix_ids_list)),
+                                        "ratio": float(pride_alpha) / 100.0,
+                                        "seed": int(empirical_seed),
+                                        "prefix_ids": empirical_prefix_ids_list,
+                                        "residual_mode": "zero_for_paired_id_content",
+                                    }
+                                elif empirical_residual_model == "logistic_normal":
                                     _, empirical_mu_hat, empirical_residual_bank, empirical_covariance, empirical_meta = _estimate_logistic_normal_pride_bank(
                                         per_sample_probs=per_sample_probs,
                                         cyclic_indices=cyclic_indices,
@@ -3647,6 +3754,7 @@ def main():
                                         mu_hat=empirical_mu_hat,
                                         residual_bank=empirical_residual_bank,
                                         labels_idx=labels_idx_for_curves,
+                                        prob_alignment=prob_alignment,
                                     )
                                     logger.info(
                                         _blue(
@@ -3669,6 +3777,7 @@ def main():
                                         slot_to_content_schedule=[tuple(range(k))],
                                         mu_hat=empirical_mu_hat,
                                         residual_bank=empirical_residual_bank,
+                                        prob_alignment=prob_alignment,
                                     )
                                     corrected_stage1 = np.asarray(base_posterior[0], dtype=np.float64)
                                     sorted_idx = np.argsort(corrected_stage1)[::-1]
@@ -3709,10 +3818,15 @@ def main():
                                         probe_slot_to_content = stage_schedule[1]
                                         probing_inputs_emp = []
                                         for slot_to_content in stage_schedule[1:]:
-                                            permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
                                             probing_inputs_emp.append([
                                                 str(prompt_meta["sys_msg"]),
-                                                _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
+                                                _build_permuted_option_user_prompt(
+                                                    str(prompt_meta["question"]),
+                                                    raw_options,
+                                                    option_ids,
+                                                    tuple(slot_to_content),
+                                                    prob_alignment,
+                                                ),
                                             ])
                                         empirical_sample = (
                                             int(prompt_meta["idx"]),
@@ -3726,6 +3840,7 @@ def main():
                                             slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
                                             residual_bank=empirical_residual_bank,
+                                            prob_alignment=prob_alignment,
                                         )
                                         fallback_residual_bank = (
                                             np.zeros((1, k), dtype=np.float64)
@@ -3737,6 +3852,7 @@ def main():
                                             slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
                                             residual_bank=fallback_residual_bank,
+                                            prob_alignment=prob_alignment,
                                         )
                                         empirical_stage_infos.append({
                                             "sample_id": int(prompt_meta["idx"]),
@@ -3760,6 +3876,7 @@ def main():
                                             slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
                                             residual_bank=empirical_residual_bank,
+                                            prob_alignment=prob_alignment,
                                         )
                                         empirical_stage_infos.append({
                                             "sample_id": int(prompt_meta["idx"]),
@@ -3775,10 +3892,15 @@ def main():
                                     else:
                                         probing_inputs_emp = []
                                         for slot_to_content in stage_schedule:
-                                            permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
                                             probing_inputs_emp.append([
                                                 str(prompt_meta["sys_msg"]),
-                                                _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
+                                                _build_permuted_option_user_prompt(
+                                                    str(prompt_meta["question"]),
+                                                    raw_options,
+                                                    option_ids,
+                                                    tuple(slot_to_content),
+                                                    prob_alignment,
+                                                ),
                                             ])
 
                                         empirical_sample = (
@@ -3792,6 +3914,7 @@ def main():
                                             slot_to_content_schedule=stage_schedule,
                                             mu_hat=empirical_mu_hat,
                                             residual_bank=empirical_residual_bank,
+                                            prob_alignment=prob_alignment,
                                         )
                                         empirical_stage_infos.append({
                                             "sample_id": int(prompt_meta["idx"]),
@@ -3809,7 +3932,11 @@ def main():
                                     "percentile": float(pride_alpha),
                                     "sweep_mode": empirical_sweep_mode,
                                     "percentile_mode": empirical_percentile_mode,
+                                    "permutation_setting": str(args.setting),
+                                    "prob_alignment": prob_alignment,
                                     "residual_model": empirical_residual_model,
+                                    "residual_model_effective": "zero" if prob_alignment == "paired_id_content" else empirical_residual_model,
+                                    "empirical_meta": dict(empirical_meta),
                                     "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
                                     "cov_shrinkage": float(empirical_cov_shrinkage),
                                     "transition_mode": empirical_transition_mode,
@@ -3885,6 +4012,7 @@ def main():
                                         "run_idx": int(run_idx),
                                         "alpha": float(pride_alpha),
                                         "residual_model": empirical_residual_model,
+                                        "residual_model_effective": "zero" if prob_alignment == "paired_id_content" else empirical_residual_model,
                                         "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
                                         "cov_shrinkage": float(empirical_cov_shrinkage),
                                         "transition_mode": empirical_transition_mode,
@@ -3892,6 +4020,8 @@ def main():
                                         "threshold_schedule": empirical_stage_schedule,
                                         "threshold_gamma": float(empirical_stage_gamma),
                                         "percentile_mode": empirical_percentile_mode,
+                                        "permutation_setting": str(args.setting),
+                                        "prob_alignment": prob_alignment,
                                         "selection_policy": None if learned_selection_info is None else str(learned_selection_info.get("selection_policy", "")),
                                         "selected_sequence_name": None if learned_selection_info is None else str(learned_selection_info.get("selected_sequence_name", "")),
                                         "selected_action_sequence": [] if learned_selection_info is None else list(learned_selection_info.get("selected_action_sequence") or []),
@@ -3902,7 +4032,7 @@ def main():
                                     empirical_analysis_records.append(analysis_record)
 
                                     analysis_dir = os.path.join(
-                                        build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="full"),
+                                        build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting=("shuffle_both" if args.setting == "shuffle_both" else "full")),
                                         "empirical_analysis",
                                     )
                                     os.makedirs(analysis_dir, exist_ok=True)
@@ -3953,14 +4083,17 @@ def main():
                                     curve_objs_empirical.append(merged_emp)
 
                         # ---------- save cyclic/base derived results ----------
-                        cyclic_save_path = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="cyclic")
+                        cyclic_setting = "shuffle_both_cyclic" if args.setting == "shuffle_both" else "cyclic"
+                        base_setting = "shuffle_both_base" if args.setting == "shuffle_both" else None
+                        curve_setting = "shuffle_both" if args.setting == "shuffle_both" else "full"
+                        cyclic_save_path = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting=cyclic_setting)
                         os.makedirs(cyclic_save_path, exist_ok=True)
 
                         cyclic_acc = (cyclic_corrects / cyclic_total) if cyclic_total > 0 else float('nan')
                         save_results(f'{cyclic_save_path}/{subject}.jsonl', cyclic_results,
                                  metrics={'type': 'metric', 'data': {'accuracy': cyclic_acc}})
 
-                        base_save_path = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting=None)
+                        base_save_path = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting=base_setting)
                         os.makedirs(base_save_path, exist_ok=True)
 
                         base_acc = float(np.mean(np.asarray(base_correct_list, dtype=np.float64))) if len(base_correct_list) else float('nan')
@@ -3970,7 +4103,7 @@ def main():
                         full_acc = (full_corrects / full_total) if full_total > 0 else float('nan')
 
                         # ---------- curve save path (for per-subject plots when not MMLU) ----------
-                        curve_save_path = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="full")
+                        curve_save_path = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting=curve_setting)
                         os.makedirs(curve_save_path, exist_ok=True)
 
                         # (per-subject report removed — FINAL CONDENSED REPORT only)
@@ -4172,6 +4305,8 @@ def main():
                     task_analysis_path = os.path.join(out_dir, f"{args.task}_empirical_stage_analysis.json")
                     task_analysis_payload = {
                         "task": str(args.task),
+                        "setting": str(args.setting),
+                        "prob_alignment": _prob_alignment_for_setting(args.setting),
                         "model_name": str(args.model_name),
                         "eval_name": str(eval_name),
                         "n_runs": int(n_runs),

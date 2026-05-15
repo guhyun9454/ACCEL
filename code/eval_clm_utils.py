@@ -267,24 +267,24 @@ def prepare_eval(args, eval_name):
     sys_msg += ' You should directly answer the question by choosing the correct option.'
 
     # create_user_prompt
-    def create_user_prompt(question: str, options: List[str]):
+    def create_user_prompt(question: str, options: List[str], display_option_ids: List[str] = None):
+        prompt_option_ids = list(display_option_ids) if display_option_ids is not None else option_ids
         if setting in ['noid']:
             user_prompt = f"Question: {question.strip()}\nOptions:\n" + \
                 "\n".join([f"{answer}".strip()
-                           for option_id, answer in zip(option_ids, options)]) + \
-                "\nAnswer:"
-        elif setting in ['shuffle_both']:
-            shuffled_option_ids, shuffled_options = shuffle_options_with_ids(option_ids, options)
-            user_prompt = f"Question: {question.strip()}\nOptions:\n" + \
-                "\n".join([f"{option_id}. {answer}".strip()
-                           for option_id, answer in zip(shuffled_option_ids, shuffled_options)]) + \
+                           for option_id, answer in zip(prompt_option_ids, options)]) + \
                 "\nAnswer:"
         else:
             user_prompt = f"Question: {question.strip()}\nOptions:\n" + \
                 "\n".join([f"{option_id}. {answer}".strip()
-                           for option_id, answer in zip(option_ids, options)]) + \
+                           for option_id, answer in zip(prompt_option_ids, options)]) + \
                 "\nAnswer:"
         return user_prompt
+
+    def create_paired_user_prompt(question: str, options: List[str], slot_to_content: List[int]):
+        permuted_option_ids = [option_ids[int(content_idx)] for content_idx in slot_to_content]
+        permuted_options = [options[int(content_idx)] for content_idx in slot_to_content]
+        return create_user_prompt(question, permuted_options, display_option_ids=permuted_option_ids)
 
     # prepare_few_shot_samples
     # few_shot_seed: None이면 기존 동작(첫 N개). 정수면 해당 seed로 shuffle 후 사용 (n_runs 시 run별 다른 few-shot)
@@ -305,7 +305,7 @@ def prepare_eval(args, eval_name):
             rng.shuffle(few_shot_samples)
         return few_shot_samples
 
-    if getattr(args, 'skip_full', False) and setting == 'full':
+    if getattr(args, 'skip_full', False) and setting in ['full', 'shuffle_both']:
         k_opts = len(option_ids_header)
         logger.info(_purple(f"[skip_full] Using cyclic instead of full permutations (k={k_opts} → {k_opts}x inferences)"))
 
@@ -319,9 +319,33 @@ def prepare_eval(args, eval_name):
         # NOTE: full permutation은 k!로 급증하므로, k>=5에서는 full이라도 cyclic만 생성(자동 다운그레이드)
         # --skip_full: full이어도 cyclic만 사용 (MMLU 등 오래 걸릴 때)
         k_opts = len(option_ids_header)
-        full_permutation_disabled = (setting == 'full' and k_opts >= 5) or bool(getattr(args, 'skip_full', False))
+        full_like_setting = setting in ['full', 'shuffle_both']
+        full_permutation_disabled = (full_like_setting and k_opts >= 5) or bool(getattr(args, 'skip_full', False))
 
-        if setting in ['perm'] or (setting == 'full' and not full_permutation_disabled):
+        if setting == 'shuffle_both':
+            if full_permutation_disabled:
+                inputs = df.apply(lambda x: [
+                    [
+                        sys_msg.format(subject.replace('_', ' ')),
+                        create_paired_user_prompt(
+                            x["Question"],
+                            [x[e] for e in option_ids_header],
+                            list(slot_to_content),
+                        ),
+                    ] for slot_to_content in cycle_options(list(range(k_opts)))
+                ], axis=1).to_list()
+            else:
+                inputs = df.apply(lambda x: [
+                    [
+                        sys_msg.format(subject.replace('_', ' ')),
+                        create_paired_user_prompt(
+                            x["Question"],
+                            [x[e] for e in option_ids_header],
+                            list(slot_to_content),
+                        ),
+                    ] for slot_to_content in permute_options(list(range(k_opts)))
+                ], axis=1).to_list()
+        elif setting in ['perm'] or (setting == 'full' and not full_permutation_disabled):
             inputs = df.apply(lambda x: [
                 [
                     sys_msg.format(subject.replace('_', ' ')),
@@ -349,7 +373,7 @@ def prepare_eval(args, eval_name):
     # prepare_eval_fn
     if setting in ['noid']:
         prepare_eval_fn = partial(prepare_eval_fn_noid, num_few_shot=num_few_shot, option_ids=option_ids)
-    elif setting in ['perm', 'cyclic', 'full']:
+    elif setting in ['perm', 'cyclic', 'full', 'shuffle_both']:
         prepare_eval_fn = partial(prepare_eval_fn_perm, num_few_shot=num_few_shot, option_ids=option_ids)
     else:
         prepare_eval_fn = partial(prepare_eval_fn_base, num_few_shot=num_few_shot, option_ids=option_ids)

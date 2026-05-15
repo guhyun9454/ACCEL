@@ -29,6 +29,8 @@ def _plot_three_curves_acc_recall_std(
     empirical_prefix_list: List[float],
     wandb_ok: bool = False,
     wandb_run: Any = None,
+    setting: str = None,
+    prob_alignment: str = None,
 ):
     """
     Three curves: (1) Cyclic (no PRIDE), (2) Default+PRIDE, (3) OURS (th1/sqrt2, no PRIDE).
@@ -381,10 +383,16 @@ def _plot_three_curves_acc_recall_std(
         selection_policy = None
         selected_sequence_name = None
         selected_action_sequence = None
+        permutation_setting = "" if setting is None else str(setting)
+        empirical_prob_alignment = "" if prob_alignment is None else str(prob_alignment)
         for alpha in prefix_list:
             cobjs = by_alpha.get(alpha, [])
             if not cobjs:
                 continue
+            if not permutation_setting:
+                permutation_setting = str(cobjs[0].get("permutation_setting", "") or "")
+            if not empirical_prob_alignment:
+                empirical_prob_alignment = str(cobjs[0].get("prob_alignment", "") or "")
             if selection_policy is None:
                 selection_policy = cobjs[0].get("selection_policy")
                 selected_sequence_name = cobjs[0].get("selected_sequence_name")
@@ -427,6 +435,8 @@ def _plot_three_curves_acc_recall_std(
             "skip_residual_on_cyclic": bool(empirical_skip_residual),
             "threshold_schedule": empirical_schedule,
             "threshold_gamma": float(empirical_gamma),
+            "permutation_setting": permutation_setting,
+            "prob_alignment": empirical_prob_alignment,
             payload_sweep_key: [float(x) for x in empirical_sweep_values],
             "by_alpha": by_alpha_out,
         }
@@ -436,6 +446,8 @@ def _plot_three_curves_acc_recall_std(
         payload = {
             "version": 2,
             "task": str(task),
+            "setting": None if setting is None else str(setting),
+            "prob_alignment": None if prob_alignment is None else str(prob_alignment),
             "default_acc": float(default_acc),
             "default_recall_std": float(default_recall_std),
             "cyclic_fractions": [int(x) for x in cyclic_fractions],
@@ -507,7 +519,8 @@ def _plot_three_curves_acc_recall_std(
                 if not isinstance(existing, dict):
                     existing = {}
                 existing = dict(existing)
-                existing[str(task)] = payload
+                task_key = str(task) if not setting or str(setting) == "full" else f"{str(task)}_{str(setting)}"
+                existing[task_key] = payload
                 wandb_run.summary["three_curves_points_v1"] = existing
 
                 art_name = f"three-curves-points-{str(task)}-{wandb_run.id}"
