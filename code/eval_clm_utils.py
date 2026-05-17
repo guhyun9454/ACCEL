@@ -134,6 +134,10 @@ def parse_arguments():
                         help="Ours+PRIDE에서 PriDe prefix(alpha) 값. 선택 가능한 α 목록.")
     parser.add_argument("--plot_empirical_prefix_fractions", type=str, default=None,
                         help="Empirical PriDe용 prefix(alpha) 값. 비우면 --plot_pride_prefix_fractions를 그대로 사용.")
+    parser.add_argument("--eval_order_sensitivity_seeds", type=str, default="",
+                        help="Comma-separated order seeds for offline evaluation-order sensitivity analysis. Empty disables it.")
+    parser.add_argument("--eval_order_sensitivity_include_original", action="store_true", default=True,
+                        help="Include the original evaluation order as the reference in order-sensitivity payloads.")
 
     parser.add_argument("--verbose", action="store_true",
                         help="Print verbose logs (extra summaries).")

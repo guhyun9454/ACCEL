@@ -2284,6 +2284,338 @@ def _parse_float_value_list(v, default: Optional[List[float]] = None) -> List[fl
     return fallback
 
 
+def _parse_int_seed_list(v) -> List[int]:
+    if v is None:
+        return []
+    if isinstance(v, int):
+        return [int(v)]
+    if isinstance(v, (list, tuple)):
+        out = []
+        for x in v:
+            try:
+                out.append(int(x))
+            except Exception:
+                pass
+        return out
+    if isinstance(v, str):
+        out = []
+        for tok in v.replace(";", ",").split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                out.append(int(tok))
+            except Exception:
+                pass
+        return out
+    return []
+
+
+def _reorder_sequence(seq: List[Any], order: np.ndarray) -> List[Any]:
+    return [seq[int(i)] for i in order]
+
+
+def _counts_to_routing_props(counts: Dict[str, int], n_samples: int) -> Dict[str, float]:
+    denom = float(max(1, int(n_samples)))
+    out = {}
+    for key, val in (counts or {}).items():
+        if not str(key).startswith("n_stage_"):
+            continue
+        out[str(key)] = float(val) / denom
+    return out
+
+
+def _run_empirical_order_curve(
+    stage_infos: List[Dict[str, Any]],
+    labels_idx: List[int],
+    k: int,
+    sweep_mode: str,
+    sweep_values: List[float],
+    stage_schedule: str,
+    stage_gamma: float,
+    percentile_mode: str,
+) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    sweep_mode_norm = str(sweep_mode or "percentile").strip().lower()
+    if sweep_mode_norm not in {"percentile", "confidence"}:
+        sweep_mode_norm = "percentile"
+    for sweep_value in sweep_values:
+        sweep_f = float(sweep_value)
+        if sweep_mode_norm == "confidence":
+            cost, acc, preds, counts = _run_empirical_pride_policy_from_stage_infos_confidence(
+                stage_infos=stage_infos,
+                labels_idx=labels_idx,
+                k=k,
+                confidence_threshold=sweep_f,
+                stage_schedule=stage_schedule,
+                stage_gamma=stage_gamma,
+            )
+            sweep_key = "confidence"
+        else:
+            cost, acc, preds, counts = _run_empirical_pride_policy_from_stage_infos(
+                stage_infos=stage_infos,
+                labels_idx=labels_idx,
+                k=k,
+                percentile=sweep_f,
+                stage_schedule=stage_schedule,
+                stage_gamma=stage_gamma,
+                percentile_mode=percentile_mode,
+            )
+            sweep_key = "p"
+        points.append({
+            sweep_key: float(sweep_f),
+            "cost": float(cost),
+            "acc": float(acc) * 100.0,
+            "recall_std": float(_recall_std(labels_idx, preds, k)) if preds else float("nan"),
+            "routing": _counts_to_routing_props(counts, len(stage_infos)),
+            "counts": {str(key): int(val) for key, val in (counts or {}).items()},
+        })
+    return points
+
+
+def _build_empirical_order_sensitivity_subject_record(
+    subject: str,
+    alpha: float,
+    stage_infos: List[Dict[str, Any]],
+    labels_idx: List[int],
+    k: int,
+    sweep_mode: str,
+    sweep_values: List[float],
+    stage_schedule: str,
+    stage_gamma: float,
+    percentile_mode: str,
+    order_seeds: List[int],
+    include_original: bool = True,
+) -> Optional[Dict[str, Any]]:
+    n_samples = len(stage_infos)
+    if n_samples <= 0 or not order_seeds:
+        return None
+
+    sweep_mode_norm = str(sweep_mode or "percentile").strip().lower()
+    sweep_key = "confidence" if sweep_mode_norm == "confidence" else "p"
+    runs: Dict[str, Any] = {}
+    if include_original:
+        runs["original"] = {
+            "seed": None,
+            "order_head": list(range(min(10, n_samples))),
+            "points": _run_empirical_order_curve(
+                stage_infos=stage_infos,
+                labels_idx=labels_idx,
+                k=k,
+                sweep_mode=sweep_mode_norm,
+                sweep_values=sweep_values,
+                stage_schedule=stage_schedule,
+                stage_gamma=stage_gamma,
+                percentile_mode=percentile_mode,
+            ),
+        }
+
+    for seed in order_seeds:
+        rng = np.random.default_rng(int(seed))
+        order = rng.permutation(n_samples)
+        stage_infos_reordered = _reorder_sequence(stage_infos, order)
+        labels_reordered = _reorder_sequence(labels_idx, order)
+        runs[str(int(seed))] = {
+            "seed": int(seed),
+            "order_head": [int(x) for x in order[: min(10, n_samples)].tolist()],
+            "points": _run_empirical_order_curve(
+                stage_infos=stage_infos_reordered,
+                labels_idx=labels_reordered,
+                k=k,
+                sweep_mode=sweep_mode_norm,
+                sweep_values=sweep_values,
+                stage_schedule=stage_schedule,
+                stage_gamma=stage_gamma,
+                percentile_mode=percentile_mode,
+            ),
+        }
+
+    return {
+        "method": EMPIRICAL_PRIDE_LABEL,
+        "subject": str(subject),
+        "alpha": float(alpha),
+        "k": int(k),
+        "n_samples": int(n_samples),
+        "sweep_mode": sweep_mode_norm,
+        "sweep_key": sweep_key,
+        "sweep_values": [float(x) for x in sweep_values],
+        "stage_schedule": str(stage_schedule),
+        "stage_gamma": float(stage_gamma),
+        "percentile_mode": str(percentile_mode),
+        "runs": runs,
+    }
+
+
+def _metric_array_from_points(points: List[Dict[str, Any]], metric: str) -> List[float]:
+    return [float(p.get(metric, float("nan"))) for p in (points or [])]
+
+
+def _routing_arrays_from_points(points: List[Dict[str, Any]], stage_keys: List[str]) -> Dict[str, List[float]]:
+    out = {key: [] for key in stage_keys}
+    for point in (points or []):
+        routing = point.get("routing") or {}
+        for key in stage_keys:
+            out[key].append(float(routing.get(key, 0.0)))
+    return out
+
+
+def _aggregate_order_sensitivity_records(
+    records: List[Dict[str, Any]],
+    task: str,
+    model_name: str,
+    eval_name: str,
+    order_seeds: List[int],
+    include_original: bool,
+) -> Optional[Dict[str, Any]]:
+    if not records:
+        return None
+
+    grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for rec in records:
+        grouped[(str(rec.get("method", "")), f"{float(rec.get('alpha', 0.0)):g}")].append(rec)
+
+    curves: Dict[str, Dict[str, Any]] = defaultdict(dict)
+    review_sentences: List[str] = []
+    for (method, alpha_key), recs in sorted(grouped.items(), key=lambda kv: (kv[0][0], float(kv[0][1]))):
+        first = recs[0]
+        sweep_values = [float(x) for x in (first.get("sweep_values") or [])]
+        sweep_key = str(first.get("sweep_key", "p"))
+        stage_keys = sorted({
+            key
+            for rec in recs
+            for run in (rec.get("runs") or {}).values()
+            for point in (run.get("points") or [])
+            for key in ((point.get("routing") or {}).keys())
+        }, key=lambda x: int(str(x).replace("n_stage_", "")) if str(x).replace("n_stage_", "").isdigit() else 999)
+
+        per_seed: Dict[str, Dict[str, Any]] = {}
+        labels = [str(int(seed)) for seed in order_seeds]
+        if include_original:
+            labels = ["original"] + labels
+        for label in labels:
+            subject_runs = [rec.get("runs", {}).get(label) for rec in recs if rec.get("runs", {}).get(label)]
+            if not subject_runs:
+                continue
+            entry: Dict[str, Any] = {sweep_key: sweep_values}
+            for metric in ("cost", "acc", "recall_std"):
+                rows = [_metric_array_from_points(run.get("points") or [], metric) for run in subject_runs]
+                arr = np.asarray(rows, dtype=np.float64)
+                entry[metric] = [float(x) for x in np.nanmean(arr, axis=0)] if arr.size else []
+            routing_out: Dict[str, List[float]] = {}
+            for stage_key in stage_keys:
+                rows = [
+                    _routing_arrays_from_points(run.get("points") or [], [stage_key]).get(stage_key, [])
+                    for run in subject_runs
+                ]
+                arr = np.asarray(rows, dtype=np.float64)
+                routing_out[stage_key] = [float(x) for x in np.nanmean(arr, axis=0)] if arr.size else []
+            entry["routing"] = routing_out
+            per_seed[label] = entry
+
+        seed_entries = [per_seed.get(str(int(seed))) for seed in order_seeds if per_seed.get(str(int(seed)))]
+        if seed_entries:
+            stats: Dict[str, Any] = {}
+            for metric in ("cost", "acc", "recall_std"):
+                arr = np.asarray([entry.get(metric, []) for entry in seed_entries], dtype=np.float64)
+                stats[metric] = {
+                    "mean": [float(x) for x in np.nanmean(arr, axis=0)],
+                    "std": [float(x) for x in np.nanstd(arr, axis=0)],
+                    "min": [float(x) for x in np.nanmin(arr, axis=0)],
+                    "max": [float(x) for x in np.nanmax(arr, axis=0)],
+                }
+            routing_stats: Dict[str, Any] = {}
+            for stage_key in stage_keys:
+                arr = np.asarray([(entry.get("routing") or {}).get(stage_key, []) for entry in seed_entries], dtype=np.float64)
+                if arr.size:
+                    routing_stats[stage_key] = {
+                        "mean": [float(x) for x in np.nanmean(arr, axis=0)],
+                        "std": [float(x) for x in np.nanstd(arr, axis=0)],
+                    }
+            stats["routing"] = routing_stats
+        else:
+            stats = {}
+
+        original = per_seed.get("original", {})
+        acc_seed_arr = np.asarray([entry.get("acc", []) for entry in seed_entries], dtype=np.float64) if seed_entries else np.asarray([])
+        cost_seed_arr = np.asarray([entry.get("cost", []) for entry in seed_entries], dtype=np.float64) if seed_entries else np.asarray([])
+        original_acc = np.asarray(original.get("acc", []), dtype=np.float64)
+        if acc_seed_arr.size and original_acc.size:
+            abs_delta = np.abs(acc_seed_arr - original_acc.reshape(1, -1))
+            max_abs_delta_acc = float(np.nanmax(abs_delta))
+        else:
+            max_abs_delta_acc = float("nan")
+        max_acc_std = float(np.nanmax(stats.get("acc", {}).get("std", [float("nan")]))) if stats.get("acc") else float("nan")
+        max_cost_std = float(np.nanmax(stats.get("cost", {}).get("std", [float("nan")]))) if stats.get("cost") else float("nan")
+
+        summary = {
+            "n_subjects": int(len(recs)),
+            "n_samples": int(sum(int(rec.get("n_samples", 0)) for rec in recs)),
+            "max_abs_delta_acc": max_abs_delta_acc,
+            "max_acc_std": max_acc_std,
+            "max_cost_std": max_cost_std,
+        }
+        if np.isfinite(max_acc_std) and np.isfinite(max_cost_std):
+            review_sentences.append(
+                f"{method} alpha={alpha_key}: across {len(order_seeds)} evaluation-order seeds, "
+                f"max accuracy std is {max_acc_std:.3f} percentage points and max cost std is {max_cost_std:.4f}."
+            )
+
+        curves[method][alpha_key] = {
+            "sweep_key": sweep_key,
+            "sweep_values": sweep_values,
+            "original": original,
+            "stats": stats,
+            "per_seed": per_seed,
+            "summary": summary,
+        }
+
+    return {
+        "version": 1,
+        "task": str(task),
+        "model_name": str(model_name),
+        "eval_name": str(eval_name),
+        "order_mode": "offline_reorder",
+        "order_seeds": [int(x) for x in order_seeds],
+        "include_original": bool(include_original),
+        "subjects": sorted({str(rec.get("subject", "")) for rec in records}),
+        "curves": {method: dict(payload) for method, payload in curves.items()},
+        "review_sentences": review_sentences,
+    }
+
+
+def _write_order_sensitivity_payload(
+    payload: Dict[str, Any],
+    out_dir: str,
+    task: str,
+    wandb_ok: bool = False,
+    wandb_run: Any = None,
+) -> Optional[str]:
+    if not payload:
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{task}_eval_order_sensitivity.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    logger.info(_purple(f"Saved evaluation-order sensitivity: {out_path}"))
+
+    if wandb_ok and wandb_run is not None:
+        try:
+            import wandb
+            existing = wandb_run.summary.get("eval_order_sensitivity_v1", {})
+            if not isinstance(existing, dict):
+                existing = {}
+            existing = dict(existing)
+            existing[str(task)] = payload
+            wandb_run.summary["eval_order_sensitivity_v1"] = existing
+            art_name = f"eval-order-sensitivity-{str(task)}-{wandb_run.id}"
+            art = wandb.Artifact(name=art_name, type="eval_order_sensitivity")
+            art.add_file(out_path)
+            wandb_run.log_artifact(art)
+        except Exception as e:
+            logger.warning(f"W&B eval-order sensitivity logging failed: {e}")
+    return out_path
+
+
 # =========================================================
 # Curves: baseline (all methods)
 # =========================================================
@@ -2672,6 +3004,8 @@ def main():
     args = parse_arguments()
     if len(getattr(args, "eval_names", [])) == 0:
         return
+    order_sensitivity_seeds = _parse_int_seed_list(getattr(args, "eval_order_sensitivity_seeds", ""))
+    order_sensitivity_include_original = bool(getattr(args, "eval_order_sensitivity_include_original", True))
 
     # -------- W&B init (optional) --------
     wandb_run = None
@@ -2689,6 +3023,8 @@ def main():
                 "eval_names": getattr(args, "eval_names", None),
                 "option_id_set": getattr(args, "option_id_set", None),
                 "ours_low_conf_percent": getattr(args, "ours_low_conf_percent", None),
+                "eval_order_sensitivity_seeds": getattr(args, "eval_order_sensitivity_seeds", ""),
+                "eval_order_sensitivity_include_original": bool(getattr(args, "eval_order_sensitivity_include_original", True)),
             }
             wandb_run = wandb.init(project=project, entity=entity, name=run_name, config=cfg)
             logger.info(_blue(f"W&B init ok: project={project}, entity={entity}, name={run_name}"))
@@ -2826,6 +3162,76 @@ def main():
                     wandb_ok=wandb_ok,
                     wandb_run=wandb_run,
                 )
+                if order_sensitivity_seeds:
+                    sweep_values = [float(x) for x in pride_fracs]
+                    per_seed = {}
+                    if order_sensitivity_include_original:
+                        per_seed["original"] = {
+                            "p": sweep_values,
+                            "cost": [float(1.0 + 0.01 * i) for i, _ in enumerate(sweep_values)],
+                            "acc": [float(55.0 + 0.05 * i) for i, _ in enumerate(sweep_values)],
+                            "recall_std": [float(0.12 - 0.001 * i) for i, _ in enumerate(sweep_values)],
+                            "routing": {"n_stage_1": [0.8 for _ in sweep_values], "n_stage_4": [0.2 for _ in sweep_values]},
+                        }
+                    seed_rows = []
+                    for seed_i in order_sensitivity_seeds:
+                        local_rng = np.random.default_rng(int(seed_i) ^ int(seed))
+                        entry = {
+                            "p": sweep_values,
+                            "cost": [float(1.0 + 0.01 * i + local_rng.normal(0.0, 0.005)) for i, _ in enumerate(sweep_values)],
+                            "acc": [float(55.0 + 0.05 * i + local_rng.normal(0.0, 0.08)) for i, _ in enumerate(sweep_values)],
+                            "recall_std": [float(0.12 - 0.001 * i + local_rng.normal(0.0, 0.001)) for i, _ in enumerate(sweep_values)],
+                            "routing": {"n_stage_1": [0.8 for _ in sweep_values], "n_stage_4": [0.2 for _ in sweep_values]},
+                        }
+                        per_seed[str(int(seed_i))] = entry
+                        seed_rows.append(entry)
+                    acc_arr = np.asarray([row["acc"] for row in seed_rows], dtype=np.float64)
+                    cost_arr = np.asarray([row["cost"] for row in seed_rows], dtype=np.float64)
+                    rstd_arr = np.asarray([row["recall_std"] for row in seed_rows], dtype=np.float64)
+                    dummy_payload = {
+                        "version": 1,
+                        "task": str(task),
+                        "model_name": str(getattr(args, "model_name", "develop")),
+                        "eval_name": str(eval_name),
+                        "order_mode": "offline_reorder",
+                        "order_seeds": [int(x) for x in order_sensitivity_seeds],
+                        "include_original": bool(order_sensitivity_include_original),
+                        "subjects": ["develop_subject"],
+                        "curves": {
+                            EMPIRICAL_PRIDE_LABEL: {
+                                "2": {
+                                    "sweep_key": "p",
+                                    "sweep_values": sweep_values,
+                                    "original": per_seed.get("original", {}),
+                                    "stats": {
+                                        "cost": {"mean": [float(x) for x in np.nanmean(cost_arr, axis=0)], "std": [float(x) for x in np.nanstd(cost_arr, axis=0)], "min": [float(x) for x in np.nanmin(cost_arr, axis=0)], "max": [float(x) for x in np.nanmax(cost_arr, axis=0)]},
+                                        "acc": {"mean": [float(x) for x in np.nanmean(acc_arr, axis=0)], "std": [float(x) for x in np.nanstd(acc_arr, axis=0)], "min": [float(x) for x in np.nanmin(acc_arr, axis=0)], "max": [float(x) for x in np.nanmax(acc_arr, axis=0)]},
+                                        "recall_std": {"mean": [float(x) for x in np.nanmean(rstd_arr, axis=0)], "std": [float(x) for x in np.nanstd(rstd_arr, axis=0)], "min": [float(x) for x in np.nanmin(rstd_arr, axis=0)], "max": [float(x) for x in np.nanmax(rstd_arr, axis=0)]},
+                                        "routing": {},
+                                    },
+                                    "per_seed": per_seed,
+                                    "summary": {
+                                        "n_subjects": 1,
+                                        "n_samples": 100,
+                                        "max_abs_delta_acc": float(np.nanmax(np.abs(acc_arr - np.asarray(per_seed.get("original", seed_rows[0])["acc"], dtype=np.float64).reshape(1, -1)))) if seed_rows else float("nan"),
+                                        "max_acc_std": float(np.nanmax(np.nanstd(acc_arr, axis=0))) if seed_rows else float("nan"),
+                                        "max_cost_std": float(np.nanmax(np.nanstd(cost_arr, axis=0))) if seed_rows else float("nan"),
+                                    },
+                                }
+                            }
+                        },
+                        "review_sentences": [
+                            f"{EMPIRICAL_PRIDE_LABEL} alpha=2: across {len(order_sensitivity_seeds)} evaluation-order seeds, "
+                            f"max accuracy std is {float(np.nanmax(np.nanstd(acc_arr, axis=0))):.3f} percentage points and max cost std is {float(np.nanmax(np.nanstd(cost_arr, axis=0))):.4f}."
+                        ],
+                    }
+                    _write_order_sensitivity_payload(
+                        dummy_payload,
+                        out_dir=out_dir,
+                        task=str(task),
+                        wandb_ok=wandb_ok,
+                        wandb_run=wandb_run,
+                    )
             except Exception as e:
                 logger.warning(f"[develop] Failed to write dummy plots for eval_name='{eval_name}': {e}")
 
@@ -2889,6 +3295,7 @@ def main():
         derived_records_pride_by_alpha: Dict[float, List[dict]] = {}  # alpha(0.5,1.0,2,5,...) -> list of PRIDE curve_obj
         derived_records_empirical_by_alpha: Dict[float, List[dict]] = {}  # alpha -> list of empirical PriDe curve_obj
         empirical_analysis_records: List[dict] = []
+        order_sensitivity_records: List[dict] = []
         pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
         recall_std_vs_p_records: List[dict] = []  # [{'subject':str,'p':float,'method':str,'kind':str,'rstd':float}]
         n_runs = max(1, int(getattr(args, "n_runs", 1)))
@@ -3869,6 +4276,27 @@ def main():
                                         }
                                         hp_emp.update({key: int(val) for key, val in counts_emp.items()})
                                         cobj_emp["heuristic_points"].append(hp_emp)
+                                if order_sensitivity_seeds:
+                                    try:
+                                        empirical_sweep_values_for_order = empirical_conf_thresholds if empirical_sweep_mode == "confidence" else ours_th1_list
+                                        order_record = _build_empirical_order_sensitivity_subject_record(
+                                            subject=str(subject),
+                                            alpha=float(pride_alpha),
+                                            stage_infos=empirical_stage_infos,
+                                            labels_idx=labels_idx_for_curves,
+                                            k=int(k),
+                                            sweep_mode=empirical_sweep_mode,
+                                            sweep_values=[float(x) for x in empirical_sweep_values_for_order],
+                                            stage_schedule=empirical_stage_schedule,
+                                            stage_gamma=float(empirical_stage_gamma),
+                                            percentile_mode=empirical_percentile_mode,
+                                            order_seeds=order_sensitivity_seeds,
+                                            include_original=order_sensitivity_include_original,
+                                        )
+                                        if order_record is not None:
+                                            order_sensitivity_records.append(order_record)
+                                    except Exception as e:
+                                        logger.warning(f"Failed to compute order sensitivity for {subject} alpha={pride_alpha:g}: {e}")
                                 try:
                                     empirical_sweep_values = empirical_conf_thresholds if empirical_sweep_mode == "confidence" else ours_th1_list
                                     analysis_summary, analysis_trajectories = _build_empirical_stage_analysis(
@@ -4197,6 +4625,30 @@ def main():
                 )
             except Exception as ex:
                 logger.warning(f"Three-curves plot failed: {ex}")
+
+        if order_sensitivity_records:
+            try:
+                out_dir_order = build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="full")
+                payload_order = _aggregate_order_sensitivity_records(
+                    records=order_sensitivity_records,
+                    task=str(args.task),
+                    model_name=str(args.model_name),
+                    eval_name=str(eval_name),
+                    order_seeds=order_sensitivity_seeds,
+                    include_original=order_sensitivity_include_original,
+                )
+                if payload_order:
+                    _write_order_sensitivity_payload(
+                        payload_order,
+                        out_dir=out_dir_order,
+                        task=str(args.task),
+                        wandb_ok=wandb_ok,
+                        wandb_run=wandb_run,
+                    )
+                    for sentence in payload_order.get("review_sentences", []):
+                        logger.info(_purple(f"[Eval-order sensitivity] {sentence}"))
+            except Exception as ex:
+                logger.warning(f"Evaluation-order sensitivity aggregation failed: {ex}")
 
         # =========================================================
         # 커스텀 최종 요약 리포트 (사용자 맞춤형 포맷)

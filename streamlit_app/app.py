@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import json
 import tempfile
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -101,6 +101,7 @@ class RunRecord:
     tasks: List[str]
     points_by_task: Dict[str, dict]  # task -> payload
     sigma_by_task: Dict[str, dict]   # task -> sigma summary payload
+    order_sensitivity_by_task: Dict[str, dict]  # task -> eval-order sensitivity payload
 
 
 def _parse_run_paths(text: str) -> List[str]:
@@ -139,6 +140,9 @@ def _fetch_run_record(run_path: str, refresh_token: int = 0) -> Tuple[Optional[R
         points_by_task = summary.get("three_curves_points_v1", {}) or {}
         if not isinstance(points_by_task, dict):
             points_by_task = {}
+        order_sensitivity_by_task = summary.get("eval_order_sensitivity_v1", {}) or {}
+        if not isinstance(order_sensitivity_by_task, dict):
+            order_sensitivity_by_task = {}
         sigma_by_task_raw = summary.get("sigma_analysis_v1", {}) or {}
         if not isinstance(sigma_by_task_raw, dict):
             sigma_by_task_raw = {}
@@ -177,7 +181,32 @@ def _fetch_run_record(run_path: str, refresh_token: int = 0) -> Tuple[Optional[R
                     points_by_task = recovered
             except Exception:
                 pass
-        tasks = sorted([str(k) for k in points_by_task.keys()])
+        if len(order_sensitivity_by_task) == 0:
+            try:
+                recovered_order: Dict[str, dict] = {}
+                arts = list(run.logged_artifacts() or [])[:50]
+                for art in arts:
+                    try:
+                        if getattr(art, "type", None) != "eval_order_sensitivity":
+                            continue
+                        with tempfile.TemporaryDirectory() as td:
+                            d = art.download(root=td)
+                            for fn in os.listdir(d):
+                                if not (isinstance(fn, str) and fn.endswith("_eval_order_sensitivity.json")):
+                                    continue
+                                p = os.path.join(d, fn)
+                                with open(p, "r", encoding="utf-8") as f:
+                                    payload = json.load(f)
+                                task = str(payload.get("task", "")).strip()
+                                if task:
+                                    recovered_order[task] = payload
+                    except Exception:
+                        continue
+                if recovered_order:
+                    order_sensitivity_by_task = recovered_order
+            except Exception:
+                pass
+        tasks = sorted(set([str(k) for k in points_by_task.keys()] + [str(k) for k in order_sensitivity_by_task.keys()]))
 
         # lightweight identity fields
         parts = run_path.split("/")
@@ -197,9 +226,10 @@ def _fetch_run_record(run_path: str, refresh_token: int = 0) -> Tuple[Optional[R
             tasks=tasks,
             points_by_task=points_by_task,
             sigma_by_task=sigma_by_task,
+            order_sensitivity_by_task=order_sensitivity_by_task,
         )
         if len(tasks) == 0:
-            return rec, "W&B summary에 `three_curves_points_v1`가 없어요. (이 기능을 넣은 이후의 run이어야 평균을 낼 수 있어요.)"
+            return rec, "W&B summary에 `three_curves_points_v1` 또는 `eval_order_sensitivity_v1`가 없어요. (이 기능을 넣은 이후의 run이어야 평균을 낼 수 있어요.)"
         return rec, None
     except Exception as e:
         return None, f"run 로드 실패: `{run_path}` ({e})"
@@ -837,6 +867,98 @@ def _plot_sigma_confidence(df: pd.DataFrame):
     return fig
 
 
+def _order_curve_entries(selected_run_paths: List[str], records: Dict[str, RunRecord], task: str) -> List[dict]:
+    entries: List[dict] = []
+    for rp in selected_run_paths:
+        rec = records.get(rp)
+        if rec is None:
+            continue
+        payload = rec.order_sensitivity_by_task.get(str(task))
+        if not isinstance(payload, dict):
+            continue
+        curves = payload.get("curves") or {}
+        for method, by_alpha in curves.items():
+            if not isinstance(by_alpha, dict):
+                continue
+            for alpha_key, curve in by_alpha.items():
+                if not isinstance(curve, dict):
+                    continue
+                entries.append({
+                    "run_path": rp,
+                    "run_label": _run_label(rec) if "_run_label" in globals() else (rec.model_name or rec.display_name or rec.run_id),
+                    "method": str(method),
+                    "alpha": str(alpha_key),
+                    "payload": payload,
+                    "curve": curve,
+                })
+    return entries
+
+
+def _order_sensitivity_summary_rows(selected_run_paths: List[str], records: Dict[str, RunRecord], task: str) -> pd.DataFrame:
+    rows: List[dict] = []
+    for entry in _order_curve_entries(selected_run_paths, records, task):
+        curve = entry["curve"]
+        summary = curve.get("summary") or {}
+        rows.append({
+            "Run": entry["run_label"],
+            "Method": entry["method"],
+            "Alpha": entry["alpha"],
+            "Seeds": len((entry.get("payload") or {}).get("order_seeds") or []),
+            "Sweep": curve.get("sweep_key", "p"),
+            "Subjects": summary.get("n_subjects"),
+            "Samples": summary.get("n_samples"),
+            "Max |ΔAcc| (pp)": summary.get("max_abs_delta_acc"),
+            "Max Acc Std (pp)": summary.get("max_acc_std"),
+            "Max Cost Std": summary.get("max_cost_std"),
+        })
+    return pd.DataFrame(rows)
+
+
+def _plot_order_sensitivity(entries: List[dict], method_filter: str = "empirical_pride_primary", alpha_filter: str = "2"):
+    selected = [
+        e for e in entries
+        if str(e.get("method")) == str(method_filter) and str(e.get("alpha")) == str(alpha_filter)
+    ]
+    if not selected:
+        selected = [e for e in entries if str(e.get("method")) == str(method_filter)]
+    if not selected:
+        selected = entries
+    if not selected:
+        return None
+
+    fig, ax = plt.subplots(figsize=(8.2, 5.2), dpi=160)
+    for idx, entry in enumerate(selected):
+        curve = entry.get("curve") or {}
+        sweep_key = str(curve.get("sweep_key", "p"))
+        xs = np.asarray(curve.get("sweep_values") or [], dtype=np.float64)
+        stats = curve.get("stats") or {}
+        acc_stats = stats.get("acc") or {}
+        mean = np.asarray(acc_stats.get("mean") or [], dtype=np.float64)
+        std = np.asarray(acc_stats.get("std") or [], dtype=np.float64)
+        if xs.size == 0 or mean.size == 0:
+            continue
+        n = min(xs.size, mean.size, std.size if std.size else mean.size)
+        xs = xs[:n]
+        mean = mean[:n]
+        std = std[:n] if std.size else np.zeros_like(mean)
+        color = ALPHA_COLOR_PALETTE[idx % len(ALPHA_COLOR_PALETTE)]
+        label = f"{entry.get('run_label')} α={entry.get('alpha')}"
+        ax.plot(xs, mean, marker="o", linewidth=2, color=color, label=label)
+        ax.fill_between(xs, mean - std, mean + std, color=color, alpha=0.14, linewidth=0)
+        original = curve.get("original") or {}
+        orig_acc = np.asarray(original.get("acc") or [], dtype=np.float64)
+        if orig_acc.size:
+            ax.plot(xs[: min(xs.size, orig_acc.size)], orig_acc[: min(xs.size, orig_acc.size)], linestyle=":", color=color, alpha=0.8)
+
+    ax.set_xlabel("Confidence threshold" if (selected[0].get("curve") or {}).get("sweep_key") == "confidence" else "Percentile p")
+    ax.set_ylabel("Accuracy (%)")
+    ax.set_title("Evaluation-Order Sensitivity: mean ± std over order seeds")
+    ax.grid(True, linestyle="--", alpha=0.35)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
 st.title("LLM-MCQ-Bias • W&B run 평균 그래프")
 st.caption("여러 W&B run의 `three_curves_points_v1`(수치 곡선)을 불러와서, 모델(=그룹)별 평균(예: 5-run 평균)과 여러 모델 평균을 그립니다.")
 
@@ -884,6 +1006,7 @@ rows = []
 all_tasks = set()
 for rp, rec in records.items():
     all_tasks.update(rec.tasks)
+    all_tasks.update(rec.order_sensitivity_by_task.keys())
     rows.append(
         {
             "run_path": rec.run_path,
@@ -893,6 +1016,7 @@ for rp, rec in records.items():
             "pretrained_model_path": rec.pretrained_model_path,
             "tasks": ", ".join(rec.tasks),
             "sigma_tasks": ", ".join(sorted(rec.sigma_by_task.keys())),
+            "order_sensitivity_tasks": ", ".join(sorted(rec.order_sensitivity_by_task.keys())),
         }
     )
 df = pd.DataFrame(rows)
@@ -1229,6 +1353,33 @@ if plot_clicked:
             empirical_sweep_preference=empirical_sweep_view,
         )
         st.pyplot(fig_rstd, use_container_width=True)
+
+    st.subheader("Evaluation-order 민감도")
+    order_entries = _order_curve_entries(selected_runs, records, str(task))
+    if not order_entries:
+        missing_order_runs = []
+        for rp in selected_runs:
+            rec = records.get(rp)
+            if rec is None or str(task) not in rec.order_sensitivity_by_task:
+                missing_order_runs.append(run_option_labels.get(rp, rp))
+        st.info("선택한 run들에는 이 task에 대한 `eval_order_sensitivity_v1` 요약이 없어요.")
+        if missing_order_runs:
+            st.caption("다음 run들에는 order-sensitivity summary가 없습니다: " + ", ".join(missing_order_runs))
+    else:
+        order_df = _order_sensitivity_summary_rows(selected_runs, records, str(task))
+        st.caption("같은 모델 출력은 고정하고 sample processing order만 seed별로 재배열해 online policy를 다시 계산한 결과입니다.")
+        st.dataframe(order_df, use_container_width=True, hide_index=True)
+        review_lines = []
+        for entry in order_entries:
+            for line in (entry.get("payload") or {}).get("review_sentences", []) or []:
+                if line not in review_lines:
+                    review_lines.append(str(line))
+        if review_lines:
+            st.markdown("**Reviewer-ready summary**")
+            st.code("\n".join(review_lines[:8]), language="text")
+        fig_order = _plot_order_sensitivity(order_entries, method_filter="empirical_pride_primary", alpha_filter="2")
+        if fig_order is not None:
+            st.pyplot(fig_order, use_container_width=True)
 
     sigma_df = _sigma_summary_rows(selected_runs, records, str(task))
     st.subheader("Sigma 분석")
