@@ -1210,6 +1210,38 @@ def _read_results_file(file_path):
         return None
 
 
+def _expected_cached_result_ids(num_eval_samples: int, max_samples: Optional[int] = None) -> set:
+    indices = list(range(int(num_eval_samples)))
+    random.Random(123).shuffle(indices)
+    if max_samples is not None:
+        indices = indices[:int(max_samples)]
+    return set(indices)
+
+
+def _validate_cached_results(results, num_eval_samples: int, max_samples: Optional[int] = None) -> Tuple[bool, str]:
+    if results is None:
+        return False, "file could not be read or parsed"
+
+    expected_ids = _expected_cached_result_ids(num_eval_samples, max_samples=max_samples)
+    seen_ids = []
+    try:
+        for result in results:
+            if result.get("type") != "result":
+                continue
+            seen_ids.append(int(result["data"]["idx"]))
+    except Exception:
+        return False, "one or more result rows are malformed"
+
+    seen_set = set(seen_ids)
+    if len(seen_ids) != len(seen_set):
+        return False, "duplicate result idx values found"
+    if seen_set != expected_ids:
+        missing = len(expected_ids - seen_set)
+        extra = len(seen_set - expected_ids)
+        return False, f"expected {len(expected_ids)} results, found {len(seen_set)} (missing={missing}, extra={extra})"
+    return True, ""
+
+
 def _quantile(arr: np.ndarray, p01: float) -> float:
     arr = np.asarray(arr, dtype=np.float64)
     if arr.size == 0:
@@ -2931,7 +2963,7 @@ def main():
                 use_run_suffix = (n_runs > 1)
                 cached_path = (f'{args.save_path}/{subject}_run{run_idx}.jsonl' if use_run_suffix
                                else f'{args.save_path}/{subject}.jsonl')
-                use_cached = (not bool(getattr(args, 'force', False))) and os.path.exists(cached_path)
+                maybe_use_cached = (not bool(getattr(args, 'force', False))) and os.path.exists(cached_path)
 
                 few_shot_seed = run_idx if use_run_suffix else None
                 run_seed = run_idx if use_run_suffix else None
@@ -2944,13 +2976,26 @@ def main():
                     shuffler = random.Random(int(run_idx) + 42)
                     shuffler.shuffle(eval_samples)
                 eval_fn = prepare_eval_fn(model, toker, few_shot_samples)
+                max_samples = 100 if bool(getattr(args, 'test', False)) else None
 
-                if use_cached:
-                    logger.info(_blue(f"Using cached results: {cached_path}"))
-                    results = _read_results_file(cached_path) or []
-                else:
+                use_cached = False
+                results = []
+                if maybe_use_cached:
+                    cached_results = _read_results_file(cached_path)
+                    cache_ok, cache_reason = _validate_cached_results(
+                        cached_results,
+                        num_eval_samples=len(eval_samples),
+                        max_samples=max_samples,
+                    )
+                    if cache_ok:
+                        logger.info(_blue(f"Using cached results: {cached_path}"))
+                        results = cached_results
+                        use_cached = True
+                    else:
+                        logger.warning(_orange(f"Ignoring incomplete/invalid cache: {cached_path} ({cache_reason})"))
+
+                if not use_cached:
                     logger.info(_blue(f"Run started: {subject}" + (f" [run {run_idx+1}/{n_runs}]" if use_run_suffix else "")))
-                    max_samples = 100 if bool(getattr(args, 'test', False)) else None
                     n_threads = torch.cuda.device_count()
                     n_threads = max(1, int(n_threads)) if 'falcon' not in args.pretrained_model_path else 1
                     results = eval_all_samples(
