@@ -1242,6 +1242,68 @@ def _validate_cached_results(results, num_eval_samples: int, max_samples: Option
     return True, ""
 
 
+def _empirical_stage_cache_path(args, subject: str, run_idx: int, use_run_suffix: bool, alpha: float) -> str:
+    analysis_dir = os.path.join(
+        build_results_dir(args, task=args.task, num_few_shot=args.num_few_shot, setting="full"),
+        "empirical_analysis",
+    )
+    os.makedirs(analysis_dir, exist_ok=True)
+    alpha_tag = f"{float(alpha):g}"
+    run_tag = f"_run{int(run_idx)}" if use_run_suffix else ""
+    return os.path.join(analysis_dir, f"{subject}{run_tag}_empirical_alpha{alpha_tag}_stage_cache.jsonl")
+
+
+def _schedule_signature(stage_schedule) -> List[List[int]]:
+    return [[int(x) for x in row] for row in stage_schedule]
+
+
+def _load_empirical_stage_cache(cache_path: str) -> Dict[int, dict]:
+    rows: Dict[int, dict] = {}
+    if not os.path.exists(cache_path):
+        return rows
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("type") != "empirical_stage_cache":
+                    continue
+                try:
+                    sample_pos = int(obj["sample_pos"])
+                except Exception:
+                    continue
+                rows[sample_pos] = obj
+    except Exception:
+        return {}
+    return rows
+
+
+def _append_empirical_stage_cache(cache_path: str, row: dict) -> None:
+    with open(cache_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        f.flush()
+
+
+def _cached_empirical_stage_probs(cache_row: Optional[dict], sample_id: int, k: int, stage_schedule) -> Optional[np.ndarray]:
+    if not cache_row:
+        return None
+    try:
+        if int(cache_row.get("sample_id")) != int(sample_id):
+            return None
+        if int(cache_row.get("k")) != int(k):
+            return None
+        if cache_row.get("stage_schedule") != _schedule_signature(stage_schedule):
+            return None
+        probs = np.asarray(cache_row.get("stage_probs"), dtype=np.float64)
+        if probs.ndim != 2 or probs.shape[0] != len(stage_schedule) or probs.shape[1] != int(k):
+            return None
+        return probs
+    except Exception:
+        return None
+
+
 def _quantile(arr: np.ndarray, p01: float) -> float:
     arr = np.asarray(arr, dtype=np.float64)
     if arr.size == 0:
@@ -3677,6 +3739,23 @@ def main():
                                     )
                                     empirical_covariance = np.zeros((k, k), dtype=np.float64)
                                 empirical_prefix_ids = set(int(x) for x in (empirical_meta.get("prefix_ids") or []))
+                                empirical_stage_cache_path = _empirical_stage_cache_path(
+                                    args,
+                                    subject=str(subject),
+                                    run_idx=int(run_idx),
+                                    use_run_suffix=bool(use_run_suffix),
+                                    alpha=float(pride_alpha),
+                                )
+                                empirical_stage_cache = _load_empirical_stage_cache(empirical_stage_cache_path)
+                                empirical_stage_cache_hits = 0
+                                empirical_stage_cache_misses = 0
+                                if empirical_stage_cache:
+                                    logger.info(
+                                        _blue(
+                                            f"Loaded empirical stage cache: {empirical_stage_cache_path} "
+                                            f"({len(empirical_stage_cache)} samples)"
+                                        )
+                                    )
                                 learned_selection_info = None
                                 if empirical_transition_mode == "cyclic_learned":
                                     if len(cyclic_indices) != int(k):
@@ -3752,20 +3831,45 @@ def main():
                                     raw_options = list(prompt_meta["options"])
                                     if empirical_transition_mode == "probe_cyclic":
                                         probe_slot_to_content = stage_schedule[1]
-                                        probing_inputs_emp = []
-                                        for slot_to_content in stage_schedule[1:]:
-                                            permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
-                                            probing_inputs_emp.append([
-                                                str(prompt_meta["sys_msg"]),
-                                                _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
-                                            ])
-                                        empirical_sample = (
-                                            int(prompt_meta["idx"]),
-                                            (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
+                                        all_stage_probs = _cached_empirical_stage_probs(
+                                            empirical_stage_cache.get(int(sample_pos)),
+                                            sample_id=int(prompt_meta["idx"]),
+                                            k=int(k),
+                                            stage_schedule=stage_schedule,
                                         )
-                                        empirical_result = eval_fn(empirical_sample, random.Random(0))
-                                        extra_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
-                                        all_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
+                                        if all_stage_probs is None:
+                                            probing_inputs_emp = []
+                                            for slot_to_content in stage_schedule[1:]:
+                                                permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
+                                                probing_inputs_emp.append([
+                                                    str(prompt_meta["sys_msg"]),
+                                                    _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
+                                                ])
+                                            empirical_sample = (
+                                                int(prompt_meta["idx"]),
+                                                (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
+                                            )
+                                            empirical_result = eval_fn(empirical_sample, random.Random(0))
+                                            extra_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
+                                            all_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
+                                            cache_row = {
+                                                "type": "empirical_stage_cache",
+                                                "version": 1,
+                                                "subject": str(subject),
+                                                "run_idx": int(run_idx),
+                                                "alpha": float(pride_alpha),
+                                                "transition_mode": str(empirical_transition_mode),
+                                                "sample_pos": int(sample_pos),
+                                                "sample_id": int(prompt_meta["idx"]),
+                                                "k": int(k),
+                                                "stage_schedule": _schedule_signature(stage_schedule),
+                                                "stage_probs": all_stage_probs.tolist(),
+                                            }
+                                            _append_empirical_stage_cache(empirical_stage_cache_path, cache_row)
+                                            empirical_stage_cache[int(sample_pos)] = cache_row
+                                            empirical_stage_cache_misses += 1
+                                        else:
+                                            empirical_stage_cache_hits += 1
                                         post_by_stage_full, pred_by_stage_full, conf_by_stage_full = _compute_empirical_stage_posteriors(
                                             stage_probs=all_stage_probs,
                                             slot_to_content_schedule=stage_schedule,
@@ -3818,20 +3922,62 @@ def main():
                                             "selected_action_sequence": [] if learned_selection_info is None else list(learned_selection_info.get("selected_action_sequence") or []),
                                         })
                                     else:
-                                        probing_inputs_emp = []
-                                        for slot_to_content in stage_schedule:
-                                            permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
-                                            probing_inputs_emp.append([
-                                                str(prompt_meta["sys_msg"]),
-                                                _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
-                                            ])
-
-                                        empirical_sample = (
-                                            int(prompt_meta["idx"]),
-                                            (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
+                                        empirical_stage_probs = _cached_empirical_stage_probs(
+                                            empirical_stage_cache.get(int(sample_pos)),
+                                            sample_id=int(prompt_meta["idx"]),
+                                            k=int(k),
+                                            stage_schedule=stage_schedule,
                                         )
-                                        empirical_result = eval_fn(empirical_sample, random.Random(0))
-                                        empirical_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
+                                        if empirical_stage_probs is None:
+                                            uses_cached_identity = (
+                                                len(stage_schedule) > 0
+                                                and tuple(int(x) for x in stage_schedule[0]) == tuple(range(k))
+                                            )
+                                            schedules_to_eval = stage_schedule[1:] if uses_cached_identity else stage_schedule
+                                            probing_inputs_emp = []
+                                            for slot_to_content in schedules_to_eval:
+                                                permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
+                                                probing_inputs_emp.append([
+                                                    str(prompt_meta["sys_msg"]),
+                                                    _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
+                                                ])
+
+                                            empirical_sample = (
+                                                int(prompt_meta["idx"]),
+                                                (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
+                                            )
+                                            empirical_result = eval_fn(empirical_sample, random.Random(0))
+                                            extra_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
+                                            if uses_cached_identity:
+                                                empirical_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
+                                            else:
+                                                empirical_stage_probs = extra_stage_probs
+                                            cache_row = {
+                                                "type": "empirical_stage_cache",
+                                                "version": 1,
+                                                "subject": str(subject),
+                                                "run_idx": int(run_idx),
+                                                "alpha": float(pride_alpha),
+                                                "transition_mode": str(empirical_transition_mode),
+                                                "sample_pos": int(sample_pos),
+                                                "sample_id": int(prompt_meta["idx"]),
+                                                "k": int(k),
+                                                "stage_schedule": _schedule_signature(stage_schedule),
+                                                "stage_probs": empirical_stage_probs.tolist(),
+                                            }
+                                            _append_empirical_stage_cache(empirical_stage_cache_path, cache_row)
+                                            empirical_stage_cache[int(sample_pos)] = cache_row
+                                            empirical_stage_cache_misses += 1
+                                        else:
+                                            empirical_stage_cache_hits += 1
+                                        if (sample_pos + 1) % 10 == 0 or (sample_pos + 1) == len(empirical_prompt_meta):
+                                            logger.info(
+                                                _blue(
+                                                    f"Empirical stage progress: subject={subject}, alpha={float(pride_alpha):g}, "
+                                                    f"{sample_pos + 1}/{len(empirical_prompt_meta)} "
+                                                    f"(cache_hit={empirical_stage_cache_hits}, new={empirical_stage_cache_misses})"
+                                                )
+                                            )
                                         post_by_stage, pred_by_stage, conf_by_stage = _compute_empirical_stage_posteriors(
                                             stage_probs=empirical_stage_probs,
                                             slot_to_content_schedule=stage_schedule,
@@ -3846,6 +3992,15 @@ def main():
                                             "decision_stages": list(range(1, int(k) + 1)),
                                             "prefix_forced": bool(sample_pos in empirical_prefix_ids),
                                         })
+
+                                if empirical_stage_cache_hits or empirical_stage_cache_misses:
+                                    logger.info(
+                                        _blue(
+                                            f"Empirical stage cache summary: subject={subject}, alpha={float(pride_alpha):g}, "
+                                            f"hit={empirical_stage_cache_hits}, new={empirical_stage_cache_misses}, "
+                                            f"path={empirical_stage_cache_path}"
+                                        )
+                                    )
 
                                 cobj_emp = {
                                     "subject": subject,
