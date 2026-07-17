@@ -44,6 +44,38 @@ def parse_arguments():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--pretrained_model_path", type=str, required=True)
+    parser.add_argument("--inference_backend", type=str, default="local",
+                        choices=["local", "api"],
+                        help="Inference backend. local keeps the existing Hugging Face path; api uses commercial chat logprobs.")
+    parser.add_argument("--api_provider", type=str, default=None,
+                        choices=["openai", "gemini", "deepseek", "together"],
+                        help="Commercial provider. Required when --inference_backend=api.")
+    parser.add_argument("--api_execution_mode", type=str, default="offline_sweep",
+                        choices=["offline_sweep", "adaptive"],
+                        help="offline_sweep precomputes stages for curves; adaptive physically stops API calls at the selected policy stage.")
+    parser.add_argument("--api_adaptive_percentile", type=float, default=None,
+                        help="Required percentile operating point for --api_execution_mode=adaptive (for example 80).")
+    parser.add_argument("--api_probe_only", action="store_true",
+                        help="Run only the first --api_probe_samples examples and save capability/usage diagnostics.")
+    parser.add_argument("--api_probe_samples", type=int, default=10,
+                        help="Number of examples used by --api_probe_only (default: 10).")
+    parser.add_argument("--api_max_cost_usd", type=float, default=None,
+                        help="Required API safety guard unless --api_max_requests is supplied.")
+    parser.add_argument("--api_max_requests", type=int, default=None,
+                        help="Required API safety guard unless --api_max_cost_usd is supplied.")
+    parser.add_argument("--api_force_requests", action="store_true",
+                        help="Bypass durable API response cache. --force alone never reissues paid calls.")
+    parser.add_argument("--api_timeout_seconds", type=float, default=60.0)
+    parser.add_argument("--api_max_retries", type=int, default=6)
+    parser.add_argument("--api_concurrency", type=int, default=4,
+                        help="Maximum sample concurrency for offline_sweep; adaptive is always sequential.")
+    parser.add_argument("--api_cache_dir", type=str, default=None,
+                        help="Optional durable cache root. Defaults inside the result directory.")
+    parser.add_argument("--api_base_url", type=str, default=None,
+                        help="Optional provider base URL override.")
+    parser.add_argument("--api_input_usd_per_mtok", type=float, default=None)
+    parser.add_argument("--api_cached_input_usd_per_mtok", type=float, default=None)
+    parser.add_argument("--api_output_usd_per_mtok", type=float, default=None)
     parser.add_argument("--eval_names", type=str, nargs='+', default=[],
                         help='eval tasks and settings')
     parser.add_argument("--option_id_set", type=str, default=None,
@@ -182,6 +214,43 @@ def parse_arguments():
 
     args = parser.parse_args()
 
+    if args.inference_backend == "api":
+        if not args.api_provider:
+            parser.error("--api_provider is required when --inference_backend=api")
+        if args.api_max_cost_usd is None and args.api_max_requests is None:
+            parser.error("API runs require --api_max_cost_usd or --api_max_requests")
+        if args.api_max_cost_usd is not None and args.api_max_cost_usd <= 0:
+            parser.error("--api_max_cost_usd must be positive")
+        if args.api_max_requests is not None and args.api_max_requests <= 0:
+            parser.error("--api_max_requests must be positive")
+        if args.api_execution_mode == "adaptive":
+            if args.api_adaptive_percentile is None:
+                parser.error("adaptive API runs require --api_adaptive_percentile")
+            if not 0.0 <= float(args.api_adaptive_percentile) <= 100.0:
+                parser.error("--api_adaptive_percentile must be in [0, 100]")
+            if not args.empirical_pride:
+                parser.error("adaptive API runs require --empirical_pride")
+            if args.empirical_sweep_mode != "percentile":
+                parser.error("adaptive API v1 requires --empirical_sweep_mode percentile")
+            if args.empirical_transition_mode != "latin":
+                parser.error("adaptive API v1 requires --empirical_transition_mode latin")
+        if int(args.api_probe_samples) <= 0:
+            parser.error("--api_probe_samples must be positive")
+        if int(args.api_concurrency) <= 0:
+            parser.error("--api_concurrency must be positive")
+        if float(args.api_timeout_seconds) <= 0:
+            parser.error("--api_timeout_seconds must be positive")
+        if int(args.api_max_retries) < 0:
+            parser.error("--api_max_retries must be non-negative")
+        for price_arg in (
+            "api_input_usd_per_mtok",
+            "api_cached_input_usd_per_mtok",
+            "api_output_usd_per_mtok",
+        ):
+            price = getattr(args, price_arg)
+            if price is not None and float(price) < 0:
+                parser.error(f"--{price_arg} must be non-negative")
+
     args.model_name = args.pretrained_model_path.split('/')[-1]
 
     for eval_name in args.eval_names:
@@ -201,6 +270,8 @@ def parse_arguments():
             ] or (setting.startswith('move') and setting[-1] in ['a', 'b', 'c', 'd'])
         ):
             raise ValueError(f"Unknown setting: {setting}")
+        if args.inference_backend == "api" and setting == "noid":
+            raise ValueError("Commercial API v1 does not support noid sequence scoring")
 
     return args
 
@@ -347,7 +418,12 @@ def prepare_eval(args, eval_name):
     
 
     # prepare_eval_fn
-    if setting in ['noid']:
+    if getattr(args, "inference_backend", "local") == "api":
+        if setting in ['perm', 'cyclic', 'full']:
+            prepare_eval_fn = partial(prepare_eval_fn_api_perm, num_few_shot=num_few_shot, option_ids=option_ids)
+        else:
+            prepare_eval_fn = partial(prepare_eval_fn_api_base, num_few_shot=num_few_shot, option_ids=option_ids)
+    elif setting in ['noid']:
         prepare_eval_fn = partial(prepare_eval_fn_noid, num_few_shot=num_few_shot, option_ids=option_ids)
     elif setting in ['perm', 'cyclic', 'full']:
         prepare_eval_fn = partial(prepare_eval_fn_perm, num_few_shot=num_few_shot, option_ids=option_ids)
@@ -355,6 +431,83 @@ def prepare_eval(args, eval_name):
         prepare_eval_fn = partial(prepare_eval_fn_base, num_few_shot=num_few_shot, option_ids=option_ids)
 
     return subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
+
+
+def _api_messages(sys_msg, eval_sample, few_shot_samples, num_few_shot):
+    messages = [{"role": "system", "content": str(sys_msg)}]
+    for row in few_shot_samples[:num_few_shot]:
+        text = str(row)
+        try:
+            prompt, answer = text.rsplit(" ", 1)
+        except ValueError:
+            prompt, answer = text, ""
+        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "assistant", "content": answer})
+    messages.append({"role": "user", "content": str(eval_sample)})
+    return messages
+
+
+def prepare_eval_fn_api_base(model, toker, few_shot_samples, num_few_shot, option_ids):
+    del toker
+
+    def eval_fn(sample, rng: random.Random):
+        del rng
+        idx, (input_pair, options, ideal) = sample
+        sys_msg, eval_sample = input_pair.copy()
+        messages = _api_messages(sys_msg, eval_sample, few_shot_samples, num_few_shot)
+        response = model.complete_labels(messages, option_ids)
+        probs = np.asarray(response.label_probs, dtype=np.float64)
+        sampled = option_ids[int(np.argmax(probs))]
+        return {
+            'type': 'result',
+            'data': {
+                'idx': idx,
+                'prompt': str(sys_msg) + '\n\n' + str(eval_sample),
+                'messages': messages,
+                'options': options,
+                'probs': probs.tolist(),
+                'sampled': sampled,
+                'ideal': ideal,
+                'correct': sampled == ideal,
+                'api_calls': [response.to_dict()],
+            },
+        }
+    return eval_fn
+
+
+def prepare_eval_fn_api_perm(model, toker, few_shot_samples, num_few_shot, option_ids):
+    del toker
+
+    def eval_fn(sample, rng: random.Random):
+        del rng
+        idx, (probing_inputs, options, ideal) = sample
+        if len(probing_inputs) <= 0:
+            raise ValueError("probing_inputs must contain at least one prompt")
+        all_probs = []
+        all_messages = []
+        api_calls = []
+        prompts = []
+        for sys_msg, eval_sample in probing_inputs:
+            messages = _api_messages(sys_msg, eval_sample, few_shot_samples, num_few_shot)
+            response = model.complete_labels(messages, option_ids)
+            all_probs.append([float(x) for x in response.label_probs])
+            all_messages.append(messages)
+            prompts.append(str(sys_msg) + '\n\n' + str(eval_sample))
+            api_calls.append(response.to_dict())
+        return {
+            'type': 'result',
+            'data': {
+                'idx': idx,
+                'prompt': prompts[0],
+                'prompts': prompts,
+                'messages': all_messages,
+                'options': options,
+                'probs': all_probs,
+                'ideal': ideal,
+                'api_calls': api_calls,
+            },
+        }
+    return eval_fn
 
 
 def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_ids):

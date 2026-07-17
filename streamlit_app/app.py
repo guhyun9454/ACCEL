@@ -10,6 +10,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
+from api_results import extract_api_by_task, summary_task_names
+
 import wandb
 
 
@@ -101,6 +103,7 @@ class RunRecord:
     tasks: List[str]
     points_by_task: Dict[str, dict]  # task -> payload
     sigma_by_task: Dict[str, dict]   # task -> sigma summary payload
+    api_by_task: Dict[str, dict]     # task -> commercial API usage/policy payload
 
 
 def _parse_run_paths(text: str) -> List[str]:
@@ -139,6 +142,7 @@ def _fetch_run_record(run_path: str, refresh_token: int = 0) -> Tuple[Optional[R
         points_by_task = summary.get("three_curves_points_v1", {}) or {}
         if not isinstance(points_by_task, dict):
             points_by_task = {}
+        api_by_task = extract_api_by_task(summary)
         sigma_by_task_raw = summary.get("sigma_analysis_v1", {}) or {}
         if not isinstance(sigma_by_task_raw, dict):
             sigma_by_task_raw = {}
@@ -177,7 +181,7 @@ def _fetch_run_record(run_path: str, refresh_token: int = 0) -> Tuple[Optional[R
                     points_by_task = recovered
             except Exception:
                 pass
-        tasks = sorted([str(k) for k in points_by_task.keys()])
+        tasks = summary_task_names(points_by_task, api_by_task)
 
         # lightweight identity fields
         parts = run_path.split("/")
@@ -197,9 +201,10 @@ def _fetch_run_record(run_path: str, refresh_token: int = 0) -> Tuple[Optional[R
             tasks=tasks,
             points_by_task=points_by_task,
             sigma_by_task=sigma_by_task,
+            api_by_task=api_by_task,
         )
         if len(tasks) == 0:
-            return rec, "W&B summary에 `three_curves_points_v1`가 없어요. (이 기능을 넣은 이후의 run이어야 평균을 낼 수 있어요.)"
+            return rec, "W&B summary에 `three_curves_points_v1` 또는 `api_evaluation_v1`가 없어요."
         return rec, None
     except Exception as e:
         return None, f"run 로드 실패: `{run_path}` ({e})"
@@ -326,6 +331,32 @@ def _curve_series_from_payload(
     return out
 
 
+def _curve_series_for_axis(payload: dict, curve_key: str, y_key: str, x_axis_mode: str = "permutations", **kwargs):
+    series = _curve_series_from_payload(payload, curve_key, y_key, **kwargs)
+    if x_axis_mode == "permutations" or not series:
+        return series
+    axis_meta = payload.get("_api_axis", {}) if isinstance(payload, dict) else {}
+    try:
+        per_call = float(axis_meta.get("average_call_cost_usd", float("nan")))
+    except Exception:
+        per_call = float("nan")
+    if not np.isfinite(per_call):
+        return {}
+    multiplier = per_call
+    if x_axis_mode == "total_usd":
+        try:
+            n_samples = float(axis_meta.get("n_samples", float("nan")))
+        except Exception:
+            n_samples = float("nan")
+        if not np.isfinite(n_samples):
+            return {}
+        multiplier *= n_samples
+    return {
+        x: {**dict(row), "cost": float(row.get("cost", float("nan"))) * multiplier}
+        for x, row in series.items()
+    }
+
+
 def _get_empirical_payload_meta(payload: dict) -> Tuple[str, str, float, str, bool, str, str]:
     if not isinstance(payload, dict):
         return "percentile", "flat", 0.5, "latin", False, "empirical", "online"
@@ -450,6 +481,7 @@ def _plot_groups(
     ours_pride_base_label: str = "Ours+PRIDE",
     min_pct_by_curve: Optional[Dict[str, float]] = None,
     empirical_sweep_preference: str = "auto",
+    x_axis_mode: str = "permutations",
 ):
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=160)
 
@@ -468,10 +500,11 @@ def _plot_groups(
                     _show_alpha = len(alphas) >= 2
                     for i, alpha in enumerate(alphas):
                         series_list = [
-                            _curve_series_from_payload(
+                            _curve_series_for_axis(
                                 p,
                                 ck,
                                 y_key,
+                                x_axis_mode=x_axis_mode,
                                 ours_pride_alpha=(None if ck == "empirical_pride_primary" else alpha),
                                 empirical_sweep_preference=empirical_sweep_preference,
                                 empirical_pride_alpha=(alpha if ck == "empirical_pride_primary" else None),
@@ -534,7 +567,7 @@ def _plot_groups(
                         ax.plot(x, y, color=line_color, linestyle=cd["linestyle"], marker=cd["marker"],
                                 linewidth=2.0, markersize=8, alpha=0.90, label=label)
                 else:
-                    series_list = [_curve_series_from_payload(p, ck, y_key) for p in payloads]
+                    series_list = [_curve_series_for_axis(p, ck, y_key, x_axis_mode=x_axis_mode) for p in payloads]
                     m = max_by.get(ck)
                     mn = min_by.get(ck)
                     series_list = [_filter_series_by_max_pct(s, m, ck, min_pct=mn) for s in series_list if s]
@@ -565,10 +598,11 @@ def _plot_groups(
                     all_series = []
                     for payloads in group_payloads.values():
                         for p in payloads:
-                            s = _curve_series_from_payload(
+                            s = _curve_series_for_axis(
                                 p,
                                 ck,
                                 y_key,
+                                x_axis_mode=x_axis_mode,
                                 ours_pride_alpha=(None if ck == "empirical_pride_primary" else alpha),
                                 empirical_sweep_preference=empirical_sweep_preference,
                                 empirical_pride_alpha=(alpha if ck == "empirical_pride_primary" else None),
@@ -636,7 +670,7 @@ def _plot_groups(
                 all_series = []
                 for payloads in group_payloads.values():
                     for p in payloads:
-                        s = _curve_series_from_payload(p, ck, y_key)
+                        s = _curve_series_for_axis(p, ck, y_key, x_axis_mode=x_axis_mode)
                         m = max_by.get(ck)
                         mn = min_by.get(ck)
                         s = _filter_series_by_max_pct(s, m, ck, min_pct=mn) if s else {}
@@ -659,7 +693,12 @@ def _plot_groups(
     _y_labels = {"acc": "Accuracy (%)", "delta_acc": "Δ Accuracy (%)", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
     _y_titles = {"acc": "Accuracy", "delta_acc": "Δ Accuracy", "recall_std": "Recall std", "delta_recall_std": "Δ Recall std"}
     subtitle = ""
-    ax.set_xlabel("Computational Cost (× of default)", fontsize=20)
+    x_labels = {
+        "permutations": "Mean permutations E[T]",
+        "usd_per_sample": "Counterfactual USD / sample",
+        "total_usd": "Counterfactual total USD",
+    }
+    ax.set_xlabel(x_labels.get(x_axis_mode, "Mean permutations E[T]"), fontsize=20)
     ax.set_ylabel(_y_labels.get(y_key, y_key), fontsize=20)
     ax.set_title(f"{task} — {_y_titles.get(y_key, y_key)}{subtitle}", fontsize=20)
     if y_key in ("delta_acc", "delta_recall_std"):
@@ -893,6 +932,7 @@ for rp, rec in records.items():
             "pretrained_model_path": rec.pretrained_model_path,
             "tasks": ", ".join(rec.tasks),
             "sigma_tasks": ", ".join(sorted(rec.sigma_by_task.keys())),
+            "api_tasks": ", ".join(sorted(rec.api_by_task.keys())),
         }
     )
 df = pd.DataFrame(rows)
@@ -948,8 +988,96 @@ for rp in selected_runs:
     payload = rec.points_by_task.get(str(task))
     if not isinstance(payload, dict):
         continue
+    payload = dict(payload)
+    api_payload = rec.api_by_task.get(str(task), {}) or {}
+    logical = api_payload.get("logical", {}) or {}
+    try:
+        avg_call_cost = float(api_payload.get("average_logical_call_cost_usd", float("nan")))
+    except Exception:
+        avg_call_cost = float("nan")
+    if not np.isfinite(avg_call_cost):
+        try:
+            avg_call_cost = float(logical.get("cost_usd", 0.0)) / max(1, int(logical.get("requests", 0)))
+        except Exception:
+            avg_call_cost = float("nan")
+    payload["_api_axis"] = {
+        "average_call_cost_usd": avg_call_cost,
+        "n_samples": api_payload.get("n_samples"),
+    }
     prefix = run_label_overrides.get(rp) if use_custom_run_labels else (rec.model_name or rec.display_name or rec.run_id or rp)
     group_payloads[str(prefix)] = [payload]
+
+api_rows = []
+for rp in selected_runs:
+    rec = records.get(rp)
+    if rec is None:
+        continue
+    api_payload = rec.api_by_task.get(str(task))
+    if not isinstance(api_payload, dict):
+        continue
+    physical = api_payload.get("physical", {}) or {}
+    physical_usage = physical.get("usage", {}) or {}
+    stage_counts = api_payload.get("stage_counts", {}) or {}
+    api_row = {
+        "run": run_label_overrides.get(rp) if use_custom_run_labels else (rec.model_name or rec.display_name),
+        "provider": api_payload.get("provider"),
+        "requested_model": api_payload.get("requested_model") or rec.pretrained_model_path,
+        "returned_model": api_payload.get("returned_model"),
+        "mode": api_payload.get("execution_mode"),
+        "percentile": api_payload.get("percentile", api_payload.get("adaptive_percentile")),
+        "accuracy": api_payload.get("accuracy"),
+        "NLL": api_payload.get("nll"),
+        "ECE": api_payload.get("ece"),
+        "E[T]": api_payload.get("mean_permutations"),
+        "policy USD/sample": api_payload.get("policy_cost_usd_per_sample"),
+        "policy USD": api_payload.get("policy_cost_usd"),
+        "physical USD": physical.get("cost_usd"),
+        "physical requests": physical.get("requests"),
+        "input tokens": physical_usage.get("input_tokens"),
+        "output tokens": physical_usage.get("output_tokens"),
+        "reasoning tokens": physical_usage.get("reasoning_tokens"),
+        "cached input tokens": physical_usage.get("cached_input_tokens"),
+    }
+    api_row.update({str(key): value for key, value in stage_counts.items()})
+    api_rows.append(api_row)
+
+if api_rows:
+    st.subheader("Commercial API usage and adaptive policy")
+    st.caption("Physical spend는 이번 프로세스가 실제 네트워크로 지출한 금액이고, policy USD는 해당 routing을 배포했을 때의 logical 비용입니다.")
+    api_df = pd.DataFrame(api_rows)
+    st.dataframe(api_df, use_container_width=True, hide_index=True)
+    plot_api = api_df.dropna(subset=["E[T]", "accuracy"], how="any")
+    if not plot_api.empty:
+        api_axis = st.selectbox(
+            "Adaptive point 비용 축",
+            options=["E[T]", "policy USD/sample", "policy USD"],
+            index=0,
+        )
+        fig_api, ax_api = plt.subplots(figsize=(8.0, 4.8), dpi=150)
+        for _, row in plot_api.iterrows():
+            x = row.get(api_axis)
+            y = row.get("accuracy")
+            if pd.isna(x) or pd.isna(y):
+                continue
+            ax_api.scatter(float(x), float(y), s=75)
+            ax_api.annotate(str(row.get("run") or row.get("requested_model")), (float(x), float(y)), xytext=(5, 5), textcoords="offset points")
+        ax_api.set_xlabel(api_axis)
+        ax_api.set_ylabel("Accuracy")
+        ax_api.grid(True, linestyle="--", alpha=0.3)
+        fig_api.tight_layout()
+        st.pyplot(fig_api, use_container_width=True)
+
+curve_x_axis = st.selectbox(
+    "Curve 비용 축",
+    options=["permutations", "usd_per_sample", "total_usd"],
+    index=0,
+    format_func=lambda x: {
+        "permutations": "Mean permutations E[T]",
+        "usd_per_sample": "Counterfactual USD/sample",
+        "total_usd": "Counterfactual total USD",
+    }[x],
+    help="USD 축은 api_evaluation_v1의 실제 평균 call usage가 있는 run에만 표시됩니다.",
+)
 
 st.subheader("그래프 옵션")
 st.caption("Δ Accuracy(왼쪽)와 Δ Recall std(오른쪽)를 그립니다. X축은 Cost. 기본 비교는 `cyclic`, `PriDe`, `Ours+PriDe (th1/2)`, `Empirical PriDe`입니다.")
@@ -1206,6 +1334,7 @@ if plot_clicked:
             ours_pride_base_label=str(lab_ours_pride or "Ours+PRIDE"),
             min_pct_by_curve=min_pct_by_curve,
             empirical_sweep_preference=empirical_sweep_view,
+            x_axis_mode=curve_x_axis,
         )
         st.pyplot(fig_acc, use_container_width=True)
     with c_right:
@@ -1227,6 +1356,7 @@ if plot_clicked:
             ours_pride_base_label=str(lab_ours_pride or "Ours+PRIDE"),
             min_pct_by_curve=min_pct_by_curve,
             empirical_sweep_preference=empirical_sweep_view,
+            x_axis_mode=curve_x_axis,
         )
         st.pyplot(fig_rstd, use_container_width=True)
 

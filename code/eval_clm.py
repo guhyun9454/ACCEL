@@ -53,6 +53,7 @@ from eval_clm_online import (
 )
 from eval_clm_plots import _plot_three_curves_acc_recall_std
 from eval_clm_reporting import _log_baseline_report, _log_named_report
+from api_inference import CommercialAPIClient, OnlinePercentileRouter, PRICE_SNAPSHOT_DATE
 
 from utils import (
     _orange, _blue, _purple,
@@ -2754,6 +2755,322 @@ def _compute_curves_for_one_percentile(
     return curve_obj
 
 
+def _api_call_cost(call):
+    try:
+        return float((call or {}).get("cost_usd", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _summarize_api_call_records(calls):
+    usage_keys = (
+        "input_tokens", "cached_input_tokens", "output_tokens",
+        "reasoning_tokens", "total_tokens",
+    )
+    usage = {key: 0 for key in usage_keys}
+    returned_models = {}
+    total_cost = 0.0
+    for call in calls or []:
+        if not isinstance(call, dict):
+            continue
+        call_usage = call.get("usage", {}) or {}
+        for key in usage_keys:
+            usage[key] += int(call_usage.get(key, 0) or 0)
+        total_cost += _api_call_cost(call)
+        returned = str(call.get("returned_model") or call.get("requested_model") or "")
+        if returned:
+            returned_models[returned] = returned_models.get(returned, 0) + 1
+    requests = len(calls or [])
+    return {
+        "requests": int(requests),
+        "cache_hits": int(sum(bool(c.get("cache_hit")) for c in (calls or []) if isinstance(c, dict))),
+        "usage": usage,
+        "cost_usd": float(total_cost),
+        "returned_model": next(iter(returned_models)) if len(returned_models) == 1 else None,
+        "returned_models": dict(sorted(returned_models.items())),
+    }
+
+
+def _collect_counterfactual_api_costs(points_payload, avg_call_cost, n_samples):
+    """Extract every plotted E[T] series and attach deployment-cost equivalents."""
+    out = {}
+
+    def visit(node, path):
+        if not isinstance(node, dict):
+            return
+        costs = node.get("cost")
+        if isinstance(costs, list):
+            axis_key = next(
+                (key for key, value in node.items()
+                 if key != "cost" and isinstance(value, list) and len(value) == len(costs)),
+                None,
+            )
+            rows = []
+            for idx, mean_t in enumerate(costs):
+                try:
+                    mean_t = float(mean_t)
+                except Exception:
+                    continue
+                if not np.isfinite(mean_t):
+                    continue
+                rows.append({
+                    "operating_value": node[axis_key][idx] if axis_key else idx,
+                    "mean_permutations": mean_t,
+                    "usd_per_sample": mean_t * float(avg_call_cost),
+                    "total_usd": mean_t * float(avg_call_cost) * int(n_samples),
+                })
+            if rows:
+                out["/".join(path) or "root"] = {
+                    "axis": axis_key or "index",
+                    "points": rows,
+                }
+        for key, value in node.items():
+            if isinstance(value, dict):
+                visit(value, path + [str(key)])
+
+    visit(points_payload or {}, [])
+    return out
+
+
+def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
+    """Physically stop commercial API calls at the selected empirical policy stage."""
+    alphas = [float(x) for x in _parse_percent_value_list(
+        getattr(args, "plot_empirical_prefix_fractions", None)
+    ) if 0.0 < float(x) <= 100.0]
+    if len(alphas) != 1:
+        raise ValueError("adaptive API runs require exactly one --plot_empirical_prefix_fractions value")
+    alpha = float(alphas[0])
+    percentile = float(args.api_adaptive_percentile)
+    n_runs = 1 if bool(args.api_probe_only) else max(1, int(args.n_runs))
+    task_payloads = {}
+
+    for eval_name in args.eval_names:
+        subjects, prep_few, prep_samples, prep_fn = prepare_eval(args, eval_name)
+        if getattr(args, "api_cache_dir", None) is None:
+            model.set_cache_dir(os.path.join(args.save_path, "api_cache", str(args.api_provider)))
+        if args.setting not in {"full", "cyclic", "perm"}:
+            raise ValueError("adaptive API requires a permutation setting; use --eval_names task,shots,full")
+        if args.api_probe_only:
+            subjects = subjects[:1]
+        option_ids = list(args.option_id_set or ("ABCDE" if args.task == "csqa" else "ABCD"))
+        k = len(option_ids)
+        cyclic_schedule = _rotations(k)
+        run_rows, trajectories = [], []
+
+        for subject in subjects:
+            for run_idx in range(n_runs):
+                few = prep_few(subject, few_shot_seed=run_idx if n_runs > 1 else None)
+                samples = prep_samples(subject)
+                if n_runs > 1:
+                    random.Random(run_idx + 42).shuffle(samples)
+                if args.api_probe_only:
+                    samples = samples[: int(args.api_probe_samples)]
+                if not samples:
+                    continue
+                N = len(samples)
+                seed = _stable_u32_seed(subject, int(args.pride_seed) + run_idx)
+                prefix_n = max(1, int(round(N * alpha / 100.0)))
+                prefix_ids = set(int(x) for x in np.random.default_rng(seed).choice(
+                    np.arange(N, dtype=np.int64), size=prefix_n, replace=False
+                ).tolist())
+                model.set_context(task=args.task, subject=subject, run_idx=run_idx,
+                                  eval_name=eval_name, execution_mode="adaptive")
+                eval_fn = prep_fn(model, None, few)
+
+                meta = []
+                for pos, (inputs, options, ideal) in enumerate(samples):
+                    pair = inputs[0] if isinstance(inputs, list) and inputs and isinstance(inputs[0], list) else inputs
+                    sys_msg, user_prompt = pair
+                    meta.append({
+                        "sample_id": pos, "sys_msg": str(sys_msg),
+                        "question": _extract_question_from_user_prompt(str(user_prompt)),
+                        "options": list(options), "ideal": str(ideal),
+                    })
+
+                # Full cyclic Latin evidence is acquired only for calibration samples.
+                probs_bank = [np.ones((k, k), dtype=np.float64) / k for _ in range(N)]
+                prefix_calls = {}
+                for pos in sorted(prefix_ids):
+                    m = meta[pos]
+                    prompts = []
+                    for perm in cyclic_schedule:
+                        opts = [m["options"][int(i)] for i in perm]
+                        prompts.append([m["sys_msg"], _build_option_user_prompt(m["question"], opts, option_ids)])
+                    result = eval_fn((pos, (prompts, m["options"], m["ideal"])), random.Random(0))
+                    arr = np.asarray(result["data"]["probs"], dtype=np.float64)
+                    if arr.shape != (k, k):
+                        raise ValueError(f"calibration response shape={arr.shape}, expected={(k, k)}")
+                    probs_bank[pos] = arr
+                    prefix_calls[pos] = list(result["data"].get("api_calls") or [])
+
+                if args.empirical_residual_model == "logistic_normal":
+                    _, mu_hat, residual_bank, _, prior_meta = _estimate_logistic_normal_pride_bank(
+                        probs_bank, list(range(k)), k, alpha / 100.0, seed,
+                        args.empirical_logit_delta, args.empirical_mc_samples,
+                        args.empirical_cov_shrinkage,
+                    )
+                else:
+                    _, mu_hat, residual_bank, prior_meta = _estimate_empirical_pride_bank(
+                        probs_bank, list(range(k)), k, alpha / 100.0, seed,
+                        args.empirical_logit_delta,
+                    )
+                if set(int(x) for x in prior_meta.get("prefix_ids", [])) != prefix_ids:
+                    raise RuntimeError("adaptive prefix selection diverged from the PriDe estimator")
+
+                router = OnlinePercentileRouter(
+                    k=k,
+                    percentile=percentile,
+                    schedule=args.empirical_stage_schedule,
+                    gamma=args.empirical_stage_gamma,
+                )
+                stage_counts = {f"n_stage_{s}": 0 for s in range(1, k + 1)}
+                corrects = total_stages = 0
+                total_usd = 0.0
+                confidences, correct_flags, true_probs = [], [], []
+
+                for pos, m in enumerate(meta):
+                    label_idx = option_ids.index(m["ideal"])
+                    forced = pos in prefix_ids
+                    if forced:
+                        schedule = list(cyclic_schedule)
+                        stage_probs = list(np.asarray(probs_bank[pos], dtype=np.float64))
+                        calls = list(prefix_calls[pos])
+                    else:
+                        identity = [[m["sys_msg"], _build_option_user_prompt(
+                            m["question"], m["options"], option_ids
+                        )]]
+                        result = eval_fn((pos, (identity, m["options"], m["ideal"])), random.Random(0))
+                        stage_probs = [np.asarray(result["data"]["probs"][0], dtype=np.float64)]
+                        calls = list(result["data"].get("api_calls") or [])
+                        base_post, base_pred, _ = _compute_empirical_stage_posteriors(
+                            np.asarray(stage_probs), [tuple(range(k))], mu_hat, residual_bank
+                        )
+                        order = np.argsort(np.asarray(base_post[0]))[::-1]
+                        top1 = int(base_pred[0])
+                        runner = int(order[1]) if len(order) > 1 else top1
+                        schedule = _build_targeted_latin_schedule(k, top1, runner)
+
+                        while len(stage_probs) < k:
+                            _, _, conf_so_far = _compute_empirical_stage_posteriors(
+                                np.asarray(stage_probs), schedule[:len(stage_probs)], mu_hat, residual_bank
+                            )
+                            stage_id = len(stage_probs)
+                            if router.should_stop(stage_id, float(conf_so_far[-1])):
+                                break
+                            perm = schedule[len(stage_probs)]
+                            opts = [m["options"][int(i)] for i in perm]
+                            prompt = [[m["sys_msg"], _build_option_user_prompt(m["question"], opts, option_ids)]]
+                            next_result = eval_fn((pos, (prompt, m["options"], m["ideal"])), random.Random(0))
+                            stage_probs.append(np.asarray(next_result["data"]["probs"][0], dtype=np.float64))
+                            calls.extend(list(next_result["data"].get("api_calls") or []))
+
+                    posts, preds, confs = _compute_empirical_stage_posteriors(
+                        np.asarray(stage_probs), schedule[:len(stage_probs)], mu_hat, residual_bank
+                    )
+                    stop_stage = len(stage_probs)
+                    post = np.asarray(posts[-1], dtype=np.float64)
+                    is_correct = int(preds[-1]) == label_idx
+                    sample_usd = sum(_api_call_cost(c) for c in calls)
+                    corrects += int(is_correct)
+                    total_stages += stop_stage
+                    total_usd += sample_usd
+                    stage_counts[f"n_stage_{stop_stage}"] += 1
+                    confidences.append(float(confs[-1]))
+                    correct_flags.append(bool(is_correct))
+                    true_probs.append(float(post[label_idx]))
+                    router.observe(confs[:stop_stage])
+                    trajectories.append({
+                        "type": "api_adaptive_trajectory", "task": args.task,
+                        "subject": subject, "run_idx": run_idx, "sample_pos": pos,
+                        "prefix_forced": forced, "stop_stage": stop_stage,
+                        "pred": int(preds[-1]), "label": label_idx,
+                        "correct": bool(is_correct), "confidence": float(confs[-1]),
+                        "true_prob": float(post[label_idx]), "policy_cost_usd": sample_usd,
+                        "request_hashes": [str(c.get("request_hash", "")) for c in calls],
+                    })
+
+                conf_arr = np.asarray(confidences, dtype=np.float64)
+                corr_arr = np.asarray(correct_flags, dtype=bool)
+                tp_arr = np.asarray(true_probs, dtype=np.float64)
+                row = {
+                    "subject": subject, "run_idx": run_idx, "n_samples": N,
+                    "alpha": alpha, "percentile": percentile,
+                    "accuracy": corrects / N,
+                    "nll": float(np.mean(-np.log(np.clip(tp_arr, 1e-12, 1.0)))),
+                    "ece": float(_compute_ece(conf_arr, corr_arr, 10)),
+                    "mean_permutations": total_stages / N,
+                    "policy_cost_usd": total_usd,
+                    "policy_cost_usd_per_sample": total_usd / N,
+                    "stage_counts": stage_counts, "prefix_samples": len(prefix_ids),
+                }
+                run_rows.append(row)
+                logger.info(_purple(
+                    f"API adaptive {args.task}/{subject} run={run_idx}: acc={row['accuracy']:.4f}, "
+                    f"nll={row['nll']:.4f}, ece={row['ece']:.4f}, "
+                    f"E[T]={row['mean_permutations']:.4f}, policy_usd=${row['policy_cost_usd']:.6f}"
+                ))
+
+        total_n = sum(int(r["n_samples"]) for r in run_rows)
+        if total_n <= 0:
+            raise RuntimeError(f"adaptive evaluation produced no samples for {args.task}")
+        weighted = lambda key: sum(float(r[key]) * int(r["n_samples"]) for r in run_rows) / total_n
+        counts = {f"n_stage_{s}": sum(int(r["stage_counts"][f"n_stage_{s}"]) for r in run_rows)
+                  for s in range(1, k + 1)}
+        payload = {
+            "version": 1, "task": args.task, "execution_mode": "adaptive",
+            "provider": args.api_provider, "requested_model": args.pretrained_model_path,
+            "alpha": alpha, "percentile": percentile, "n_samples": total_n,
+            "n_runs": n_runs, "accuracy": weighted("accuracy"),
+            "nll": weighted("nll"), "ece": weighted("ece"),
+            "mean_permutations": weighted("mean_permutations"),
+            "policy_cost_usd": sum(float(r["policy_cost_usd"]) for r in run_rows),
+            "policy_cost_usd_per_sample": weighted("policy_cost_usd_per_sample"),
+            "stage_counts": counts, "runs": run_rows,
+        }
+        out_dir = build_results_dir(args, args.task, args.num_few_shot, "full")
+        os.makedirs(out_dir, exist_ok=True)
+        summary_path = os.path.join(out_dir, f"{args.task}_api_adaptive_summary.json")
+        trajectory_path = os.path.join(out_dir, f"{args.task}_api_adaptive_trajectories.jsonl")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        with open(trajectory_path, "w", encoding="utf-8") as f:
+            for row in trajectories:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        payload["summary_path"] = summary_path
+        payload["trajectories_path"] = trajectory_path
+        task_payloads[args.task] = payload
+
+    api_summary = model.summary()
+    for payload in task_payloads.values():
+        payload["returned_model"] = api_summary.get("returned_model")
+        payload["returned_models"] = dict(api_summary.get("returned_models") or {})
+        payload["physical"] = dict(api_summary.get("physical") or {})
+        payload["logical"] = dict(api_summary.get("logical") or {})
+        payload["pricing"] = dict(api_summary.get("pricing") or {})
+        payload["physical_scope"] = "current process (all requested tasks)"
+        with open(payload["summary_path"], "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    if wandb_ok and wandb_run is not None:
+        wandb_run.summary["api_evaluation_v1"] = task_payloads
+        try:
+            import wandb
+            art = wandb.Artifact(f"api-adaptive-{args.model_name}-{wandb_run.id}", type="api_adaptive")
+            for payload in task_payloads.values():
+                art.add_file(payload["summary_path"])
+                art.add_file(payload["trajectories_path"])
+            for cache_idx, cache_dir in enumerate(api_summary.get("cache_dirs") or [str(model.cache_dir)]):
+                calls_path = os.path.join(str(cache_dir), "calls.jsonl")
+                diagnostics_path = os.path.join(str(cache_dir), "diagnostics.jsonl")
+                if os.path.exists(calls_path):
+                    art.add_file(calls_path, name=f"cache_{cache_idx}/calls.jsonl")
+                if os.path.exists(diagnostics_path):
+                    art.add_file(diagnostics_path, name=f"cache_{cache_idx}/diagnostics.jsonl")
+            wandb_run.log_artifact(art)
+        except Exception as e:
+            logger.warning(f"W&B adaptive artifact logging failed: {e}")
+    return task_payloads
+
+
 def main():
     patch_open()
 
@@ -2783,6 +3100,10 @@ def main():
                 "eval_names": getattr(args, "eval_names", None),
                 "option_id_set": getattr(args, "option_id_set", None),
                 "ours_low_conf_percent": getattr(args, "ours_low_conf_percent", None),
+                "inference_backend": getattr(args, "inference_backend", "local"),
+                "api_provider": getattr(args, "api_provider", None),
+                "api_execution_mode": getattr(args, "api_execution_mode", None),
+                "api_adaptive_percentile": getattr(args, "api_adaptive_percentile", None),
             }
             wandb_run = wandb.init(project=project, entity=entity, name=run_name, config=cfg)
             logger.info(_blue(f"W&B init ok: project={project}, entity={entity}, name={run_name}"))
@@ -2934,45 +3255,84 @@ def main():
                 pass
         return
 
-    # -------- Tokenizer / Model --------
-    # 일부 LLaMA/Mistral 계열은 slow(SentencePiece) tokenizer 파일이 없어서
-    # use_fast=False 로 강제하면 \"TypeError: not a string\" 가 발생한다.
-    # 따라서 기본값(use_fast=True)에 맡기고 BOS/EOS 토큰만 제어한다.
-    toker = AutoTokenizer.from_pretrained(
-        args.pretrained_model_path,
-        add_bos_token=False,
-        add_eos_token=False,
-        cache_dir=getattr(args, "cache_dir", None),
-    )
-
-    use_bf16 = bool(torch.cuda.is_available()) and bool(torch.cuda.is_bf16_supported())
-    config = AutoConfig.from_pretrained(
-        args.pretrained_model_path,
-        cache_dir=getattr(args, "cache_dir", None),
-    )
-    model_type = getattr(config, "model_type", "").lower()
-    if model_type in ("t5", "mt5", "umt5"):
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            args.pretrained_model_path,
-            device_map='auto',
-            use_safetensors=True,
-            torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
-            cache_dir=getattr(args, "cache_dir", None),
+    # -------- Inference backend --------
+    api_backend = str(getattr(args, "inference_backend", "local")) == "api"
+    if api_backend:
+        first_eval = str(args.eval_names[0]).split(",") if args.eval_names else ["api", "0", "full"]
+        first_result_dir = build_results_dir(
+            args,
+            first_eval[0],
+            int(first_eval[1]),
+            first_eval[2] if len(first_eval) > 2 else None,
+        )
+        initial_cache = getattr(args, "api_cache_dir", None) or os.path.join(
+            first_result_dir, "api_cache", str(args.api_provider)
+        )
+        model = CommercialAPIClient(
+            provider=args.api_provider,
+            model=args.pretrained_model_path,
+            cache_dir=initial_cache,
+            timeout_seconds=args.api_timeout_seconds,
+            max_retries=args.api_max_retries,
+            max_cost_usd=args.api_max_cost_usd,
+            max_requests=args.api_max_requests,
+            force_requests=args.api_force_requests,
+            base_url=args.api_base_url,
+            input_usd_per_mtok=args.api_input_usd_per_mtok,
+            cached_input_usd_per_mtok=args.api_cached_input_usd_per_mtok,
+            output_usd_per_mtok=args.api_output_usd_per_mtok,
+        )
+        toker = None
+        logger.info(
+            _blue(
+                f"API backend ready: provider={args.api_provider}, model={args.pretrained_model_path}, "
+                f"mode={args.api_execution_mode}, pricing_snapshot={PRICE_SNAPSHOT_DATE}, "
+                f"max_cost={args.api_max_cost_usd}, max_requests={args.api_max_requests}"
+            )
         )
     else:
-        model = AutoModelForCausalLM.from_pretrained(
+        # 일부 LLaMA/Mistral 계열은 slow tokenizer 파일이 없으므로 fast 기본값을 쓴다.
+        toker = AutoTokenizer.from_pretrained(
+            args.pretrained_model_path,
+            add_bos_token=False,
+            add_eos_token=False,
+            cache_dir=getattr(args, "cache_dir", None),
+        )
+        use_bf16 = bool(torch.cuda.is_available()) and bool(torch.cuda.is_bf16_supported())
+        config = AutoConfig.from_pretrained(
+            args.pretrained_model_path,
+            cache_dir=getattr(args, "cache_dir", None),
+        )
+        model_type = getattr(config, "model_type", "").lower()
+        model_cls = AutoModelForSeq2SeqLM if model_type in ("t5", "mt5", "umt5") else AutoModelForCausalLM
+        model = model_cls.from_pretrained(
             args.pretrained_model_path,
             device_map='auto',
             use_safetensors=True,
             torch_dtype=torch.bfloat16 if use_bf16 else torch.float16,
             cache_dir=getattr(args, "cache_dir", None),
         )
+        logging_cuda_memory_usage()
 
-    logging_cuda_memory_usage()
+    if api_backend and str(args.api_execution_mode) == "adaptive":
+        _run_api_adaptive(args, model, wandb_ok=wandb_ok, wandb_run=wandb_run)
+        if wandb_ok and wandb_run is not None:
+            try:
+                import wandb
+                wandb.finish()
+            except Exception as e:
+                logger.warning(f"W&B adaptive finish failed: {e}")
+        return
 
+    offline_api_records_by_task = {}
     for eval_name in args.eval_names[::1]:
         (subjects, prepare_few_shot_samples,
          prepare_eval_samples, prepare_eval_fn) = prepare_eval(args, eval_name)
+        if api_backend:
+            if getattr(args, "api_cache_dir", None) is None:
+                model.set_cache_dir(os.path.join(args.save_path, "api_cache", str(args.api_provider)))
+            if bool(getattr(args, "api_probe_only", False)):
+                subjects = subjects[:1]
 
         # =========================
         # Aggregate (MMLU-style) summary over subjects
@@ -2985,7 +3345,10 @@ def main():
         empirical_analysis_records: List[dict] = []
         pride_recall_std_records: List[dict] = []  # [{'subject':str,'rstd':float,'m':int,'N':int}]
         recall_std_vs_p_records: List[dict] = []  # [{'subject':str,'p':float,'method':str,'kind':str,'rstd':float}]
-        n_runs = max(1, int(getattr(args, "n_runs", 1)))
+        n_runs = (
+            1 if api_backend and bool(getattr(args, "api_probe_only", False))
+            else max(1, int(getattr(args, "n_runs", 1)))
+        )
         skip_per_subject_plots = (args.task == "mmlu" and len(subjects) > 1)
 
         # 논문 테이블용 Base T/F 기준 트랜지션 기록 (Cyclic & Full)
@@ -3025,7 +3388,10 @@ def main():
                 use_run_suffix = (n_runs > 1)
                 cached_path = (f'{args.save_path}/{subject}_run{run_idx}.jsonl' if use_run_suffix
                                else f'{args.save_path}/{subject}.jsonl')
-                maybe_use_cached = (not bool(getattr(args, 'force', False))) and os.path.exists(cached_path)
+                recompute_results = bool(getattr(args, "force", False)) or (
+                    api_backend and bool(getattr(args, "api_force_requests", False))
+                )
+                maybe_use_cached = (not recompute_results) and os.path.exists(cached_path)
 
                 few_shot_seed = run_idx if use_run_suffix else None
                 run_seed = run_idx if use_run_suffix else None
@@ -3038,7 +3404,16 @@ def main():
                     shuffler = random.Random(int(run_idx) + 42)
                     shuffler.shuffle(eval_samples)
                 eval_fn = prepare_eval_fn(model, toker, few_shot_samples)
-                max_samples = 100 if bool(getattr(args, 'test', False)) else None
+                if api_backend and bool(getattr(args, "api_probe_only", False)):
+                    max_samples = int(getattr(args, "api_probe_samples", 10))
+                else:
+                    max_samples = 100 if bool(getattr(args, 'test', False)) else None
+
+                if api_backend:
+                    model.set_context(
+                        task=str(args.task), subject=str(subject), run_idx=int(run_idx),
+                        eval_name=str(eval_name), execution_mode=str(args.api_execution_mode),
+                    )
 
                 use_cached = False
                 results = []
@@ -3058,8 +3433,11 @@ def main():
 
                 if not use_cached:
                     logger.info(_blue(f"Run started: {subject}" + (f" [run {run_idx+1}/{n_runs}]" if use_run_suffix else "")))
-                    n_threads = torch.cuda.device_count()
-                    n_threads = max(1, int(n_threads)) if 'falcon' not in args.pretrained_model_path else 1
+                    if api_backend:
+                        n_threads = 1 if args.api_execution_mode == "adaptive" else max(1, int(args.api_concurrency))
+                    else:
+                        n_threads = torch.cuda.device_count()
+                        n_threads = max(1, int(n_threads)) if 'falcon' not in args.pretrained_model_path else 1
                     results = eval_all_samples(
                         eval_fn, eval_samples,
                         name=f'{args.task},{args.num_few_shot},{args.setting},{subject}' + (f',run{run_idx}' if use_run_suffix else ''),
@@ -3068,7 +3446,19 @@ def main():
                         run_seed=run_seed,
                     )
                     gc.collect()
-                    torch.cuda.empty_cache()
+                    if not api_backend:
+                        torch.cuda.empty_cache()
+
+                if api_backend:
+                    task_records = offline_api_records_by_task.setdefault(
+                        str(args.task), {"n_samples": 0, "calls": []}
+                    )
+                    task_records["n_samples"] += len(results)
+                    for result in results:
+                        data = result.get("data", {}) if isinstance(result, dict) else {}
+                        task_records["calls"].extend(
+                            call for call in (data.get("api_calls") or []) if isinstance(call, dict)
+                        )
 
                 metrics = None
                 if len(results) > 0:
@@ -3829,14 +4219,21 @@ def main():
                                         )
                                         stage_shifts = None
                                     raw_options = list(prompt_meta["options"])
+                                    empirical_api_calls = []
+                                    cached_stage_row = empirical_stage_cache.get(int(sample_pos))
                                     if empirical_transition_mode == "probe_cyclic":
                                         probe_slot_to_content = stage_schedule[1]
                                         all_stage_probs = _cached_empirical_stage_probs(
-                                            empirical_stage_cache.get(int(sample_pos)),
+                                            cached_stage_row,
                                             sample_id=int(prompt_meta["idx"]),
                                             k=int(k),
                                             stage_schedule=stage_schedule,
                                         )
+                                        if (
+                                            api_backend and all_stage_probs is not None
+                                            and (bool(args.api_force_requests) or not cached_stage_row.get("api_calls"))
+                                        ):
+                                            all_stage_probs = None
                                         if all_stage_probs is None:
                                             probing_inputs_emp = []
                                             for slot_to_content in stage_schedule[1:]:
@@ -3850,6 +4247,7 @@ def main():
                                                 (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
                                             )
                                             empirical_result = eval_fn(empirical_sample, random.Random(0))
+                                            empirical_api_calls = list(empirical_result["data"].get("api_calls") or [])
                                             extra_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
                                             all_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
                                             cache_row = {
@@ -3864,12 +4262,14 @@ def main():
                                                 "k": int(k),
                                                 "stage_schedule": _schedule_signature(stage_schedule),
                                                 "stage_probs": all_stage_probs.tolist(),
+                                                "api_calls": empirical_api_calls,
                                             }
                                             _append_empirical_stage_cache(empirical_stage_cache_path, cache_row)
                                             empirical_stage_cache[int(sample_pos)] = cache_row
                                             empirical_stage_cache_misses += 1
                                         else:
                                             empirical_stage_cache_hits += 1
+                                            empirical_api_calls = list(cached_stage_row.get("api_calls") or [])
                                         post_by_stage_full, pred_by_stage_full, conf_by_stage_full = _compute_empirical_stage_posteriors(
                                             stage_probs=all_stage_probs,
                                             slot_to_content_schedule=stage_schedule,
@@ -3923,11 +4323,16 @@ def main():
                                         })
                                     else:
                                         empirical_stage_probs = _cached_empirical_stage_probs(
-                                            empirical_stage_cache.get(int(sample_pos)),
+                                            cached_stage_row,
                                             sample_id=int(prompt_meta["idx"]),
                                             k=int(k),
                                             stage_schedule=stage_schedule,
                                         )
+                                        if (
+                                            api_backend and empirical_stage_probs is not None
+                                            and (bool(args.api_force_requests) or not cached_stage_row.get("api_calls"))
+                                        ):
+                                            empirical_stage_probs = None
                                         if empirical_stage_probs is None:
                                             uses_cached_identity = (
                                                 len(stage_schedule) > 0
@@ -3947,6 +4352,7 @@ def main():
                                                 (probing_inputs_emp, raw_options, str(prompt_meta["ideal"])),
                                             )
                                             empirical_result = eval_fn(empirical_sample, random.Random(0))
+                                            empirical_api_calls = list(empirical_result["data"].get("api_calls") or [])
                                             extra_stage_probs = np.asarray(empirical_result["data"]["probs"], dtype=np.float64)
                                             if uses_cached_identity:
                                                 empirical_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
@@ -3964,12 +4370,14 @@ def main():
                                                 "k": int(k),
                                                 "stage_schedule": _schedule_signature(stage_schedule),
                                                 "stage_probs": empirical_stage_probs.tolist(),
+                                                "api_calls": empirical_api_calls,
                                             }
                                             _append_empirical_stage_cache(empirical_stage_cache_path, cache_row)
                                             empirical_stage_cache[int(sample_pos)] = cache_row
                                             empirical_stage_cache_misses += 1
                                         else:
                                             empirical_stage_cache_hits += 1
+                                            empirical_api_calls = list(cached_stage_row.get("api_calls") or [])
                                         if (sample_pos + 1) % 10 == 0 or (sample_pos + 1) == len(empirical_prompt_meta):
                                             logger.info(
                                                 _blue(
@@ -3992,6 +4400,13 @@ def main():
                                             "decision_stages": list(range(1, int(k) + 1)),
                                             "prefix_forced": bool(sample_pos in empirical_prefix_ids),
                                         })
+
+                                    if api_backend and empirical_api_calls:
+                                        offline_api_records_by_task.setdefault(
+                                            str(args.task), {"n_samples": 0, "calls": []}
+                                        )["calls"].extend(
+                                            call for call in empirical_api_calls if isinstance(call, dict)
+                                        )
 
                                 if empirical_stage_cache_hits or empirical_stage_cache_misses:
                                     logger.info(
@@ -4185,7 +4600,8 @@ def main():
                         import traceback
                         traceback.print_exc()
 
-            logging_cuda_memory_usage()
+            if not api_backend:
+                logging_cuda_memory_usage()
 
         # 논문 작성용 T->F/F->T Empirical Analysis (이미지 업로드 전에 먼저 출력)
         def _print_transition_analysis(records, name):
@@ -4603,6 +5019,85 @@ def main():
             for p in cyclic_fracs:
                 cost, acc, rstd, std_c, std_a, std_r = get_cyclic_stats(base_any_cobjs, p)
                 logger.info(f"cyclic_{p:03d}% : cost={_fmt(cost, std_c)}, acc={_fmt4(acc, std_a)}, recall_std={_fmt4(rstd, std_r)}")
+
+    # -------- API usage/cost summary --------
+    if api_backend:
+        try:
+            api_summary = model.summary()
+            task_payloads = {}
+            summary_paths = []
+            wandb_points = {}
+            if wandb_ok and wandb_run is not None:
+                maybe_points = wandb_run.summary.get("three_curves_points_v1", {})
+                if isinstance(maybe_points, dict):
+                    wandb_points = maybe_points
+            for eval_name in args.eval_names:
+                eval_parts = str(eval_name).split(",")
+                task_name, shots = eval_parts[0], int(eval_parts[1])
+                records = offline_api_records_by_task.get(task_name, {"n_samples": 0, "calls": []})
+                logical = _summarize_api_call_records(records.get("calls") or [])
+                logical_requests = int(logical.get("requests", 0) or 0)
+                avg_call_cost = (
+                    float(logical.get("cost_usd", 0.0) or 0.0) / logical_requests
+                    if logical_requests > 0 else float("nan")
+                )
+                points_payload = wandb_points.get(task_name)
+                out_dir = build_results_dir(args, task_name, shots, "full")
+                points_path = os.path.join(out_dir, f"{task_name}_three_curves_points.json")
+                if not isinstance(points_payload, dict) and os.path.exists(points_path):
+                    with open(points_path, "r", encoding="utf-8") as f:
+                        points_payload = json.load(f)
+                payload = {
+                    **dict(api_summary),
+                    "task": task_name,
+                    "execution_mode": str(args.api_execution_mode),
+                    "adaptive_percentile": getattr(args, "api_adaptive_percentile", None),
+                    "n_samples": int(records.get("n_samples", 0) or 0),
+                    "logical": logical,
+                    "returned_model": logical.get("returned_model") or api_summary.get("returned_model"),
+                    "returned_models": logical.get("returned_models") or api_summary.get("returned_models", {}),
+                    "average_logical_call_cost_usd": avg_call_cost,
+                    "physical_scope": "current process (all requested tasks)",
+                    "counterfactual_note": (
+                        "offline_sweep policy USD uses measured mean logical call cost multiplied by E[T]; "
+                        "physical is actual network spend in this process and excludes durable-cache hits."
+                    ),
+                    "counterfactual_policies": _collect_counterfactual_api_costs(
+                        points_payload, avg_call_cost, int(records.get("n_samples", 0) or 0)
+                    ) if np.isfinite(avg_call_cost) else {},
+                }
+                task_payloads[task_name] = payload
+                os.makedirs(out_dir, exist_ok=True)
+                summary_path = os.path.join(out_dir, f"{task_name}_api_evaluation_summary.json")
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                summary_paths.append(summary_path)
+                logger.info(_purple(f"Saved API evaluation summary: {summary_path}"))
+            if wandb_ok and wandb_run is not None:
+                wandb_run.summary["api_evaluation_v1"] = task_payloads
+                cache_dirs = api_summary.get("cache_dirs") or [str(model.cache_dir)]
+                has_call_logs = any(os.path.exists(os.path.join(str(path), "calls.jsonl")) for path in cache_dirs)
+                if summary_paths or has_call_logs:
+                    try:
+                        import wandb
+                        art = wandb.Artifact(
+                            name=f"api-calls-{args.model_name}-{wandb_run.id}",
+                            type="api_calls",
+                        )
+                        for summary_path in summary_paths:
+                            art.add_file(summary_path)
+                        for cache_idx, cache_dir in enumerate(cache_dirs):
+                            calls_path = os.path.join(str(cache_dir), "calls.jsonl")
+                            diagnostics_path = os.path.join(str(cache_dir), "diagnostics.jsonl")
+                            if os.path.exists(calls_path):
+                                art.add_file(calls_path, name=f"cache_{cache_idx}/calls.jsonl")
+                            if os.path.exists(diagnostics_path):
+                                art.add_file(diagnostics_path, name=f"cache_{cache_idx}/diagnostics.jsonl")
+                        wandb_run.log_artifact(art)
+                    except Exception as e:
+                        logger.warning(f"W&B API artifact logging failed: {e}")
+        except Exception as e:
+            logger.warning(f"API usage summary failed: {e}")
 
     # -------- finalize W&B --------
     _wandb_done = {"done": False}

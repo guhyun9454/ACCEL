@@ -17,7 +17,7 @@ sentencepiece>=0.1.99
 # GPU monitoring (optional but used)
 pynvml>=11.4.1
 
-# OpenAI Chat API
+# Commercial logprob APIs
 openai>=1.0.0
-
+google-genai>=1.0.0
 
