@@ -53,6 +53,9 @@ def parse_arguments():
     parser.add_argument("--api_execution_mode", type=str, default="offline_sweep",
                         choices=["offline_sweep", "adaptive"],
                         help="offline_sweep precomputes stages for curves; adaptive physically stops API calls at the selected policy stage.")
+    parser.add_argument("--api_prompt_mode", type=str, default="baseline",
+                        choices=["baseline", "label_only"],
+                        help="API-only prompt policy. baseline preserves the original PriDe prompt; label_only adds a strict one-label instruction.")
     parser.add_argument("--api_adaptive_percentile", type=float, default=None,
                         help="Required percentile operating point for --api_execution_mode=adaptive (for example 80).")
     parser.add_argument("--api_probe_only", action="store_true",
@@ -419,10 +422,21 @@ def prepare_eval(args, eval_name):
 
     # prepare_eval_fn
     if getattr(args, "inference_backend", "local") == "api":
+        api_prompt_mode = getattr(args, "api_prompt_mode", "baseline")
         if setting in ['perm', 'cyclic', 'full']:
-            prepare_eval_fn = partial(prepare_eval_fn_api_perm, num_few_shot=num_few_shot, option_ids=option_ids)
+            prepare_eval_fn = partial(
+                prepare_eval_fn_api_perm,
+                num_few_shot=num_few_shot,
+                option_ids=option_ids,
+                api_prompt_mode=api_prompt_mode,
+            )
         else:
-            prepare_eval_fn = partial(prepare_eval_fn_api_base, num_few_shot=num_few_shot, option_ids=option_ids)
+            prepare_eval_fn = partial(
+                prepare_eval_fn_api_base,
+                num_few_shot=num_few_shot,
+                option_ids=option_ids,
+                api_prompt_mode=api_prompt_mode,
+            )
     elif setting in ['noid']:
         prepare_eval_fn = partial(prepare_eval_fn_noid, num_few_shot=num_few_shot, option_ids=option_ids)
     elif setting in ['perm', 'cyclic', 'full']:
@@ -433,8 +447,30 @@ def prepare_eval(args, eval_name):
     return subjects, prepare_few_shot_samples, prepare_eval_samples, prepare_eval_fn
 
 
-def _api_messages(sys_msg, eval_sample, few_shot_samples, num_few_shot):
-    messages = [{"role": "system", "content": str(sys_msg)}]
+def _api_label_only_instruction(option_ids):
+    labels = ", ".join(str(x) for x in option_ids)
+    return (
+        f"Respond with exactly one option label from: {labels}. "
+        'Do not output the word "Answer", an explanation, punctuation, '
+        "or any other text."
+    )
+
+
+def _api_messages(
+    sys_msg,
+    eval_sample,
+    few_shot_samples,
+    num_few_shot,
+    option_ids,
+    api_prompt_mode="baseline",
+):
+    prompt_mode = str(api_prompt_mode or "baseline").strip().lower()
+    if prompt_mode not in {"baseline", "label_only"}:
+        raise ValueError(f"unsupported api_prompt_mode: {api_prompt_mode}")
+    system_content = str(sys_msg)
+    if prompt_mode == "label_only":
+        system_content += " " + _api_label_only_instruction(option_ids)
+    messages = [{"role": "system", "content": system_content}]
     for row in few_shot_samples[:num_few_shot]:
         text = str(row)
         try:
@@ -447,14 +483,19 @@ def _api_messages(sys_msg, eval_sample, few_shot_samples, num_few_shot):
     return messages
 
 
-def prepare_eval_fn_api_base(model, toker, few_shot_samples, num_few_shot, option_ids):
+def prepare_eval_fn_api_base(
+    model, toker, few_shot_samples, num_few_shot, option_ids, api_prompt_mode="baseline"
+):
     del toker
 
     def eval_fn(sample, rng: random.Random):
         del rng
         idx, (input_pair, options, ideal) = sample
         sys_msg, eval_sample = input_pair.copy()
-        messages = _api_messages(sys_msg, eval_sample, few_shot_samples, num_few_shot)
+        messages = _api_messages(
+            sys_msg, eval_sample, few_shot_samples, num_few_shot,
+            option_ids, api_prompt_mode,
+        )
         response = model.complete_labels(messages, option_ids)
         probs = np.asarray(response.label_probs, dtype=np.float64)
         sampled = option_ids[int(np.argmax(probs))]
@@ -464,6 +505,7 @@ def prepare_eval_fn_api_base(model, toker, few_shot_samples, num_few_shot, optio
                 'idx': idx,
                 'prompt': str(sys_msg) + '\n\n' + str(eval_sample),
                 'messages': messages,
+                'api_prompt_mode': str(api_prompt_mode),
                 'options': options,
                 'probs': probs.tolist(),
                 'sampled': sampled,
@@ -475,7 +517,9 @@ def prepare_eval_fn_api_base(model, toker, few_shot_samples, num_few_shot, optio
     return eval_fn
 
 
-def prepare_eval_fn_api_perm(model, toker, few_shot_samples, num_few_shot, option_ids):
+def prepare_eval_fn_api_perm(
+    model, toker, few_shot_samples, num_few_shot, option_ids, api_prompt_mode="baseline"
+):
     del toker
 
     def eval_fn(sample, rng: random.Random):
@@ -488,7 +532,10 @@ def prepare_eval_fn_api_perm(model, toker, few_shot_samples, num_few_shot, optio
         api_calls = []
         prompts = []
         for sys_msg, eval_sample in probing_inputs:
-            messages = _api_messages(sys_msg, eval_sample, few_shot_samples, num_few_shot)
+            messages = _api_messages(
+                sys_msg, eval_sample, few_shot_samples, num_few_shot,
+                option_ids, api_prompt_mode,
+            )
             response = model.complete_labels(messages, option_ids)
             all_probs.append([float(x) for x in response.label_probs])
             all_messages.append(messages)
@@ -501,6 +548,7 @@ def prepare_eval_fn_api_perm(model, toker, few_shot_samples, num_few_shot, optio
                 'prompt': prompts[0],
                 'prompts': prompts,
                 'messages': all_messages,
+                'api_prompt_mode': str(api_prompt_mode),
                 'options': options,
                 'probs': all_probs,
                 'ideal': ideal,

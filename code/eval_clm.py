@@ -53,7 +53,7 @@ from eval_clm_online import (
 )
 from eval_clm_plots import _plot_three_curves_acc_recall_std
 from eval_clm_reporting import _log_baseline_report, _log_named_report
-from api_inference import CommercialAPIClient, OnlinePercentileRouter, PRICE_SNAPSHOT_DATE
+from api_inference import CommercialAPIClient, OnlinePercentileRouter
 
 from utils import (
     _orange, _blue, _purple,
@@ -2873,8 +2873,14 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                 prefix_ids = set(int(x) for x in np.random.default_rng(seed).choice(
                     np.arange(N, dtype=np.int64), size=prefix_n, replace=False
                 ).tolist())
-                model.set_context(task=args.task, subject=subject, run_idx=run_idx,
-                                  eval_name=eval_name, execution_mode="adaptive")
+                model.set_context(
+                    task=args.task,
+                    subject=subject,
+                    run_idx=run_idx,
+                    eval_name=eval_name,
+                    execution_mode="adaptive",
+                    prompt_mode=str(args.api_prompt_mode),
+                )
                 eval_fn = prep_fn(model, None, few)
 
                 meta = []
@@ -2982,6 +2988,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                     trajectories.append({
                         "type": "api_adaptive_trajectory", "task": args.task,
                         "subject": subject, "run_idx": run_idx, "sample_pos": pos,
+                        "prompt_mode": str(args.api_prompt_mode),
                         "prefix_forced": forced, "stop_stage": stop_stage,
                         "pred": int(preds[-1]), "label": label_idx,
                         "correct": bool(is_correct), "confidence": float(confs[-1]),
@@ -2995,6 +3002,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                 row = {
                     "subject": subject, "run_idx": run_idx, "n_samples": N,
                     "alpha": alpha, "percentile": percentile,
+                    "prompt_mode": str(args.api_prompt_mode),
                     "accuracy": corrects / N,
                     "nll": float(np.mean(-np.log(np.clip(tp_arr, 1e-12, 1.0)))),
                     "ece": float(_compute_ece(conf_arr, corr_arr, 10)),
@@ -3018,6 +3026,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                   for s in range(1, k + 1)}
         payload = {
             "version": 1, "task": args.task, "execution_mode": "adaptive",
+            "prompt_mode": str(args.api_prompt_mode),
             "provider": args.api_provider, "requested_model": args.pretrained_model_path,
             "alpha": alpha, "percentile": percentile, "n_samples": total_n,
             "n_runs": n_runs, "accuracy": weighted("accuracy"),
@@ -3103,6 +3112,7 @@ def main():
                 "inference_backend": getattr(args, "inference_backend", "local"),
                 "api_provider": getattr(args, "api_provider", None),
                 "api_execution_mode": getattr(args, "api_execution_mode", None),
+                "api_prompt_mode": getattr(args, "api_prompt_mode", "baseline"),
                 "api_adaptive_percentile": getattr(args, "api_adaptive_percentile", None),
             }
             wandb_run = wandb.init(project=project, entity=entity, name=run_name, config=cfg)
@@ -3286,7 +3296,9 @@ def main():
         logger.info(
             _blue(
                 f"API backend ready: provider={args.api_provider}, model={args.pretrained_model_path}, "
-                f"mode={args.api_execution_mode}, pricing_snapshot={PRICE_SNAPSHOT_DATE}, "
+                f"mode={args.api_execution_mode}, "
+                f"prompt_mode={args.api_prompt_mode}, "
+                f"pricing_snapshot={model.pricing['snapshot_date']}, "
                 f"max_cost={args.api_max_cost_usd}, max_requests={args.api_max_requests}"
             )
         )
@@ -3413,6 +3425,7 @@ def main():
                     model.set_context(
                         task=str(args.task), subject=str(subject), run_idx=int(run_idx),
                         eval_name=str(eval_name), execution_mode=str(args.api_execution_mode),
+                        prompt_mode=str(args.api_prompt_mode),
                     )
 
                 use_cached = False
@@ -5051,6 +5064,7 @@ def main():
                     **dict(api_summary),
                     "task": task_name,
                     "execution_mode": str(args.api_execution_mode),
+                    "prompt_mode": str(args.api_prompt_mode),
                     "adaptive_percentile": getattr(args, "api_adaptive_percentile", None),
                     "n_samples": int(records.get("n_samples", 0) or 0),
                     "logical": logical,

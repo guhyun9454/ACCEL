@@ -10,7 +10,7 @@ For PriDe, simply modify the hyperparameters in `debias_pride.py` and run it.
 commercial inference only with `--inference_backend api`. Supported pairs are:
 
 - `openai` / `gpt-4.1-2025-04-14`
-- `gemini` / `gemini-2.5-flash-lite`
+- `gemini` / `gemini-2.5-flash-lite` (legacy accounts only; probe required)
 - `deepseek` / `deepseek-v4-flash`
 - `together` / `Qwen/Qwen3.5-397B-A17B`
 
@@ -24,6 +24,7 @@ Run a 10-sample capability probe first:
 python eval_clm.py \
   --pretrained_model_path gpt-4.1-2025-04-14 \
   --inference_backend api --api_provider openai \
+  --api_prompt_mode label_only \
   --api_execution_mode offline_sweep \
   --api_probe_only --api_probe_samples 10 --api_max_requests 100 \
   --eval_names arc,0,full --option_id_set ABCD --skip_full \
@@ -32,6 +33,12 @@ python eval_clm.py \
   --empirical_sweep_mode percentile --empirical_stage_schedule flat \
   --empirical_transition_mode latin
 ```
+
+Gemini capability was rechecked on 2026-07-19. New accounts receive `404` for
+Gemini 2.5 models, while the available Gemini 3.1/3.5 and Gemma 4 text models
+return `400 Logprobs is not enabled for this model`. The Gemini adapter remains
+for legacy accounts, but no current Gemini model should be promoted to a full
+PriDe/ACCEL run unless a fresh strict capability probe succeeds.
 
 For a physical adaptive run, the percentile is deliberately required rather
 than defaulted. Calibration-prefix questions collect all Latin stages; other
@@ -42,6 +49,7 @@ satisfied:
 python eval_clm.py \
   --pretrained_model_path gpt-4.1-2025-04-14 \
   --inference_backend api --api_provider openai \
+  --api_prompt_mode label_only \
   --api_execution_mode adaptive --api_adaptive_percentile 80 \
   --api_max_cost_usd 10 --api_max_requests 20000 \
   --eval_names arc,0,full --option_id_set ABCD --skip_full \
@@ -58,6 +66,11 @@ Add `--api_force_requests` only when intentional new provider calls are needed.
 With `--n_runs 3`, the run index is part of the cache namespace, so all three
 runs are independent API repetitions. Missing option labels in first-token
 top-20 logprobs fail immediately and are recorded in `diagnostics.jsonl`.
+`--api_prompt_mode baseline` preserves the original PriDe prompt and remains
+the default. `label_only` adds the strict one-label instruction only to API
+system messages; local Hugging Face prompts and label-restricted scoring are
+unchanged. Coverage failures remain invalid and uncached, while their raw top
+probabilities, usage, and estimated physical USD are retained in diagnostics.
 
 If you find this repository useful or our work is related to your research, please kindly cite it:
 

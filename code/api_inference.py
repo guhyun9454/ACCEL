@@ -39,6 +39,23 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "cached_input_usd_per_mtok": 0.50,
         "output_usd_per_mtok": 8.00,
     },
+    "openai:gpt-5.6-luna": {
+        "provider": "openai",
+        "model": "gpt-5.6-luna",
+        "api_key_env": "OPENAI_API_KEY",
+        "base_url": None,
+        "input_usd_per_mtok": 1.00,
+        "cached_input_usd_per_mtok": 0.10,
+        "output_usd_per_mtok": 6.00,
+        "pricing_snapshot_date": "2026-07-21",
+        # Luna accepts Chat Completions logprobs, but its live endpoint caps
+        # top_logprobs at 5. Disable reasoning for one-token MCQ scoring and
+        # leave enough completion budget for the visible label token.
+        "top_logprobs": 5,
+        "max_completion_tokens": 8,
+        "reasoning_effort": "none",
+        "temperature": None,
+    },
     "gemini:gemini-2.5-flash-lite": {
         "provider": "gemini",
         "model": "gemini-2.5-flash-lite",
@@ -78,9 +95,17 @@ class APIInferenceError(Exception):
 class LabelCoverageError(APIInferenceError):
     """Raised when top log-probabilities do not contain every option label."""
 
-    def __init__(self, missing_labels: Sequence[str], top_tokens: Sequence[str]):
+    def __init__(
+        self,
+        missing_labels: Sequence[str],
+        top_tokens: Sequence[Any],
+    ):
         self.missing_labels = [str(x) for x in missing_labels]
-        self.top_tokens = [str(x) for x in top_tokens]
+        self.top_entries = [
+            dict(x) if isinstance(x, Mapping) else {"token": str(x)}
+            for x in top_tokens
+        ]
+        self.top_tokens = [str(x.get("token", "")) for x in self.top_entries]
         super().__init__(
             "top logprobs missing required labels "
             f"{self.missing_labels}; returned tokens={self.top_tokens}"
@@ -166,6 +191,10 @@ class LabelProbabilityResponse:
     cache_hit: bool = False
     retry_count: int = 0
     request_hash: str = ""
+    first_token: str = ""
+    top_k_mass: float = 0.0
+    tail_mass: float = 1.0
+    context: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         out = asdict(self)
@@ -253,14 +282,20 @@ def normalize_label_logprobs(
             lp = float(logprob)
         except (TypeError, ValueError):
             continue
-        sanitized.append({"token": str(token), "logprob": lp})
+        probability = math.exp(lp) if math.isfinite(lp) else 0.0
+        sanitized.append({
+            "token": str(token),
+            "logprob": lp,
+            "prob": probability,
+            "probability": probability,
+        })
         label = _canonical_label(token, labels)
         if label is not None and math.isfinite(lp):
-            masses[label] += math.exp(lp)
+            masses[label] += probability
 
     missing = [label for label in labels if not (masses[label] > 0.0)]
     if missing:
-        raise LabelCoverageError(missing, [row["token"] for row in sanitized])
+        raise LabelCoverageError(missing, sanitized)
 
     total = sum(masses.values())
     if not math.isfinite(total) or total <= 0.0:
@@ -268,6 +303,15 @@ def normalize_label_logprobs(
     probs = [masses[label] / total for label in labels]
     label_logprobs = {label: math.log(max(masses[label], 1e-300)) for label in labels}
     return probs, label_logprobs, sanitized
+
+
+def _top_probability_mass(top_entries: Sequence[Mapping[str, Any]]) -> tuple[float, float]:
+    top_k_mass = math.fsum(
+        max(0.0, float(row.get("probability", 0.0) or 0.0))
+        for row in top_entries
+        if math.isfinite(float(row.get("probability", 0.0) or 0.0))
+    )
+    return float(top_k_mass), float(max(0.0, 1.0 - top_k_mass))
 
 
 def _openai_usage(response: Any) -> TokenUsage:
@@ -316,6 +360,10 @@ def normalize_openai_compatible_response(
     if not top_entries:
         raise APIInferenceError("response does not contain first-token top logprobs")
     probs, label_lps, sanitized = normalize_label_logprobs(top_entries, labels)
+    top_k_mass, tail_mass = _top_probability_mass(sanitized)
+    emitted_token = str(_get(first_token, "token", "") or "")
+    if not emitted_token and sanitized:
+        emitted_token = str(sanitized[0].get("token", ""))
     return LabelProbabilityResponse(
         label_probs=probs,
         label_logprobs=label_lps,
@@ -325,6 +373,9 @@ def normalize_openai_compatible_response(
         returned_model=str(_get(response, "model", requested_model) or requested_model),
         provider=provider,
         response_id=str(_get(response, "id", "") or ""),
+        first_token=emitted_token,
+        top_k_mass=top_k_mass,
+        tail_mass=tail_mass,
     )
 
 
@@ -352,6 +403,14 @@ def normalize_gemini_response(
         block_reason = _get(_get(response, "prompt_feedback", {}), "block_reason", "")
         raise APIInferenceError(f"Gemini response missing top logprobs (block_reason={block_reason})")
     probs, label_lps, sanitized = normalize_label_logprobs(entries, labels)
+    top_k_mass, tail_mass = _top_probability_mass(sanitized)
+    chosen_candidates = _get(
+        logprobs, "chosen_candidates", _get(logprobs, "chosenCandidates", [])
+    ) or []
+    chosen = _first(chosen_candidates)
+    emitted_token = str(_get(chosen, "token", "") or "")
+    if not emitted_token and sanitized:
+        emitted_token = str(sanitized[0].get("token", ""))
     return LabelProbabilityResponse(
         label_probs=probs,
         label_logprobs=label_lps,
@@ -363,7 +422,45 @@ def normalize_gemini_response(
         ),
         provider="gemini",
         response_id=str(_get(response, "response_id", _get(response, "responseId", "")) or ""),
+        first_token=emitted_token,
+        top_k_mass=top_k_mass,
+        tail_mass=tail_mass,
     )
+
+
+def _raw_response_metadata(
+    response: Any, *, provider: str, requested_model: str
+) -> Dict[str, Any]:
+    if provider == "gemini":
+        candidate = _first(_get(response, "candidates", []))
+        logprobs = _get(candidate, "logprobs_result", _get(candidate, "logprobsResult", None))
+        chosen_candidates = _get(
+            logprobs, "chosen_candidates", _get(logprobs, "chosenCandidates", [])
+        ) or []
+        chosen = _first(chosen_candidates)
+        first_token = str(_get(chosen, "token", "") or "")
+        return {
+            "usage": _gemini_usage(response),
+            "returned_model": str(
+                _get(response, "model_version", _get(response, "modelVersion", requested_model))
+                or requested_model
+            ),
+            "response_id": str(
+                _get(response, "response_id", _get(response, "responseId", "")) or ""
+            ),
+            "first_token": first_token,
+        }
+
+    choice = _first(_get(response, "choices", []))
+    logprobs = _get(choice, "logprobs", None)
+    first = _first(_get(logprobs, "content", []) or [])
+    first_token = str(_get(first, "token", "") or "")
+    return {
+        "usage": _openai_usage(response),
+        "returned_model": str(_get(response, "model", requested_model) or requested_model),
+        "response_id": str(_get(response, "id", "") or ""),
+        "first_token": first_token,
+    }
 
 
 class CommercialAPIClient:
@@ -427,7 +524,7 @@ class CommercialAPIClient:
     @property
     def pricing(self) -> Dict[str, Any]:
         return {
-            "snapshot_date": PRICE_SNAPSHOT_DATE,
+            "snapshot_date": self.registry.get("pricing_snapshot_date", PRICE_SNAPSHOT_DATE),
             "input_usd_per_mtok": self.input_rate,
             "cached_input_usd_per_mtok": self.cached_input_rate,
             "output_usd_per_mtok": self.output_rate,
@@ -459,14 +556,16 @@ class CommercialAPIClient:
     def _request_payload(
         self, messages: Sequence[Mapping[str, str]], labels: Sequence[str]
     ) -> Dict[str, Any]:
+        top_logprobs = int(self.registry.get("top_logprobs", 20))
+        max_output_tokens = int(self.registry.get("max_completion_tokens", 1))
         return {
             "provider": self.provider,
             "model": self.model,
             "messages": [dict(m) for m in messages],
             "labels": [str(x) for x in labels],
-            "temperature": 0.0,
-            "max_output_tokens": 1,
-            "top_logprobs": 20,
+            "temperature": self.registry.get("temperature", 0.0),
+            "max_output_tokens": max_output_tokens,
+            "top_logprobs": top_logprobs,
             "context": dict(self._context),
         }
 
@@ -580,15 +679,24 @@ class CommercialAPIClient:
         kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": [dict(m) for m in messages],
-            "temperature": 0.0,
-            "max_tokens": 1,
         }
+        temperature = self.registry.get("temperature", 0.0)
+        if temperature is not None:
+            kwargs["temperature"] = float(temperature)
+        if "max_completion_tokens" in self.registry:
+            kwargs["max_completion_tokens"] = int(self.registry["max_completion_tokens"])
+        else:
+            kwargs["max_tokens"] = 1
+        reasoning_effort = self.registry.get("reasoning_effort")
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = str(reasoning_effort)
+        top_logprobs = int(self.registry.get("top_logprobs", 20))
         if self.provider == "together":
             # Together uses an integer count instead of OpenAI's bool + count pair.
-            kwargs["logprobs"] = 20
+            kwargs["logprobs"] = top_logprobs
         else:
             kwargs["logprobs"] = True
-            kwargs["top_logprobs"] = 20
+            kwargs["top_logprobs"] = top_logprobs
         extra_body = self.registry.get("extra_body")
         if extra_body:
             kwargs["extra_body"] = dict(extra_body)
@@ -601,6 +709,89 @@ class CommercialAPIClient:
             return True
         name = exc.__class__.__name__.lower()
         return any(token in name for token in ("timeout", "ratelimit", "connection", "serviceunavailable"))
+
+    def _record_label_coverage_failure(
+        self,
+        *,
+        raw: Any,
+        exc: LabelCoverageError,
+        request_hash: str,
+        latency_ms: float,
+        retry_count: int,
+        labels: Sequence[str],
+    ) -> None:
+        metadata = _raw_response_metadata(
+            raw, provider=self.provider, requested_model=self.model
+        )
+        top_entries = [dict(row) for row in exc.top_entries]
+        top_k_mass, tail_mass = _top_probability_mass(top_entries)
+        first_token = str(metadata.get("first_token") or "")
+        if not first_token and top_entries:
+            first_token = str(top_entries[0].get("token", ""))
+        usage = metadata["usage"]
+        failure = LabelProbabilityResponse(
+            label_probs=[],
+            label_logprobs={},
+            top_tokens=top_entries,
+            usage=usage,
+            requested_model=self.model,
+            returned_model=str(metadata["returned_model"]),
+            provider=self.provider,
+            response_id=str(metadata["response_id"]),
+            latency_ms=float(latency_ms),
+            cost_usd=self._cost(usage),
+            cache_hit=False,
+            retry_count=int(retry_count),
+            request_hash=request_hash,
+            first_token=first_token,
+            top_k_mass=top_k_mass,
+            tail_mass=tail_mass,
+            context=dict(self._context),
+        )
+        covered_labels = [str(label) for label in labels if str(label) not in exc.missing_labels]
+        with self._lock:
+            self.physical_meter.add(failure, cache_hit=False)
+            returned_model = str(failure.returned_model or failure.requested_model)
+            self._returned_models[returned_model] = self._returned_models.get(returned_model, 0) + 1
+            physical_after_failure = {
+                **self.physical_meter.to_dict(),
+                "attempted_requests": int(self._network_attempts),
+            }
+        context = dict(self._context)
+        self._append_jsonl(
+            "diagnostics.jsonl",
+            {
+                "type": "label_coverage_error",
+                "request_hash": request_hash,
+                "provider": self.provider,
+                "requested_model": self.model,
+                "returned_model": failure.returned_model,
+                "response_id": failure.response_id,
+                "first_token": failure.first_token,
+                "context": context,
+                "task": context.get("task"),
+                "subject": context.get("subject"),
+                "run_idx": context.get("run_idx"),
+                "execution_mode": context.get("execution_mode"),
+                "prompt_mode": context.get("prompt_mode"),
+                "missing_labels": list(exc.missing_labels),
+                "covered_labels": covered_labels,
+                "top_tokens": top_entries,
+                "top_k_mass": top_k_mass,
+                "tail_mass": tail_mass,
+                "usage": asdict(usage),
+                "input_tokens": int(usage.input_tokens),
+                "cached_input_tokens": int(usage.cached_input_tokens),
+                "output_tokens": int(usage.output_tokens),
+                "reasoning_tokens": int(usage.reasoning_tokens),
+                "total_tokens": int(usage.total_tokens),
+                "cost_usd": failure.cost_usd,
+                "pricing": self.pricing,
+                "latency_ms": failure.latency_ms,
+                "retry_count": failure.retry_count,
+                "physical_after_failure": physical_after_failure,
+            },
+        )
 
     def complete_labels(
         self,
@@ -621,6 +812,7 @@ class CommercialAPIClient:
         started = time.perf_counter()
         retry_count = 0
         while True:
+            raw = None
             try:
                 self._reserve_network_attempt()
                 raw = self._call_provider(messages)
@@ -639,17 +831,13 @@ class CommercialAPIClient:
             except APIBudgetExceeded:
                 raise
             except LabelCoverageError as exc:
-                self._append_jsonl(
-                    "diagnostics.jsonl",
-                    {
-                        "type": "label_coverage_error",
-                        "request_hash": request_hash,
-                        "provider": self.provider,
-                        "model": self.model,
-                        "context": dict(self._context),
-                        "missing_labels": exc.missing_labels,
-                        "top_tokens": exc.top_tokens,
-                    },
+                self._record_label_coverage_failure(
+                    raw=raw,
+                    exc=exc,
+                    request_hash=request_hash,
+                    latency_ms=(time.perf_counter() - started) * 1000.0,
+                    retry_count=retry_count,
+                    labels=labels,
                 )
                 raise
             except Exception as exc:
@@ -677,6 +865,7 @@ class CommercialAPIClient:
         normalized.cache_hit = False
         normalized.retry_count = retry_count
         normalized.request_hash = request_hash
+        normalized.context = dict(self._context)
         with self._lock:
             self._write_json_atomic(cache_path, normalized.to_dict())
             self.logical_meter.add(normalized, cache_hit=False)
@@ -687,6 +876,7 @@ class CommercialAPIClient:
     def _log_call(self, response: LabelProbabilityResponse) -> None:
         returned_model = str(response.returned_model or response.requested_model)
         self._returned_models[returned_model] = self._returned_models.get(returned_model, 0) + 1
+        context = dict(response.context or self._context)
         self._append_jsonl(
             "calls.jsonl",
             {
@@ -696,12 +886,16 @@ class CommercialAPIClient:
                 "returned_model": response.returned_model,
                 "response_id": response.response_id,
                 "request_hash": response.request_hash,
-                "context": dict(self._context),
+                "context": context,
+                "prompt_mode": context.get("prompt_mode"),
                 "usage": asdict(response.usage),
                 "cost_usd": response.cost_usd,
                 "cache_hit": response.cache_hit,
                 "latency_ms": response.latency_ms,
                 "retry_count": response.retry_count,
+                "first_token": response.first_token,
+                "top_k_mass": response.top_k_mass,
+                "tail_mass": response.tail_mass,
                 "label_probs": response.label_probs,
                 "top_tokens": response.top_tokens,
             },
