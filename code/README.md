@@ -135,6 +135,14 @@ low-probability label from returned top-20 candidates. Complete pairwise enums
 improve coverage, but the reported Bradley--Terry residuals must be inspected
 because changing the allowed pair can change the model's odds.
 
+The 2026-07-22 all-subject check also found a binary failure: MMLU
+`college_chemistry`, sample 0, cyclic permutation 3 returned only `A` in the
+top-20 for an A/B enum. Temperature 1 and 2 Monte-Carlo runs (`n=128`) returned
+the winning label 128/128 times. Targeting B with positive bias exposed a
+sampling transition around bias 40.67, but that is a repeated-sampling inverse
+estimate rather than an exact API logprob. None of these structured protocols
+is promoted to the main PriDe/ACCEL pipeline.
+
 If you find this repository useful or our work is related to your research, please kindly cite it:
 
 ```latex
