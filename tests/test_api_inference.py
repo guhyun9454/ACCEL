@@ -31,6 +31,7 @@ from eval_clm_utils import (  # noqa: E402
     prepare_eval_fn_base,
     select_api_probe_subjects,
 )
+from probe_equal_label_bias import _parse_biases, _total_variation  # noqa: E402
 
 
 def _top_entries(labels=("A", "B", "C", "D")):
@@ -149,6 +150,15 @@ class APIProbeSubjectSelectionTest(unittest.TestCase):
         args = SimpleNamespace(api_probe_only=False, api_probe_all_subjects=False)
         self.assertEqual(select_api_probe_subjects(args, ["a", "b", "c"]), ["a", "b", "c"])
 
+
+class EqualLabelBiasProbeTest(unittest.TestCase):
+    def test_bias_parser_and_tv(self):
+        self.assertEqual(_parse_biases("0,20,100"), [0.0, 20.0, 100.0])
+        self.assertAlmostEqual(_total_variation([0.7, 0.3], [0.6, 0.4]), 0.1)
+
+    def test_bias_parser_rejects_out_of_range(self):
+        with self.assertRaises(ValueError):
+            _parse_biases("101")
 
 class LabelNormalizationTest(unittest.TestCase):
     def test_sums_whitespace_and_case_variants(self):
