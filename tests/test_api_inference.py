@@ -165,6 +165,31 @@ class LabelNormalizationTest(unittest.TestCase):
             normalize_label_logprobs(_top_entries(("A", "B", "C")), list("ABCD"))
         self.assertEqual(ctx.exception.missing_labels, ["D"])
 
+    def test_exact_label_mode_rejects_whitespace_variant(self):
+        with self.assertRaises(LabelCoverageError) as ctx:
+            normalize_label_logprobs(
+                _top_entries(), list("ABCD"), exact_label_tokens=True
+            )
+        self.assertEqual(ctx.exception.missing_labels, list("ABCD"))
+
+    def test_common_bias_cancels_after_exact_label_normalization(self):
+        raw = [
+            {"token": label, "logprob": logprob}
+            for label, logprob in zip("ABCD", (-0.2, -1.7, -3.4, -8.0))
+        ]
+        shifted = [
+            {"token": row["token"], "logprob": row["logprob"] + 40.0}
+            for row in raw
+        ]
+        raw_probs, _, _ = normalize_label_logprobs(
+            raw, list("ABCD"), exact_label_tokens=True
+        )
+        shifted_probs, _, _ = normalize_label_logprobs(
+            shifted, list("ABCD"), exact_label_tokens=True
+        )
+        for before, after in zip(raw_probs, shifted_probs):
+            self.assertAlmostEqual(before, after)
+
     def test_openai_usage_and_returned_model(self):
         out = normalize_openai_compatible_response(
             _openai_response(model="returned-snapshot"),
@@ -233,6 +258,59 @@ class LabelNormalizationTest(unittest.TestCase):
 
 
 class ClientBehaviorTest(unittest.TestCase):
+    @staticmethod
+    def _test_token_encoder(label):
+        return [32 + "ABCDE".index(label)]
+
+    def test_default_scoring_preserves_legacy_cache_payload(self):
+        with tempfile.TemporaryDirectory() as td:
+            client = CommercialAPIClient(
+                provider="openai",
+                model="gpt-4.1-2025-04-14",
+                cache_dir=td,
+                max_requests=1,
+            )
+            payload = client._request_payload(
+                [{"role": "user", "content": "q"}], list("ABCD")
+            )
+            self.assertNotIn("scoring_mode", payload)
+            self.assertNotIn("logit_bias", payload)
+
+    def test_equal_label_bias_payload_uses_exact_single_tokens(self):
+        with tempfile.TemporaryDirectory() as td:
+            client = CommercialAPIClient(
+                provider="openai",
+                model="gpt-4.1-2025-04-14",
+                cache_dir=td,
+                max_requests=1,
+                scoring_mode="equal_label_bias",
+                equal_label_bias=40.0,
+                token_encoder=self._test_token_encoder,
+            )
+            payload = client._request_payload(
+                [{"role": "user", "content": "q"}], list("ABCD")
+            )
+            self.assertEqual(payload["scoring_mode"], "equal_label_bias")
+            self.assertEqual(payload["equal_label_bias"], 40.0)
+            self.assertEqual(payload["logit_bias"], {
+                "32": 40.0, "33": 40.0, "34": 40.0, "35": 40.0,
+            })
+
+    def test_equal_label_bias_rejects_multi_token_custom_label(self):
+        with tempfile.TemporaryDirectory() as td:
+            client = CommercialAPIClient(
+                provider="openai",
+                model="gpt-4.1-2025-04-14",
+                cache_dir=td,
+                max_requests=1,
+                scoring_mode="equal_label_bias",
+                token_encoder=lambda label: [1, 2] if label == "XY" else [1],
+            )
+            with self.assertRaises(APIInferenceError):
+                client._request_payload(
+                    [{"role": "user", "content": "q"}], ["A", "XY"]
+                )
+
     def test_luna_uses_live_endpoint_limits_and_current_pricing(self):
         with tempfile.TemporaryDirectory() as td:
             client = CommercialAPIClient(
@@ -274,13 +352,80 @@ class ClientBehaviorTest(unittest.TestCase):
                 max_requests=1,
             )
             client._sdk_client = sdk
-            client._call_provider([{"role": "user", "content": "Answer: A/B/C/D"}])
+            client._call_provider(
+                [{"role": "user", "content": "Answer: A/B/C/D"}], list("ABCD")
+            )
 
         self.assertEqual(completions.kwargs["top_logprobs"], 5)
         self.assertEqual(completions.kwargs["max_completion_tokens"], 8)
         self.assertEqual(completions.kwargs["reasoning_effort"], "none")
         self.assertNotIn("temperature", completions.kwargs)
         self.assertNotIn("max_tokens", completions.kwargs)
+
+    def test_equal_label_bias_is_sent_to_openai_chat_completions(self):
+        class Completions:
+            def __init__(self):
+                self.kwargs = None
+
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                return _openai_response()
+
+        completions = Completions()
+        sdk = type("SDK", (), {
+            "chat": type("Chat", (), {"completions": completions})()
+        })()
+        with tempfile.TemporaryDirectory() as td:
+            client = CommercialAPIClient(
+                provider="openai",
+                model="gpt-4.1-2025-04-14",
+                cache_dir=td,
+                max_requests=1,
+                scoring_mode="equal_label_bias",
+                equal_label_bias=80.0,
+                token_encoder=self._test_token_encoder,
+            )
+            client._sdk_client = sdk
+            client._call_provider(
+                [{"role": "user", "content": "Answer: A/B/C/D"}], list("ABCD")
+            )
+
+        self.assertEqual(completions.kwargs["logit_bias"], {
+            "32": 80.0, "33": 80.0, "34": 80.0, "35": 80.0,
+        })
+
+    def test_equal_label_bias_client_scores_only_exact_tokens(self):
+        response = _openai_response()
+        first = response["choices"][0]["logprobs"]["content"][0]
+        first["token"] = "A"
+        first["top_logprobs"] = [
+            {"token": label, "logprob": -0.1 - idx}
+            for idx, label in enumerate("ABCD")
+        ] + [{"token": " A", "logprob": -0.01}]
+        with tempfile.TemporaryDirectory() as td:
+            client = CommercialAPIClient(
+                provider="openai",
+                model="gpt-4.1-2025-04-14",
+                cache_dir=td,
+                max_requests=1,
+                scoring_mode="equal_label_bias",
+                equal_label_bias=100.0,
+                token_encoder=self._test_token_encoder,
+                transport=lambda **_: response,
+            )
+            client.set_context(
+                prompt_mode="label_only",
+                scoring_mode="equal_label_bias",
+                equal_label_bias=100.0,
+            )
+            out = client.complete_labels(
+                [{"role": "user", "content": "q"}], list("ABCD")
+            )
+            expected_a = math.exp(-0.1) / sum(math.exp(-0.1 - idx) for idx in range(4))
+            self.assertAlmostEqual(out.label_probs[0], expected_a)
+            call = json.loads(Path(td, "calls.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(call["scoring_mode"], "equal_label_bias")
+            self.assertEqual(call["equal_label_bias"], 100.0)
 
     def test_cache_separates_logical_and_physical_usage(self):
         calls = []

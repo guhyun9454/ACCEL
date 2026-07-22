@@ -259,13 +259,14 @@ def _canonical_label(token: Any, labels: Sequence[str]) -> Optional[str]:
 
 
 def normalize_label_logprobs(
-    top_entries: Iterable[Any], labels: Sequence[str]
+    top_entries: Iterable[Any], labels: Sequence[str], *, exact_label_tokens: bool = False
 ) -> tuple[List[float], Dict[str, float], List[Dict[str, Any]]]:
     """Convert first-token top candidates into a strict label distribution.
 
-    Whitespace/case variants of the same option ID are summed in probability
-    space, mirroring the local evaluator's aggregation of ``" A"`` and ``"A"``
-    token variants.  The selected labels are then renormalized among themselves.
+    The default strict top-k protocol sums whitespace/case variants of the same
+    option ID.  The constrained protocol sets ``exact_label_tokens`` so only the
+    canonical tokens that received an equal logit bias are scored.  The selected
+    labels are then renormalized among themselves.
     """
 
     labels = [str(x) for x in labels]
@@ -289,7 +290,10 @@ def normalize_label_logprobs(
             "prob": probability,
             "probability": probability,
         })
-        label = _canonical_label(token, labels)
+        if exact_label_tokens:
+            label = str(token) if str(token) in labels else None
+        else:
+            label = _canonical_label(token, labels)
         if label is not None and math.isfinite(lp):
             masses[label] += probability
 
@@ -340,6 +344,7 @@ def normalize_openai_compatible_response(
     provider: str,
     requested_model: str,
     labels: Sequence[str],
+    exact_label_tokens: bool = False,
 ) -> LabelProbabilityResponse:
     choice = _first(_get(response, "choices", []))
     logprobs = _get(choice, "logprobs", None)
@@ -359,7 +364,9 @@ def normalize_openai_compatible_response(
             top_entries = legacy_top
     if not top_entries:
         raise APIInferenceError("response does not contain first-token top logprobs")
-    probs, label_lps, sanitized = normalize_label_logprobs(top_entries, labels)
+    probs, label_lps, sanitized = normalize_label_logprobs(
+        top_entries, labels, exact_label_tokens=exact_label_tokens
+    )
     top_k_mass, tail_mass = _top_probability_mass(sanitized)
     emitted_token = str(_get(first_token, "token", "") or "")
     if not emitted_token and sanitized:
@@ -481,6 +488,9 @@ class CommercialAPIClient:
         input_usd_per_mtok: Optional[float] = None,
         cached_input_usd_per_mtok: Optional[float] = None,
         output_usd_per_mtok: Optional[float] = None,
+        scoring_mode: str = "topk_strict",
+        equal_label_bias: float = 100.0,
+        token_encoder: Any = None,
         transport: Any = None,
     ) -> None:
         self.provider = str(provider).strip().lower()
@@ -497,6 +507,16 @@ class CommercialAPIClient:
         self.max_cost_usd = None if max_cost_usd is None else float(max_cost_usd)
         self.max_requests = None if max_requests is None else int(max_requests)
         self.force_requests = bool(force_requests)
+        self.scoring_mode = str(scoring_mode or "topk_strict").strip().lower()
+        if self.scoring_mode not in {"topk_strict", "equal_label_bias"}:
+            raise ValueError(f"unsupported API scoring mode: {scoring_mode}")
+        self.equal_label_bias = float(equal_label_bias)
+        if self.scoring_mode == "equal_label_bias":
+            if self.provider != "openai":
+                raise ValueError("equal_label_bias currently supports only the OpenAI provider")
+            if not 0.0 < self.equal_label_bias <= 100.0:
+                raise ValueError("equal_label_bias must be in (0, 100]")
+        self._token_encoder = token_encoder
         self.input_rate = float(
             self.registry["input_usd_per_mtok"] if input_usd_per_mtok is None else input_usd_per_mtok
         )
@@ -558,7 +578,7 @@ class CommercialAPIClient:
     ) -> Dict[str, Any]:
         top_logprobs = int(self.registry.get("top_logprobs", 20))
         max_output_tokens = int(self.registry.get("max_completion_tokens", 1))
-        return {
+        payload = {
             "provider": self.provider,
             "model": self.model,
             "messages": [dict(m) for m in messages],
@@ -567,6 +587,53 @@ class CommercialAPIClient:
             "max_output_tokens": max_output_tokens,
             "top_logprobs": top_logprobs,
             "context": dict(self._context),
+        }
+        if self.scoring_mode == "equal_label_bias":
+            payload["scoring_mode"] = self.scoring_mode
+            payload["equal_label_bias"] = self.equal_label_bias
+            payload["logit_bias"] = self._label_logit_bias(labels)
+        return payload
+
+    def _label_token_ids(self, labels: Sequence[str]) -> Dict[str, int]:
+        labels = [str(label) for label in labels]
+        if self._token_encoder is None:
+            try:
+                import tiktoken
+            except ImportError as exc:
+                raise APIInferenceError(
+                    "equal_label_bias requires the optional 'tiktoken' dependency"
+                ) from exc
+            try:
+                encoding = tiktoken.encoding_for_model(self.model)
+            except KeyError as exc:
+                raise APIInferenceError(
+                    f"no tokenizer mapping is available for API model {self.model!r}"
+                ) from exc
+            encode = encoding.encode
+        else:
+            encode = self._token_encoder
+
+        token_ids: Dict[str, int] = {}
+        seen: Dict[int, str] = {}
+        for label in labels:
+            ids = list(encode(label))
+            if len(ids) != 1:
+                raise APIInferenceError(
+                    f"equal_label_bias requires one canonical token per label; {label!r} encoded as {ids}"
+                )
+            token_id = int(ids[0])
+            if token_id in seen:
+                raise APIInferenceError(
+                    f"labels {seen[token_id]!r} and {label!r} share token ID {token_id}"
+                )
+            token_ids[label] = token_id
+            seen[token_id] = label
+        return token_ids
+
+    def _label_logit_bias(self, labels: Sequence[str]) -> Dict[str, float]:
+        return {
+            str(token_id): self.equal_label_bias
+            for token_id in self._label_token_ids(labels).values()
         }
 
     def _request_hash(self, payload: Mapping[str, Any]) -> str:
@@ -638,12 +705,21 @@ class CommercialAPIClient:
             self._sdk_client = OpenAI(**kwargs)
         return self._sdk_client
 
-    def _call_provider(self, messages: Sequence[Mapping[str, str]]) -> Any:
+    def _call_provider(
+        self, messages: Sequence[Mapping[str, str]], labels: Sequence[str]
+    ) -> Any:
+        logit_bias = (
+            self._label_logit_bias(labels)
+            if self.scoring_mode == "equal_label_bias"
+            else None
+        )
         if self._transport is not None:
             return self._transport(
                 provider=self.provider,
                 model=self.model,
                 messages=[dict(m) for m in messages],
+                scoring_mode=self.scoring_mode,
+                logit_bias=logit_bias,
             )
         client = self._ensure_sdk_client()
         if self.provider == "gemini":
@@ -697,6 +773,8 @@ class CommercialAPIClient:
         else:
             kwargs["logprobs"] = True
             kwargs["top_logprobs"] = top_logprobs
+        if logit_bias is not None:
+            kwargs["logit_bias"] = logit_bias
         extra_body = self.registry.get("extra_body")
         if extra_body:
             kwargs["extra_body"] = dict(extra_body)
@@ -774,6 +852,10 @@ class CommercialAPIClient:
                 "run_idx": context.get("run_idx"),
                 "execution_mode": context.get("execution_mode"),
                 "prompt_mode": context.get("prompt_mode"),
+                "scoring_mode": self.scoring_mode,
+                "equal_label_bias": (
+                    self.equal_label_bias if self.scoring_mode == "equal_label_bias" else None
+                ),
                 "missing_labels": list(exc.missing_labels),
                 "covered_labels": covered_labels,
                 "top_tokens": top_entries,
@@ -815,7 +897,7 @@ class CommercialAPIClient:
             raw = None
             try:
                 self._reserve_network_attempt()
-                raw = self._call_provider(messages)
+                raw = self._call_provider(messages, labels)
                 if self.provider == "gemini":
                     normalized = normalize_gemini_response(
                         raw, requested_model=self.model, labels=labels
@@ -826,6 +908,7 @@ class CommercialAPIClient:
                         provider=self.provider,
                         requested_model=self.model,
                         labels=labels,
+                        exact_label_tokens=(self.scoring_mode == "equal_label_bias"),
                     )
                 break
             except APIBudgetExceeded:
@@ -888,6 +971,10 @@ class CommercialAPIClient:
                 "request_hash": response.request_hash,
                 "context": context,
                 "prompt_mode": context.get("prompt_mode"),
+                "scoring_mode": self.scoring_mode,
+                "equal_label_bias": (
+                    self.equal_label_bias if self.scoring_mode == "equal_label_bias" else None
+                ),
                 "usage": asdict(response.usage),
                 "cost_usd": response.cost_usd,
                 "cache_hit": response.cache_hit,
@@ -910,6 +997,10 @@ class CommercialAPIClient:
             "returned_model": next(iter(returned_models)) if len(returned_models) == 1 else None,
             "returned_models": returned_models,
             "pricing": self.pricing,
+            "scoring_mode": self.scoring_mode,
+            "equal_label_bias": (
+                self.equal_label_bias if self.scoring_mode == "equal_label_bias" else None
+            ),
             "logical": self.logical_meter.to_dict(),
             "physical": {
                 **self.physical_meter.to_dict(),

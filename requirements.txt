@@ -19,5 +19,5 @@ pynvml>=11.4.1
 
 # Commercial logprob APIs
 openai>=1.0.0
+tiktoken
 google-genai>=1.0.0
-

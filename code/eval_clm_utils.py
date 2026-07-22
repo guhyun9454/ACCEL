@@ -56,6 +56,11 @@ def parse_arguments():
     parser.add_argument("--api_prompt_mode", type=str, default="baseline",
                         choices=["baseline", "label_only"],
                         help="API-only prompt policy. baseline preserves the original PriDe prompt; label_only adds a strict one-label instruction.")
+    parser.add_argument("--api_scoring_mode", type=str, default="topk_strict",
+                        choices=["topk_strict", "equal_label_bias"],
+                        help="API label scoring policy. equal_label_bias adds the same positive logit bias to each exact canonical label token and is reported as a separate constrained protocol.")
+    parser.add_argument("--api_equal_label_bias", type=float, default=100.0,
+                        help="Common logit bias for every canonical label token in equal_label_bias mode (0, 100].")
     parser.add_argument("--api_adaptive_percentile", type=float, default=None,
                         help="Required percentile operating point for --api_execution_mode=adaptive (for example 80).")
     parser.add_argument("--api_probe_only", action="store_true",
@@ -239,6 +244,13 @@ def parse_arguments():
                 parser.error("adaptive API v1 requires --empirical_sweep_mode percentile")
             if args.empirical_transition_mode != "latin":
                 parser.error("adaptive API v1 requires --empirical_transition_mode latin")
+        if args.api_scoring_mode == "equal_label_bias":
+            if args.api_provider != "openai":
+                parser.error("--api_scoring_mode equal_label_bias currently supports only --api_provider openai")
+            if args.api_prompt_mode != "label_only":
+                parser.error("--api_scoring_mode equal_label_bias requires --api_prompt_mode label_only")
+            if not 0.0 < float(args.api_equal_label_bias) <= 100.0:
+                parser.error("--api_equal_label_bias must be in (0, 100]")
         if int(args.api_probe_samples) <= 0:
             parser.error("--api_probe_samples must be positive")
         if int(args.api_concurrency) <= 0:
@@ -518,6 +530,12 @@ def prepare_eval_fn_api_base(
                 'prompt': str(sys_msg) + '\n\n' + str(eval_sample),
                 'messages': messages,
                 'api_prompt_mode': str(api_prompt_mode),
+                'api_scoring_mode': str(getattr(model, 'scoring_mode', 'topk_strict')),
+                'api_equal_label_bias': (
+                    float(getattr(model, 'equal_label_bias', 100.0))
+                    if getattr(model, 'scoring_mode', 'topk_strict') == 'equal_label_bias'
+                    else None
+                ),
                 'options': options,
                 'probs': probs.tolist(),
                 'sampled': sampled,
@@ -561,6 +579,12 @@ def prepare_eval_fn_api_perm(
                 'prompts': prompts,
                 'messages': all_messages,
                 'api_prompt_mode': str(api_prompt_mode),
+                'api_scoring_mode': str(getattr(model, 'scoring_mode', 'topk_strict')),
+                'api_equal_label_bias': (
+                    float(getattr(model, 'equal_label_bias', 100.0))
+                    if getattr(model, 'scoring_mode', 'topk_strict') == 'equal_label_bias'
+                    else None
+                ),
                 'options': options,
                 'probs': all_probs,
                 'ideal': ideal,

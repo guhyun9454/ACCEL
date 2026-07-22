@@ -2833,6 +2833,23 @@ def _collect_counterfactual_api_costs(points_payload, avg_call_cost, n_samples):
     return out
 
 
+def _api_scoring_metadata(args):
+    mode = str(getattr(args, "api_scoring_mode", "topk_strict"))
+    return {
+        "scoring_mode": mode,
+        "equal_label_bias": (
+            float(getattr(args, "api_equal_label_bias", 100.0))
+            if mode == "equal_label_bias" else None
+        ),
+    }
+
+
+def _api_scoring_context(args):
+    """Keep legacy strict request hashes stable; only constrained runs add context fields."""
+    metadata = _api_scoring_metadata(args)
+    return metadata if metadata["scoring_mode"] != "topk_strict" else {}
+
+
 def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
     """Physically stop commercial API calls at the selected empirical policy stage."""
     alphas = [float(x) for x in _parse_percent_value_list(
@@ -2880,6 +2897,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                     eval_name=eval_name,
                     execution_mode="adaptive",
                     prompt_mode=str(args.api_prompt_mode),
+                    **_api_scoring_context(args),
                 )
                 eval_fn = prep_fn(model, None, few)
 
@@ -2989,6 +3007,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                         "type": "api_adaptive_trajectory", "task": args.task,
                         "subject": subject, "run_idx": run_idx, "sample_pos": pos,
                         "prompt_mode": str(args.api_prompt_mode),
+                        **_api_scoring_metadata(args),
                         "prefix_forced": forced, "stop_stage": stop_stage,
                         "pred": int(preds[-1]), "label": label_idx,
                         "correct": bool(is_correct), "confidence": float(confs[-1]),
@@ -3003,6 +3022,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                     "subject": subject, "run_idx": run_idx, "n_samples": N,
                     "alpha": alpha, "percentile": percentile,
                     "prompt_mode": str(args.api_prompt_mode),
+                    **_api_scoring_metadata(args),
                     "accuracy": corrects / N,
                     "nll": float(np.mean(-np.log(np.clip(tp_arr, 1e-12, 1.0)))),
                     "ece": float(_compute_ece(conf_arr, corr_arr, 10)),
@@ -3027,6 +3047,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
         payload = {
             "version": 1, "task": args.task, "execution_mode": "adaptive",
             "prompt_mode": str(args.api_prompt_mode),
+            **_api_scoring_metadata(args),
             "provider": args.api_provider, "requested_model": args.pretrained_model_path,
             "alpha": alpha, "percentile": percentile, "n_samples": total_n,
             "n_runs": n_runs, "accuracy": weighted("accuracy"),
@@ -3113,6 +3134,12 @@ def main():
                 "api_provider": getattr(args, "api_provider", None),
                 "api_execution_mode": getattr(args, "api_execution_mode", None),
                 "api_prompt_mode": getattr(args, "api_prompt_mode", "baseline"),
+                "api_scoring_mode": getattr(args, "api_scoring_mode", "topk_strict"),
+                "api_equal_label_bias": (
+                    getattr(args, "api_equal_label_bias", None)
+                    if getattr(args, "api_scoring_mode", "topk_strict") == "equal_label_bias"
+                    else None
+                ),
                 "api_adaptive_percentile": getattr(args, "api_adaptive_percentile", None),
             }
             wandb_run = wandb.init(project=project, entity=entity, name=run_name, config=cfg)
@@ -3291,6 +3318,8 @@ def main():
             input_usd_per_mtok=args.api_input_usd_per_mtok,
             cached_input_usd_per_mtok=args.api_cached_input_usd_per_mtok,
             output_usd_per_mtok=args.api_output_usd_per_mtok,
+            scoring_mode=args.api_scoring_mode,
+            equal_label_bias=args.api_equal_label_bias,
         )
         toker = None
         logger.info(
@@ -3298,6 +3327,7 @@ def main():
                 f"API backend ready: provider={args.api_provider}, model={args.pretrained_model_path}, "
                 f"mode={args.api_execution_mode}, "
                 f"prompt_mode={args.api_prompt_mode}, "
+                f"scoring_mode={args.api_scoring_mode}, "
                 f"pricing_snapshot={model.pricing['snapshot_date']}, "
                 f"max_cost={args.api_max_cost_usd}, max_requests={args.api_max_requests}"
             )
@@ -3425,6 +3455,7 @@ def main():
                         task=str(args.task), subject=str(subject), run_idx=int(run_idx),
                         eval_name=str(eval_name), execution_mode=str(args.api_execution_mode),
                         prompt_mode=str(args.api_prompt_mode),
+                        **_api_scoring_context(args),
                     )
 
                 use_cached = False
@@ -5064,6 +5095,7 @@ def main():
                     "task": task_name,
                     "execution_mode": str(args.api_execution_mode),
                     "prompt_mode": str(args.api_prompt_mode),
+                    **_api_scoring_metadata(args),
                     "adaptive_percentile": getattr(args, "api_adaptive_percentile", None),
                     "n_samples": int(records.get("n_samples", 0) or 0),
                     "logical": logical,
