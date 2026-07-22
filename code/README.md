@@ -79,6 +79,30 @@ system messages; local Hugging Face prompts and label-restricted scoring are
 unchanged. Coverage failures remain invalid and uncached, while their raw top
 probabilities, usage, and estimated physical USD are retained in diagnostics.
 
+### Experimental equal-label logit bias
+
+`--api_scoring_mode equal_label_bias --api_equal_label_bias 100` applies the
+same OpenAI `logit_bias` to every exact canonical single-token label and records
+the result as a separate constrained protocol. It requires
+`--api_prompt_mode label_only` and `tiktoken`; the default `topk_strict` cache
+payload and the local Hugging Face path remain unchanged.
+
+The live GPT-4.1 probe on 2026-07-22 found that bias changes token selection but
+does not expand the returned `top_logprobs`. Forcing `A` changed the emitted
+token to `A`, while its emitted logprob was `-9999` and the top-20 still began
+with the unbiased `C`. Equal bias did not restore the missing `A` at any tested
+value from 20 through 100. This mode is diagnostic only and must not be promoted
+to a full PriDe/ACCEL run unless a future endpoint exposes every exact label.
+
+```bash
+python probe_equal_label_bias.py \
+  --task arc --sample_index 0 --permutation_index 0 \
+  --biases 0,20,40,80,100 \
+  --cache_dir /path/to/separate/cache \
+  --output /path/to/summary.json \
+  --max_requests 5 --max_cost_usd 0.05
+```
+
 If you find this repository useful or our work is related to your research, please kindly cite it:
 
 ```latex
