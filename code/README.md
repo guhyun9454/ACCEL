@@ -34,6 +34,13 @@ python eval_clm.py \
   --empirical_transition_mode latin
 ```
 
+For datasets with multiple subjects, the default probe intentionally keeps the
+legacy behavior of checking only the first subject. Add
+`--api_probe_all_subjects` to stratify the gate across every subject; for
+example, `--api_probe_samples 1 --api_probe_all_subjects` checks one question
+per MMLU subject and still stops immediately on the first strict coverage
+failure.
+
 Gemini capability was rechecked on 2026-07-19. New accounts receive `404` for
 Gemini 2.5 models, while the available Gemini 3.1/3.5 and Gemma 4 text models
 return `400 Logprobs is not enabled for this model`. The Gemini adapter remains
