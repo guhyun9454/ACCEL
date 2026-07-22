@@ -65,6 +65,17 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "cached_input_usd_per_mtok": None,
         "output_usd_per_mtok": 0.72,
     },
+    "vertex:gemini-2.5-flash": {
+        "provider": "vertex",
+        "model": "gemini-2.5-flash",
+        "api_key_env": None,
+        "base_url": None,
+        "input_usd_per_mtok": 0.30,
+        "cached_input_usd_per_mtok": 0.075,
+        "output_usd_per_mtok": 2.50,
+        "pricing_snapshot_date": "2026-07-22",
+        "thinking_budget": 0,
+    },
     "deepseek:deepseek-v4-flash": {
         "provider": "deepseek",
         "model": "deepseek-v4-flash",
@@ -399,7 +410,7 @@ def _gemini_usage(response: Any) -> TokenUsage:
 
 
 def normalize_gemini_response(
-    response: Any, *, requested_model: str, labels: Sequence[str]
+    response: Any, *, requested_model: str, labels: Sequence[str], provider: str = "gemini"
 ) -> LabelProbabilityResponse:
     candidate = _first(_get(response, "candidates", []))
     logprobs = _get(candidate, "logprobs_result", _get(candidate, "logprobsResult", None))
@@ -427,7 +438,7 @@ def normalize_gemini_response(
         returned_model=str(
             _get(response, "model_version", _get(response, "modelVersion", requested_model)) or requested_model
         ),
-        provider="gemini",
+        provider=provider,
         response_id=str(_get(response, "response_id", _get(response, "responseId", "")) or ""),
         first_token=emitted_token,
         top_k_mass=top_k_mass,
@@ -438,7 +449,7 @@ def normalize_gemini_response(
 def _raw_response_metadata(
     response: Any, *, provider: str, requested_model: str
 ) -> Dict[str, Any]:
-    if provider == "gemini":
+    if provider in {"gemini", "vertex"}:
         candidate = _first(_get(response, "candidates", []))
         logprobs = _get(candidate, "logprobs_result", _get(candidate, "logprobsResult", None))
         chosen_candidates = _get(
@@ -563,7 +574,7 @@ class CommercialAPIClient:
         uncached = max(0, int(usage.input_tokens) - cached)
         cached_rate = self.input_rate if self.cached_input_rate is None else self.cached_input_rate
         billable_output = int(usage.output_tokens)
-        if self.provider == "gemini":
+        if self.provider in {"gemini", "vertex"}:
             # Gemini reports generated candidate and internal thought tokens as
             # separate counters; both are output-priced.
             billable_output += int(usage.reasoning_tokens)
@@ -684,17 +695,28 @@ class CommercialAPIClient:
     def _ensure_sdk_client(self) -> Any:
         if self._sdk_client is not None:
             return self._sdk_client
-        env_name = str(self.registry["api_key_env"])
-        api_key = os.environ.get(env_name)
-        if not api_key:
-            raise APIInferenceError(f"missing required environment variable {env_name}")
-        if self.provider == "gemini":
+        if self.provider == "vertex":
             try:
                 from google import genai
             except ImportError as exc:
-                raise APIInferenceError("Gemini backend requires `google-genai`") from exc
-            self._sdk_client = genai.Client(api_key=api_key)
+                raise APIInferenceError("Vertex backend requires `google-genai`") from exc
+            project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+            location = os.environ.get("GOOGLE_CLOUD_LOCATION", "global").strip() or "global"
+            if not project:
+                raise APIInferenceError("missing required environment variable GOOGLE_CLOUD_PROJECT")
+            self._sdk_client = genai.Client(vertexai=True, project=project, location=location)
         else:
+            env_name = str(self.registry["api_key_env"])
+            api_key = os.environ.get(env_name)
+            if not api_key:
+                raise APIInferenceError(f"missing required environment variable {env_name}")
+            if self.provider == "gemini":
+                try:
+                    from google import genai
+                except ImportError as exc:
+                    raise APIInferenceError("Gemini backend requires `google-genai`") from exc
+                self._sdk_client = genai.Client(api_key=api_key)
+                return self._sdk_client
             try:
                 from openai import OpenAI
             except ImportError as exc:
@@ -722,7 +744,7 @@ class CommercialAPIClient:
                 logit_bias=logit_bias,
             )
         client = self._ensure_sdk_client()
-        if self.provider == "gemini":
+        if self.provider in {"gemini", "vertex"}:
             try:
                 from google.genai import types
             except ImportError as exc:
@@ -744,6 +766,11 @@ class CommercialAPIClient:
                 "response_logprobs": True,
                 "logprobs": 20,
             }
+            thinking_budget = self.registry.get("thinking_budget")
+            if thinking_budget is not None:
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    thinking_budget=int(thinking_budget)
+                )
             if system_text:
                 config_kwargs["system_instruction"] = system_text
             return client.models.generate_content(
@@ -898,9 +925,12 @@ class CommercialAPIClient:
             try:
                 self._reserve_network_attempt()
                 raw = self._call_provider(messages, labels)
-                if self.provider == "gemini":
+                if self.provider in {"gemini", "vertex"}:
                     normalized = normalize_gemini_response(
-                        raw, requested_model=self.model, labels=labels
+                        raw,
+                        requested_model=self.model,
+                        labels=labels,
+                        provider=self.provider,
                     )
                 else:
                     normalized = normalize_openai_compatible_response(

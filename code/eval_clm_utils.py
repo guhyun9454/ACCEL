@@ -48,7 +48,7 @@ def parse_arguments():
                         choices=["local", "api"],
                         help="Inference backend. local keeps the existing Hugging Face path; api uses commercial chat logprobs.")
     parser.add_argument("--api_provider", type=str, default=None,
-                        choices=["openai", "gemini", "deepseek", "together"],
+                        choices=["openai", "gemini", "vertex", "deepseek", "together"],
                         help="Commercial provider. Required when --inference_backend=api.")
     parser.add_argument("--api_execution_mode", type=str, default="offline_sweep",
                         choices=["offline_sweep", "adaptive"],

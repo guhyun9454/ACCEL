@@ -18,6 +18,7 @@ from api_inference import (  # noqa: E402
     CommercialAPIClient,
     LabelCoverageError,
     OnlinePercentileRouter,
+    TokenUsage,
     normalize_gemini_response,
     normalize_label_logprobs,
     normalize_openai_compatible_response,
@@ -160,6 +161,75 @@ class EqualLabelBiasProbeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _parse_biases("101")
 
+
+class StructuredLabelProbeTest(unittest.TestCase):
+    def test_extracts_exact_structured_label_candidates(self):
+        from probe_structured_labels import _extract_choice
+
+        row = SimpleNamespace(
+            token="C",
+            logprob=-0.2,
+            top_logprobs=[
+                SimpleNamespace(token="A", logprob=-2.0),
+                SimpleNamespace(token="B", logprob=-1.0),
+                SimpleNamespace(token="C", logprob=-0.2),
+                SimpleNamespace(token="D", logprob=-3.0),
+            ],
+        )
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content='{"answer":"C"}'),
+            logprobs=SimpleNamespace(content=[row]),
+            finish_reason="stop",
+        )
+        result = _extract_choice(choice, list("ABCD"))
+        self.assertTrue(result["coverage"])
+        self.assertEqual(result["decision_token"], "C")
+        self.assertAlmostEqual(sum(result["label_probs"].values()), 1.0)
+
+    def test_structured_probe_keeps_missing_label_strict(self):
+        from probe_structured_labels import _extract_choice
+
+        row = SimpleNamespace(
+            token="C",
+            logprob=0.0,
+            top_logprobs=[SimpleNamespace(token="C", logprob=0.0)],
+        )
+        choice = SimpleNamespace(
+            message=SimpleNamespace(content='{"answer":"C"}'),
+            logprobs=SimpleNamespace(content=[row]),
+            finish_reason="stop",
+        )
+        result = _extract_choice(choice, list("ABCD"))
+        self.assertFalse(result["coverage"])
+        self.assertEqual(result["missing_labels"], ["A", "B", "D"])
+
+    def test_pairwise_reconstruction_recovers_consistent_scores(self):
+        from probe_structured_labels import _reconstruct_pairwise
+
+        labels = list("ABC")
+        scores = {"A": 1.0, "B": 0.0, "C": -1.0}
+        rows = []
+        for left, right in (("A", "B"), ("A", "C"), ("B", "C")):
+            left_mass = math.exp(scores[left])
+            right_mass = math.exp(scores[right])
+            denominator = left_mass + right_mass
+            rows.append({
+                "allowed_labels": [left, right],
+                "choices": [{
+                    "coverage": True,
+                    "missing_labels": [],
+                    "label_probs": {
+                        left: left_mass / denominator,
+                        right: right_mass / denominator,
+                    },
+                }],
+            })
+        result = _reconstruct_pairwise(rows, labels)
+        self.assertTrue(result["coverage"])
+        self.assertEqual(result["argmax"], "A")
+        self.assertAlmostEqual(result["log_odds_rmse"], 0.0, places=12)
+        self.assertAlmostEqual(sum(result["probabilities"].values()), 1.0)
+
 class LabelNormalizationTest(unittest.TestCase):
     def test_sums_whitespace_and_case_variants(self):
         entries = _top_entries() + [{"token": "a", "logprob": -2.0}]
@@ -266,6 +336,14 @@ class LabelNormalizationTest(unittest.TestCase):
         self.assertEqual(out.usage.input_tokens, 90)
         self.assertEqual(out.usage.cached_input_tokens, 10)
 
+        vertex = normalize_gemini_response(
+            response,
+            requested_model="gemini-2.5-flash",
+            labels=list("ABCD"),
+            provider="vertex",
+        )
+        self.assertEqual(vertex.provider, "vertex")
+
 
 class ClientBehaviorTest(unittest.TestCase):
     @staticmethod
@@ -340,6 +418,23 @@ class ClientBehaviorTest(unittest.TestCase):
             self.assertEqual(client.pricing["input_usd_per_mtok"], 1.0)
             self.assertEqual(client.pricing["cached_input_usd_per_mtok"], 0.1)
             self.assertEqual(client.pricing["output_usd_per_mtok"], 6.0)
+
+    def test_vertex_registry_uses_adc_and_gemini_output_metering(self):
+        with tempfile.TemporaryDirectory() as td:
+            client = CommercialAPIClient(
+                provider="vertex",
+                model="gemini-2.5-flash",
+                cache_dir=td,
+                max_requests=1,
+            )
+            self.assertIsNone(client.registry["api_key_env"])
+            self.assertEqual(client.registry["thinking_budget"], 0)
+            self.assertEqual(client.pricing["input_usd_per_mtok"], 0.30)
+            self.assertEqual(client.pricing["cached_input_usd_per_mtok"], 0.075)
+            self.assertEqual(client.pricing["output_usd_per_mtok"], 2.50)
+            usage = TokenUsage(input_tokens=100, cached_input_tokens=20,
+                               output_tokens=1, reasoning_tokens=2)
+            self.assertAlmostEqual(client._cost(usage), 33.0 / 1_000_000.0)
 
     def test_luna_chat_kwargs_disable_reasoning_and_request_top5(self):
         class Completions:
