@@ -1,6 +1,7 @@
 import math
 import inspect
 import json
+import os
 from pathlib import Path
 import random
 import sys
@@ -435,6 +436,28 @@ class ClientBehaviorTest(unittest.TestCase):
             usage = TokenUsage(input_tokens=100, cached_input_tokens=20,
                                output_tokens=1, reasoning_tokens=2)
             self.assertAlmostEqual(client._cost(usage), 33.0 / 1_000_000.0)
+
+    def test_vertex_client_uses_project_location_and_adc(self):
+        import google
+
+        constructor = mock.Mock()
+        fake_genai = SimpleNamespace(Client=constructor)
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(
+            os.environ,
+            {"GOOGLE_CLOUD_PROJECT": "test-project", "GOOGLE_CLOUD_LOCATION": "global"},
+            clear=False,
+        ), mock.patch.object(google, "genai", fake_genai, create=True):
+            client = CommercialAPIClient(
+                provider="vertex",
+                model="gemini-2.5-flash",
+                cache_dir=td,
+                max_requests=1,
+            )
+            sdk = client._ensure_sdk_client()
+            self.assertIs(sdk, constructor.return_value)
+            constructor.assert_called_once_with(
+                vertexai=True, project="test-project", location="global"
+            )
 
     def test_luna_chat_kwargs_disable_reasoning_and_request_top5(self):
         class Completions:

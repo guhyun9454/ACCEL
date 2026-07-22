@@ -11,12 +11,17 @@ commercial inference only with `--inference_backend api`. Supported pairs are:
 
 - `openai` / `gpt-4.1-2025-04-14`
 - `gemini` / `gemini-2.5-flash-lite` (legacy accounts only; probe required)
+- `vertex` / `gemini-2.5-flash` (Vertex AI ADC; probe required)
 - `deepseek` / `deepseek-v4-flash`
 - `together` / `Qwen/Qwen3.5-397B-A17B`
 
 Set only the matching environment variable (`OPENAI_API_KEY`, `GEMINI_API_KEY`,
-`DEEPSEEK_API_KEY`, or `TOGETHER_API_KEY`). Credentials are never written to
-result files or W&B. Every API run requires a cost or request guard.
+`DEEPSEEK_API_KEY`, or `TOGETHER_API_KEY`). Vertex uses Application Default
+Credentials plus `GOOGLE_CLOUD_PROJECT` and optional
+`GOOGLE_CLOUD_LOCATION` (default `global`); point
+`GOOGLE_APPLICATION_CREDENTIALS` at a protected service-account file when ADC
+is not otherwise configured. Credentials are never written to result files or
+W&B. Every API run requires a cost or request guard.
 
 Run a 10-sample capability probe first:
 
@@ -46,6 +51,11 @@ Gemini 2.5 models, while the available Gemini 3.1/3.5 and Gemma 4 text models
 return `400 Logprobs is not enabled for this model`. The Gemini adapter remains
 for legacy accounts, but no current Gemini model should be promoted to a full
 PriDe/ACCEL run unless a fresh strict capability probe succeeds.
+
+Vertex AI's native Gemini path is separate from the AI Studio key path. The
+adapter requests `response_logprobs`, top-20 candidates, and a zero thinking
+budget for `gemini-2.5-flash`. It still requires the same strict A-D/E coverage
+probe before any paid sweep.
 
 For a physical adaptive run, the percentile is deliberately required rather
 than defaulted. Calibration-prefix questions collect all Latin stages; other
@@ -102,6 +112,28 @@ python probe_equal_label_bias.py \
   --output /path/to/summary.json \
   --max_requests 5 --max_cost_usd 0.05
 ```
+
+### Experimental structured-label protocols
+
+`probe_structured_labels.py` keeps JSON-schema multiway, pairwise, and
+Monte-Carlo experiments outside the normal PriDe/ACCEL result and durable cache
+namespaces. Pairwise mode requires every binary label pair to be observed, then
+fits sum-to-zero Bradley--Terry scores and records log-odds residuals. It is a
+separate constrained protocol: it must not be described as the original
+unconstrained first-token distribution.
+
+```bash
+python probe_structured_labels.py \
+  --task arc --protocol pairwise \
+  --probe_samples 10 --all_permutations \
+  --max_requests 240 --max_cost_usd 0.20 \
+  --output /path/to/arc_10xcyclic_pairwise.json
+```
+
+The live GPT-4.1 check found that a four/five-way JSON enum can still omit a
+low-probability label from returned top-20 candidates. Complete pairwise enums
+improve coverage, but the reported Bradley--Terry residuals must be inspected
+because changing the allowed pair can change the model's odds.
 
 If you find this repository useful or our work is related to your research, please kindly cite it:
 

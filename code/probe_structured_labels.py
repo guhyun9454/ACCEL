@@ -242,7 +242,11 @@ def main():
     parser.add_argument("--probe_samples", type=int, default=None)
     parser.add_argument("--all_permutations", action="store_true")
     parser.add_argument("--all_subjects", action="store_true")
-    parser.add_argument("--protocol", choices=["multiway", "pairwise", "monte_carlo"], default="multiway")
+    parser.add_argument(
+        "--protocol",
+        choices=["multiway", "pairwise", "fallback", "monte_carlo"],
+        default="multiway",
+    )
     parser.add_argument("--n", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max_requests", type=int, default=10)
@@ -258,7 +262,7 @@ def main():
     client = OpenAI()
     rows = []
     sample_results = []
-    pairs = list(itertools.combinations(labels, 2)) if args.protocol == "pairwise" else [tuple(labels)]
+    label_pairs = list(itertools.combinations(labels, 2))
     total_cost = 0.0
     total_usage = {key: 0 for key in ("input_tokens", "output_tokens", "cached_input_tokens", "reasoning_tokens", "total_tokens")}
     strict_pass = True
@@ -266,7 +270,11 @@ def main():
     for prompt in _iter_prompts(args, labels):
         prompt_start = len(rows)
         counts = {label: 0 for label in labels}
-        for allowed in pairs:
+        if args.protocol == "pairwise":
+            allowed_groups = list(label_pairs)
+        else:
+            allowed_groups = [tuple(labels)]
+        for allowed in allowed_groups:
             if len(rows) >= args.max_requests:
                 raise RuntimeError("protocol exceeds --max_requests")
             n = args.n if args.protocol == "monte_carlo" else 1
@@ -306,18 +314,40 @@ def main():
                     if choice["answer"] in counts:
                         counts[choice["answer"]] += 1
             elif any(not choice["coverage"] for choice in choices):
-                strict_pass = False
-                stopped_early = True
-                break
+                if args.protocol == "fallback" and len(allowed) > 2:
+                    # The failed paid multiway response remains in the artifact;
+                    # reconstruct this prompt only from a complete pair graph.
+                    allowed_groups.extend(label_pairs)
+                else:
+                    strict_pass = False
+                    stopped_early = True
+                    break
         prompt_rows = rows[prompt_start:]
         result = {
             key: prompt[key]
             for key in ("subject", "sample_index", "permutation_index", "ideal")
         }
         result["request_row_indices"] = list(range(prompt_start, len(rows)))
-        if args.protocol == "pairwise" and len(prompt_rows) == len(pairs):
+        if args.protocol == "pairwise" and len(prompt_rows) == len(label_pairs):
             result["pairwise_reconstruction"] = _reconstruct_pairwise(prompt_rows, labels)
             strict_pass = strict_pass and bool(result["pairwise_reconstruction"]["coverage"])
+        elif args.protocol == "fallback":
+            multiway = prompt_rows[0]["choices"][0]
+            if multiway["coverage"]:
+                result["scoring_path"] = "structured_multiway"
+                result["probabilities"] = dict(multiway["label_probs"])
+                result["argmax"] = max(multiway["label_probs"], key=multiway["label_probs"].get)
+            elif len(prompt_rows) == 1 + len(label_pairs):
+                reconstruction = _reconstruct_pairwise(prompt_rows[1:], labels)
+                result["scoring_path"] = "structured_pairwise_fallback"
+                result["multiway_missing_labels"] = list(multiway["missing_labels"])
+                result["pairwise_reconstruction"] = reconstruction
+                result["probabilities"] = dict(reconstruction.get("probabilities", {}))
+                result["argmax"] = reconstruction.get("argmax")
+                strict_pass = strict_pass and bool(reconstruction["coverage"])
+            else:
+                result["scoring_path"] = "failed_pairwise_fallback"
+                strict_pass = False
         elif args.protocol == "monte_carlo":
             total = sum(counts.values())
             result["sample_counts"] = counts
@@ -352,7 +382,15 @@ def main():
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(payload, ensure_ascii=False))
+    print(json.dumps({
+        "output": str(output),
+        "strict_pass": payload["strict_pass"],
+        "stopped_early": payload["stopped_early"],
+        "sample_results": len(payload["sample_results"]),
+        "physical": payload["physical"],
+    }, ensure_ascii=False))
+    if not payload["strict_pass"]:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
