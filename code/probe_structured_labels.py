@@ -249,6 +249,13 @@ def main():
     )
     parser.add_argument("--n", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--allowed_labels",
+        default=None,
+        help="Optional schema-label subset for monte_carlo, for example AB.",
+    )
+    parser.add_argument("--bias_label", default=None)
+    parser.add_argument("--bias_value", type=float, default=0.0)
     parser.add_argument("--max_requests", type=int, default=10)
     parser.add_argument("--max_cost_usd", type=float, default=0.05)
     parser.add_argument("--output", required=True)
@@ -257,6 +264,21 @@ def main():
         raise ValueError("--n must be in [1, 128]")
 
     labels = list("ABCDE" if args.task == "csqa" else "ABCD")
+    monte_carlo_labels = list(args.allowed_labels) if args.allowed_labels else list(labels)
+    if args.protocol != "monte_carlo" and args.allowed_labels:
+        raise ValueError("--allowed_labels is supported only by monte_carlo")
+    if not monte_carlo_labels or any(label not in labels for label in monte_carlo_labels):
+        raise ValueError("--allowed_labels must be a non-empty subset of task labels")
+    if args.bias_label is not None and args.bias_label not in monte_carlo_labels:
+        raise ValueError("--bias_label must be included in the schema labels")
+    logit_bias = None
+    if args.bias_label is not None:
+        import tiktoken
+
+        token_ids = tiktoken.encoding_for_model(args.model).encode(args.bias_label)
+        if len(token_ids) != 1:
+            raise ValueError("--bias_label must encode as one canonical token")
+        logit_bias = {str(int(token_ids[0])): float(args.bias_value)}
     from openai import OpenAI
 
     client = OpenAI()
@@ -272,13 +294,15 @@ def main():
         counts = {label: 0 for label in labels}
         if args.protocol == "pairwise":
             allowed_groups = list(label_pairs)
+        elif args.protocol == "monte_carlo":
+            allowed_groups = [tuple(monte_carlo_labels)]
         else:
             allowed_groups = [tuple(labels)]
         for allowed in allowed_groups:
             if len(rows) >= args.max_requests:
                 raise RuntimeError("protocol exceeds --max_requests")
             n = args.n if args.protocol == "monte_carlo" else 1
-            response = client.chat.completions.create(
+            request_kwargs = dict(
                 model=args.model,
                 messages=prompt["messages"],
                 temperature=args.temperature,
@@ -288,6 +312,9 @@ def main():
                 top_logprobs=20,
                 n=n,
             )
+            if logit_bias is not None:
+                request_kwargs["logit_bias"] = logit_bias
+            response = client.chat.completions.create(**request_kwargs)
             usage = _usage(response)
             cost = _cost(usage, 2.0, 0.5, 8.0)
             total_cost += cost
@@ -371,6 +398,9 @@ def main():
         "sample_index": args.sample_index if args.probe_samples is None else None,
         "permutation_index": args.permutation_index if not args.all_permutations else None,
         "option_ids": labels,
+        "allowed_labels": monte_carlo_labels if args.protocol == "monte_carlo" else None,
+        "bias_label": args.bias_label,
+        "bias_value": float(args.bias_value) if args.bias_label is not None else None,
         "temperature": args.temperature,
         "n": args.n if args.protocol == "monte_carlo" else 1,
         "rows": rows,
