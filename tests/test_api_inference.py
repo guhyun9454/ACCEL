@@ -29,6 +29,7 @@ from eval_clm_utils import (  # noqa: E402
     prepare_eval_fn_api_base,
     prepare_eval_fn_api_perm,
     prepare_eval_fn_base,
+    select_api_probe_subjects,
 )
 
 
@@ -133,6 +134,20 @@ class APIPromptModeTest(unittest.TestCase):
         self.assertIn('toker(f":{e}", add_special_tokens=False)', source)
         self.assertNotIn("api_prompt_mode", inspect.signature(prepare_eval_fn_base).parameters)
         self.assertNotIn("label_only", source)
+
+
+class APIProbeSubjectSelectionTest(unittest.TestCase):
+    def test_probe_defaults_to_first_subject(self):
+        args = SimpleNamespace(api_probe_only=True, api_probe_all_subjects=False)
+        self.assertEqual(select_api_probe_subjects(args, ["a", "b", "c"]), ["a"])
+
+    def test_stratified_probe_keeps_all_subjects(self):
+        args = SimpleNamespace(api_probe_only=True, api_probe_all_subjects=True)
+        self.assertEqual(select_api_probe_subjects(args, ["a", "b", "c"]), ["a", "b", "c"])
+
+    def test_non_probe_keeps_all_subjects(self):
+        args = SimpleNamespace(api_probe_only=False, api_probe_all_subjects=False)
+        self.assertEqual(select_api_probe_subjects(args, ["a", "b", "c"]), ["a", "b", "c"])
 
 
 class LabelNormalizationTest(unittest.TestCase):

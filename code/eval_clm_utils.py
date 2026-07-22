@@ -62,6 +62,8 @@ def parse_arguments():
                         help="Run only the first --api_probe_samples examples and save capability/usage diagnostics.")
     parser.add_argument("--api_probe_samples", type=int, default=10,
                         help="Number of examples used by --api_probe_only (default: 10).")
+    parser.add_argument("--api_probe_all_subjects", action="store_true",
+                        help="With --api_probe_only, probe the requested number of examples in every subject instead of only the first subject.")
     parser.add_argument("--api_max_cost_usd", type=float, default=None,
                         help="Required API safety guard unless --api_max_requests is supplied.")
     parser.add_argument("--api_max_requests", type=int, default=None,
@@ -297,6 +299,16 @@ def build_results_dir(args, task: str, num_few_shot: int, setting: str = None) -
     if tag:
         save_path += f"__{tag}"
     return save_path
+
+
+def select_api_probe_subjects(args, subjects):
+    """Keep the legacy first-subject probe unless an explicit stratified probe is requested."""
+    selected = list(subjects)
+    if not bool(getattr(args, "api_probe_only", False)):
+        return selected
+    if bool(getattr(args, "api_probe_all_subjects", False)):
+        return selected
+    return selected[:1]
 
 
 def prepare_eval(args, eval_name):

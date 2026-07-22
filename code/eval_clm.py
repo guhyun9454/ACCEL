@@ -29,6 +29,7 @@ from eval_clm_utils import (
     build_results_dir,
     parse_arguments,
     prepare_eval,
+    select_api_probe_subjects,
 )
 from eval_clm_online import (
     _recall_std,
@@ -2850,8 +2851,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
             model.set_cache_dir(os.path.join(args.save_path, "api_cache", str(args.api_provider)))
         if args.setting not in {"full", "cyclic", "perm"}:
             raise ValueError("adaptive API requires a permutation setting; use --eval_names task,shots,full")
-        if args.api_probe_only:
-            subjects = subjects[:1]
+        subjects = select_api_probe_subjects(args, subjects)
         option_ids = list(args.option_id_set or ("ABCDE" if args.task == "csqa" else "ABCD"))
         k = len(option_ids)
         cyclic_schedule = _rotations(k)
@@ -3343,8 +3343,7 @@ def main():
         if api_backend:
             if getattr(args, "api_cache_dir", None) is None:
                 model.set_cache_dir(os.path.join(args.save_path, "api_cache", str(args.api_provider)))
-            if bool(getattr(args, "api_probe_only", False)):
-                subjects = subjects[:1]
+            subjects = select_api_probe_subjects(args, subjects)
 
         # =========================
         # Aggregate (MMLU-style) summary over subjects
