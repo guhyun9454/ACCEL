@@ -273,7 +273,7 @@ def parse_arguments():
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
         task = eval_args[0]
-        if task not in ['mmlu', 'arc', 'csqa', 'race']:
+        if task not in ['mmlu', 'arc', 'csqa', 'race', 'rewardbench']:
             raise ValueError(f"Unknown task: {task}")
 
         num_few_shot = int(eval_args[1])
@@ -342,6 +342,12 @@ def prepare_eval(args, eval_name):
     if task in ['csqa']:
         option_ids = list('ABCDE')
         option_ids_header = list('ABCDE')
+    elif task in ['rewardbench']:
+        # Pairwise preference judging: two candidate answers, so k=2. The cyclic
+        # rotation and the targeted Latin schedule both degrade correctly here
+        # (2 views, identity + swap).
+        option_ids = list('AB')
+        option_ids_header = list('AB')
 
     # Override displayed option IDs by user-specified token set (for probing token preference)
     # Keep headers (ground-truth labels) as uppercase letters to match dataset files.
@@ -361,6 +367,8 @@ def prepare_eval(args, eval_name):
         sys_msg = 'The following are multiple choice questions about {}.'
     elif task == 'race':
         sys_msg = 'The following are multiple choice reading comprehension questions about an article.'
+    elif task == 'rewardbench':
+        sys_msg = 'The following are queries with two candidate answers, of which one answers the query better.'
     else: # task in ['arc', 'tqa']
         sys_msg = 'The following are multiple choice questions.'
 
