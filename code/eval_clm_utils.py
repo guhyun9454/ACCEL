@@ -273,7 +273,7 @@ def parse_arguments():
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
         task = eval_args[0]
-        if task not in ['mmlu', 'arc', 'csqa']:
+        if task not in ['mmlu', 'arc', 'csqa', 'race']:
             raise ValueError(f"Unknown task: {task}")
 
         num_few_shot = int(eval_args[1])
@@ -359,26 +359,33 @@ def prepare_eval(args, eval_name):
     # sys_msg
     if 'mmlu' in task:
         sys_msg = 'The following are multiple choice questions about {}.'
+    elif task == 'race':
+        sys_msg = 'The following are multiple choice reading comprehension questions about an article.'
     else: # task in ['arc', 'tqa']
         sys_msg = 'The following are multiple choice questions.'
 
     sys_msg += ' You should directly answer the question by choosing the correct option.'
 
+    # RACE folds the passage into the Question column and carries its own
+    # "Article:/Question:" headings (see data_race/process.py), so the generic
+    # prefix would render as "Question: Article: ...".
+    question_prefix = '' if task == 'race' else 'Question: '
+
     # create_user_prompt
     def create_user_prompt(question: str, options: List[str]):
         if setting in ['noid']:
-            user_prompt = f"Question: {question.strip()}\nOptions:\n" + \
+            user_prompt = f"{question_prefix}{question.strip()}\nOptions:\n" + \
                 "\n".join([f"{answer}".strip()
                            for option_id, answer in zip(option_ids, options)]) + \
                 "\nAnswer:"
         elif setting in ['shuffle_both']:
             shuffled_option_ids, shuffled_options = shuffle_options_with_ids(option_ids, options)
-            user_prompt = f"Question: {question.strip()}\nOptions:\n" + \
+            user_prompt = f"{question_prefix}{question.strip()}\nOptions:\n" + \
                 "\n".join([f"{option_id}. {answer}".strip()
                            for option_id, answer in zip(shuffled_option_ids, shuffled_options)]) + \
                 "\nAnswer:"
         else:
-            user_prompt = f"Question: {question.strip()}\nOptions:\n" + \
+            user_prompt = f"{question_prefix}{question.strip()}\nOptions:\n" + \
                 "\n".join([f"{option_id}. {answer}".strip()
                            for option_id, answer in zip(option_ids, options)]) + \
                 "\nAnswer:"
