@@ -176,7 +176,7 @@ class TestEvaluate(unittest.TestCase):
             Q[i, :, y[i]] += 1.0
         Q /= Q.sum(axis=2, keepdims=True)
 
-        res = evaluate(Q, y, calib_frac=0.02, epochs=3)
+        res = evaluate([(Q, y)], calib_frac=0.02, epochs=3)
         self.assertEqual(res["n_calib"] + res["n_test"], n)
         self.assertEqual(set(res["methods"]), {"baseline", "calibraeval@1", "cyclic", "calibraeval@4"})
         # signal is strong and position-independent here, so everything should be near-perfect
@@ -190,9 +190,27 @@ class TestEvaluate(unittest.TestCase):
         Q = rng.random((100, 4, 4))
         Q /= Q.sum(axis=2, keepdims=True)
         y = rng.integers(0, 4, size=100)
-        res = evaluate(Q, y, calib_frac=0.1, epochs=2)
+        res = evaluate([(Q, y)], calib_frac=0.1, epochs=2)
         self.assertEqual(res["n_calib"], 10)
         self.assertEqual(res["n_test"], 90)
+
+    def test_calibration_prefix_is_taken_per_block(self):
+        # MMLU ships one file per subject. The calibration set must draw from every
+        # subject, not just whichever sorts first.
+        rng = np.random.default_rng(6)
+        parts = []
+        for _ in range(5):
+            Q = rng.random((40, 4, 4))
+            Q /= Q.sum(axis=2, keepdims=True)
+            parts.append((Q, rng.integers(0, 4, size=40)))
+        res = evaluate(parts, calib_frac=0.1, epochs=2)
+        self.assertEqual(res["n_blocks"], 5)
+        self.assertEqual(res["n_calib"], 5 * 4)     # 10% of each 40-item block
+        self.assertEqual(res["n_test"], 5 * 36)
+
+    def test_rejects_bare_arrays(self):
+        with self.assertRaises(TypeError):
+            evaluate(np.zeros((4, 4, 4)), np.zeros(4))
 
 
 if __name__ == "__main__":

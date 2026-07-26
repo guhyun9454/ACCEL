@@ -253,24 +253,42 @@ class OrderPreservingCalibrator:
 # evaluation
 # --------------------------------------------------------------------------
 
-def evaluate(Q: np.ndarray, y: np.ndarray, calib_frac: float = 0.02, lam: float = 0.05,
+def evaluate(parts, calib_frac: float = 0.02, lam: float = 0.05,
              epochs: int = 30, seed: int = 0) -> dict:
-    """Head-to-head numbers on one (model, dataset, run).
+    """Head-to-head numbers for one run.
 
-    The calibrator is fitted on a label-free prefix of `calib_frac` items — the same
-    split ACCEL uses for its prior — and every reported number is computed on the
-    remaining items only, so nothing is scored on data the map saw.
+    `parts` is a list of (Q, y) blocks — one per cached file. MMLU stores a file
+    per subject, so the calibration prefix is taken *within each block* and then
+    pooled; taking it from the concatenation instead would draw the whole
+    calibration set from whichever subject sorts first. For ARC/CSQA there is a
+    single block and this reduces to a plain prefix.
+
+    The calibrator never sees labels, and every reported number is computed on the
+    held-out remainder only.
     """
-    n_items, n_views, k = Q.shape
-    n_calib = max(1, int(round(calib_frac * n_items)))
-    Q_calib, Q_test, y_test = Q[:n_calib], Q[n_calib:], y[n_calib:]
+    if isinstance(parts, np.ndarray):  # single (Q, y) passed directly
+        raise TypeError("evaluate() takes a list of (Q, y) blocks")
+
+    calib_blocks, test_Q, test_y = [], [], []
+    for Q, y in parts:
+        n_calib = max(1, int(round(calib_frac * len(Q))))
+        calib_blocks.append(Q[:n_calib])
+        test_Q.append(Q[n_calib:])
+        test_y.append(y[n_calib:])
+
+    Q_calib = np.concatenate(calib_blocks, axis=0)
+    Q_test = np.concatenate(test_Q, axis=0)
+    y_test = np.concatenate(test_y, axis=0)
+    n_items = sum(len(Q) for Q, _ in parts)
+    n_views, k = Q_test.shape[1], Q_test.shape[2]
 
     cal = OrderPreservingCalibrator(lam=lam, epochs=epochs, seed=seed).fit(Q_calib)
 
     out = {
         "n_items_total": int(n_items),
-        "n_calib": int(n_calib),
+        "n_calib": int(len(Q_calib)),
         "n_test": int(len(y_test)),
+        "n_blocks": len(parts),
         "n_views": int(n_views),
         "k": int(k),
         "methods": {},
@@ -297,6 +315,21 @@ def evaluate(Q: np.ndarray, y: np.ndarray, calib_frac: float = 0.02, lam: float 
     return out
 
 
+def group_by_run_index(paths: Sequence[str]) -> dict:
+    """Bucket cached files by the seed-run index in their name.
+
+    ARC/CSQA store `<task>_run<r>.jsonl`; MMLU stores `<subject>_run<r>.jsonl`, one
+    per subject, so all 57 subjects of a given r belong to the same run.
+    """
+    groups: dict = {}
+    for path in paths:
+        stem = os.path.basename(path).rsplit(".", 1)[0]
+        marker = stem.rfind("run")
+        key = stem[marker + 3:] if marker >= 0 else stem
+        groups.setdefault(key, []).append(path)
+    return groups
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--run_files", nargs="+", required=True,
@@ -308,13 +341,16 @@ def main():
     parser.add_argument("--out", default=None, help="write results json here")
     args = parser.parse_args()
 
+    groups = group_by_run_index(args.run_files)
     per_run = []
-    for path in args.run_files:
-        Q, y = load_cached_run(path)
-        res = evaluate(Q, y, calib_frac=args.calib_frac, lam=args.lam, epochs=args.epochs)
-        res["run_file"] = path
+    for run_key in sorted(groups):
+        files = sorted(groups[run_key])
+        parts = [load_cached_run(p) for p in files]
+        res = evaluate(parts, calib_frac=args.calib_frac, lam=args.lam, epochs=args.epochs)
+        res["run"] = run_key
+        res["n_files"] = len(files)
         per_run.append(res)
-        print(f"[{os.path.basename(path)}] n_test={res['n_test']} views={res['n_views']}")
+        print(f"[run{run_key}] files={len(files)} n_test={res['n_test']} views={res['n_views']} k={res['k']}")
         for name, m in res["methods"].items():
             print(f"    {name:>18s}  cost={m['cost']:.2f}  acc={m['acc']:.4f}  rstd={m['recall_std']:.4f}")
 
