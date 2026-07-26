@@ -29,6 +29,11 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
+# Pairwise preference-judging benchmarks: a query and two candidate answers, so
+# k=2. Their data is built by code/data_<task>/process.py on top of
+# code/pairwise_data_utils.py.
+PAIRWISE_TASKS = ('rewardbench', 'mtbench', 'prefbench')
+
 
 def parse_arguments():
     # ---- Safe CUDA logging (GPU 없을 때도 안 터지게) ----
@@ -273,7 +278,7 @@ def parse_arguments():
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
         task = eval_args[0]
-        if task not in ['mmlu', 'arc', 'csqa', 'race', 'rewardbench']:
+        if task not in ['mmlu', 'arc', 'csqa', 'race'] + list(PAIRWISE_TASKS):
             raise ValueError(f"Unknown task: {task}")
 
         num_few_shot = int(eval_args[1])
@@ -342,7 +347,7 @@ def prepare_eval(args, eval_name):
     if task in ['csqa']:
         option_ids = list('ABCDE')
         option_ids_header = list('ABCDE')
-    elif task in ['rewardbench']:
+    elif task in PAIRWISE_TASKS:
         # Pairwise preference judging: two candidate answers, so k=2. The cyclic
         # rotation and the targeted Latin schedule both degrade correctly here
         # (2 views, identity + swap).
@@ -367,7 +372,7 @@ def prepare_eval(args, eval_name):
         sys_msg = 'The following are multiple choice questions about {}.'
     elif task == 'race':
         sys_msg = 'The following are multiple choice reading comprehension questions about an article.'
-    elif task == 'rewardbench':
+    elif task in PAIRWISE_TASKS:
         sys_msg = 'The following are queries with two candidate answers, of which one answers the query better.'
     else: # task in ['arc', 'tqa']
         sys_msg = 'The following are multiple choice questions.'
