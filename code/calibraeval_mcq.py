@@ -102,7 +102,9 @@ def to_content_space(probs: Sequence[Sequence[float]], k: int) -> np.ndarray:
 def load_cached_run(path: str, k: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Read one <task>_run<r>.jsonl -> (Q, y).
 
-    Q has shape (n_items, n_views, k) in content space; y holds gold content indices.
+    Q has shape (n_items, n_views, k) in **slot** space — exactly as cached, before
+    any un-rotation — and y holds gold content indices. Use `to_content_space` to
+    un-rotate a view when content-space scores are needed.
     `k` is inferred from the first usable record unless given — ARC/MMLU/RACE are
     4-choice but CSQA is 5-choice, so it must not be hardcoded. Records whose
     probability block is not (>=2 views, k options) are skipped: a truncated or
@@ -132,7 +134,7 @@ def load_cached_run(path: str, k: Optional[int] = None) -> Tuple[np.ndarray, np.
             gold = OPTION_IDS.index(str(ideal)) if str(ideal) in OPTION_IDS else None
             if gold is None:
                 continue
-            Q.append(to_content_space(arr, k))
+            Q.append(arr)
             y.append(gold)
     if not Q:
         raise ValueError(f"no usable records in {path}")
@@ -145,12 +147,25 @@ def load_cached_run(path: str, k: Optional[int] = None) -> Tuple[np.ndarray, np.
 # --------------------------------------------------------------------------
 
 class OrderPreservingCalibrator:
-    """Monotone map g on [0,1], fitted label-free to make views mutually consistent.
+    """One monotone map per option slot, fitted label-free to make views agree.
 
-    g is a step function over the sorted unique observed probabilities: with
-    e = exp(theta), S_m = sum_{n<m} e_n and T = S_N, the map sends the m-th
-    smallest observed value to S_m / T. Monotonicity is structural (e_n > 0), so
-    the fit can never reorder two options — that is the "order-preserving" property.
+    Each g_j is a step function over the sorted unique observed probabilities: with
+    e = exp(theta_j), S_m = sum_{n<m} e_n and T = S_N, the map sends the m-th
+    smallest observed value to S_m / T. Monotonicity is structural (e_n > 0) — the
+    "order-preserving" property — so g_j never reorders two values *within* slot j.
+
+    Why one map *per slot* and not a single shared map
+    --------------------------------------------------
+    A single shared monotone map cannot change a k-way argmax at all: ranking is
+    invariant under any strictly increasing elementwise transform, with or without
+    renormalization. The original method escapes this only because its decision is
+    binary — it compares a calibrated marginal p(A) against the fixed threshold
+    0.5, so shifting p(A) across 0.5 flips the answer. That is precisely a
+    slot-specific correction. Generalizing it faithfully to k options therefore
+    means k maps, one per option-ID position: `argmax_j g_j(P[c][j])` is not
+    rank-invariant across j, and it is exactly the position bias PriDe and ACCEL
+    target. Fitting a shared map instead reproduces the baseline verbatim, which
+    is how this was caught.
     """
 
     def __init__(self, lam: float = 0.05, lr: float = 10.0, epochs: int = 30, seed: int = 0):
@@ -164,83 +179,114 @@ class OrderPreservingCalibrator:
     # -- internals ---------------------------------------------------------
     @staticmethod
     def _g_from_theta(theta: np.ndarray) -> np.ndarray:
-        """theta (N,) -> g (N+1,), the normalized cumulative sum. g[0]=0, g[N]=1."""
-        e = np.exp(theta - theta.max())
-        cs = np.concatenate([[0.0], np.cumsum(e)])
-        return cs / cs[-1]
+        """theta (..., N) -> g (..., N+1), the normalized cumulative sum.
+
+        g[..., 0] = 0 and g[..., N] = 1, so every row is a monotone map onto [0,1].
+        """
+        theta = np.atleast_2d(theta)
+        e = np.exp(theta - theta.max(axis=-1, keepdims=True))
+        cs = np.concatenate([np.zeros((theta.shape[0], 1)), np.cumsum(e, axis=-1)], axis=-1)
+        return cs / cs[:, -1:]
 
     @staticmethod
     def _theta_grad(theta: np.ndarray, dg: np.ndarray) -> np.ndarray:
-        """Chain dL/dg (N+1,) back to dL/dtheta (N,).
+        """Chain dL/dg (rows, N+1) back to dL/dtheta (rows, N).
 
         With g_m = S_m / T:  dg_m/dtheta_n = e_n * (1{n < m} - g_m) / T.
         So dL/dtheta_n = (e_n / T) * (sum_{m > n} dg_m - sum_m dg_m * g_m).
+        Each row (option slot) has its own independent map, so rows do not mix.
         """
-        e = np.exp(theta - theta.max())
-        T = e.sum()
+        theta = np.atleast_2d(theta)
+        dg = np.atleast_2d(dg)
+        e = np.exp(theta - theta.max(axis=-1, keepdims=True))
+        T = e.sum(axis=-1, keepdims=True)
         g = OrderPreservingCalibrator._g_from_theta(theta)
-        # rev[n] = sum_{m >= n} dg_m over m = 0..N, so rev[1:][n] = sum_{m > n} dg_m
-        rev = np.cumsum(dg[::-1])[::-1]
-        return (e / T) * (rev[1:] - float(np.dot(dg, g)))
+        # rev[..., n] = sum_{m >= n} dg_m, so rev[..., 1:] = sum_{m > n} dg_m
+        rev = np.cumsum(dg[:, ::-1], axis=-1)[:, ::-1]
+        inner = np.sum(dg * g, axis=-1, keepdims=True)
+        return (e / T) * (rev[:, 1:] - inner)
 
     def _loss_and_dg(self, g: np.ndarray, idx: np.ndarray) -> Tuple[float, np.ndarray]:
-        """Objective and dL/dg for calibrated views.
+        """Objective and dL/dg.
 
-        idx has shape (n_items, n_views, k) holding indices into g.
+        `idx` has shape (items, views, k) in **slot** space: idx[n, c, j] indexes the
+        observed probability that view c put on option-ID slot j. `g` has shape
+        (k, N+1) — row j is slot j's map.
         """
         n_items, n_views, k = idx.shape
-        gi = g[idx]                                   # calibrated probabilities
-        dg = np.zeros_like(g)
+        slots = np.arange(k)[None, None, :]
+        gi = g[slots, idx]                            # (items, views, k), calibrated
+        dgi = np.zeros_like(gi)
         n = float(n_items)
 
-        # (a) each calibrated view should be a distribution
+        # (a) each calibrated view should still be a distribution over slots
         resid = gi.sum(axis=2) - 1.0                  # (items, views)
         loss_sum = float(np.sum(resid ** 2)) / n
-        np.add.at(dg, idx, (2.0 * resid / n)[:, :, None] * np.ones((1, 1, k)))
+        dgi += (2.0 * resid / n)[:, :, None]
 
-        # (b) views of the same item should agree per content option
-        mean_over_views = gi.mean(axis=1, keepdims=True)
-        dev = gi - mean_over_views                    # (items, views, k)
+        # (b) the same *content* option, seen at different slots across views, should
+        #     receive the same calibrated score. This is what ties the per-slot maps
+        #     to each other, and what removes position bias.
+        #     Under view c, content option i sits at slot (i - c) % k.
+        content = np.empty_like(gi)
+        back = np.empty((n_views, k), dtype=np.int64)
+        for c in range(n_views):
+            for i in range(k):
+                back[c, i] = (i - c) % k
+            content[:, c, :] = gi[:, c, back[c]]
+        dev = content - content.mean(axis=1, keepdims=True)
         loss_inv = float(np.sum(dev ** 2)) / n
-        np.add.at(dg, idx, (2.0 * dev / n))
+        for c in range(n_views):                      # scatter back to slot space;
+            # back[c] is a permutation, so each slot is written exactly once
+            dgi[:, c, back[c]] += 2.0 * dev[:, c, :] / n
 
-        # (c) keep the map away from the uniform collapse (subtracted, as in the paper)
+        # (c) keep the maps away from the uniform collapse (subtracted, as in the paper)
         spread = gi - 1.0 / k
         loss_reg = float(np.sum(spread ** 2)) / n
-        np.add.at(dg, idx, (-2.0 * self.lam * spread / n))
+        dgi += -2.0 * self.lam * spread / n
+
+        dg = np.zeros_like(g)
+        for j in range(k):
+            np.add.at(dg[j], idx[:, :, j].reshape(-1), dgi[:, :, j].reshape(-1))
 
         return loss_sum + loss_inv - self.lam * loss_reg, dg
 
     # -- public ------------------------------------------------------------
     def fit(self, Q: np.ndarray, verbose: bool = False) -> "OrderPreservingCalibrator":
-        """Fit on observed probabilities Q of shape (items, views, k). Labels unused."""
-        flat = Q.reshape(-1)
-        values = np.unique(np.concatenate([flat, [0.0, 1.0]]))
+        """Fit on observed probabilities Q, shape (items, views, k) in slot space.
+
+        Labels are never touched — this is the label-free part of the method.
+        """
+        k = Q.shape[2]
+        values = np.unique(np.concatenate([Q.reshape(-1), [0.0, 1.0]]))
         idx = np.searchsorted(values, Q)              # exact hits by construction
-        theta = np.zeros(len(values) - 1, dtype=np.float64)
+        theta = np.zeros((k, len(values) - 1), dtype=np.float64)
 
         for epoch in range(self.epochs):
             g = self._g_from_theta(theta)
             loss, dg = self._loss_and_dg(g, idx)
-            grad = self._theta_grad(theta, dg)
-            theta -= self.lr * grad
-            theta -= theta.mean()                     # fix the shift degeneracy
+            theta = theta - self.lr * self._theta_grad(theta, dg)
+            theta -= theta.mean(axis=-1, keepdims=True)   # fix the per-row shift degeneracy
             if verbose:
                 print(f"  epoch {epoch:3d}  loss={loss:.6f}")
 
         self.values_ = values
-        # values[m] -> g[m]; the endpoints pin g(0)=0 and g(1)=1.
-        self.mapped_ = self._g_from_theta(theta)
-        # Enforce the isotonic view the original code fits at the end. The map is
-        # already monotone, so this only clips into range.
-        self.mapped_ = np.clip(np.maximum.accumulate(self.mapped_), 0.0, 1.0)
+        # values[m] -> g[j, m] for slot j; the endpoints pin g(0)=0 and g(1)=1.
+        mapped = self._g_from_theta(theta)
+        # The isotonic step the original code applies at the end. Rows are already
+        # monotone by construction, so this only guards against numerical drift.
+        self.mapped_ = np.clip(np.maximum.accumulate(mapped, axis=-1), 0.0, 1.0)
         return self
 
     def transform(self, Q: np.ndarray) -> np.ndarray:
-        """Apply g elementwise, interpolating between observed values."""
+        """Apply each slot's map along the last axis, interpolating between values."""
         if self.values_ is None:
             raise RuntimeError("fit() first")
-        return np.interp(Q, self.values_, self.mapped_)
+        Q = np.asarray(Q, dtype=np.float64)
+        out = np.empty_like(Q)
+        for j in range(Q.shape[-1]):
+            out[..., j] = np.interp(Q[..., j], self.values_, self.mapped_[j])
+        return out
 
     def calibrate(self, Q: np.ndarray) -> np.ndarray:
         """Apply g and renormalize each view to a distribution."""
@@ -301,16 +347,20 @@ def evaluate(parts, calib_frac: float = 0.02, lam: float = 0.05,
             "recall_std": recall_std(y_test, preds, k),
         }
 
-    # No debiasing: the model's answer under the original ordering.
+    def content(views_slot: np.ndarray) -> np.ndarray:
+        """(items, views, k) slot space -> content space, un-rotating each view."""
+        return np.stack([to_content_space(item, k) for item in views_slot])
+
+    # View 0 presents options in their original order, so slot index == content index.
     record("baseline", np.argmax(Q_test[:, 0, :], axis=1), 1.0)
 
-    # CalibraEval at the same budget as baseline: one view, calibrated.
+    # CalibraEval at the same budget as the baseline: one view, per-slot calibrated.
     record("calibraeval@1", np.argmax(cal.calibrate(Q_test[:, 0, :]), axis=1), 1.0)
 
-    # Cyclic ensembling without calibration, and with it, at full budget.
-    record("cyclic", np.argmax(Q_test.mean(axis=1), axis=1), float(n_views))
-    record(f"calibraeval@{n_views}", np.argmax(cal.calibrate(Q_test).mean(axis=1), axis=1),
-           float(n_views))
+    # Full-budget ensembling, without calibration and with it.
+    record("cyclic", np.argmax(content(Q_test).mean(axis=1), axis=1), float(n_views))
+    record(f"calibraeval@{n_views}",
+           np.argmax(content(cal.calibrate(Q_test)).mean(axis=1), axis=1), float(n_views))
 
     return out
 

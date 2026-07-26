@@ -68,7 +68,7 @@ class TestCalibratorInternals(unittest.TestCase):
         values = np.unique(np.concatenate([Q.reshape(-1), [0.0, 1.0]]))
         self.values = values
         self.idx = np.searchsorted(values, Q)
-        self.theta = rng.normal(size=len(values) - 1) * 0.3
+        self.theta = rng.normal(size=(4, len(values) - 1)) * 0.3
 
     def _loss(self, theta):
         g = OrderPreservingCalibrator._g_from_theta(theta)
@@ -80,31 +80,55 @@ class TestCalibratorInternals(unittest.TestCase):
         analytic = OrderPreservingCalibrator._theta_grad(self.theta, dg)
 
         eps = 1e-6
-        for n in range(0, len(self.theta), 7):  # sample coordinates; full sweep is slow
-            plus, minus = self.theta.copy(), self.theta.copy()
-            plus[n] += eps
-            minus[n] -= eps
-            numeric = (self._loss(plus) - self._loss(minus)) / (2 * eps)
-            self.assertAlmostEqual(
-                analytic[n], numeric, places=5,
-                msg=f"gradient mismatch at {n}: analytic={analytic[n]} numeric={numeric}",
-            )
+        rows, cols = self.theta.shape
+        for j in range(rows):
+            for n in range(0, cols, 7):  # sample coordinates; a full sweep is slow
+                plus, minus = self.theta.copy(), self.theta.copy()
+                plus[j, n] += eps
+                minus[j, n] -= eps
+                numeric = (self._loss(plus) - self._loss(minus)) / (2 * eps)
+                self.assertAlmostEqual(
+                    analytic[j, n], numeric, places=5,
+                    msg=f"gradient mismatch at slot {j} value {n}: "
+                        f"analytic={analytic[j, n]} numeric={numeric}",
+                )
 
-    def test_map_is_monotone_and_bounded(self):
+    def test_every_slot_map_is_monotone_and_bounded(self):
         g = OrderPreservingCalibrator._g_from_theta(self.theta)
-        self.assertAlmostEqual(g[0], 0.0)
-        self.assertAlmostEqual(g[-1], 1.0)
-        self.assertTrue(np.all(np.diff(g) >= 0))
+        for row in g:
+            self.assertAlmostEqual(row[0], 0.0)
+            self.assertAlmostEqual(row[-1], 1.0)
+            self.assertTrue(np.all(np.diff(row) >= 0))
 
-    def test_fit_preserves_order_within_a_view(self):
-        # the defining property: calibration may not reorder options
+    def test_each_slot_map_preserves_order_within_its_own_slot(self):
+        # Order preservation now means: within one slot, a larger observed
+        # probability still maps to a larger calibrated one. It deliberately does
+        # NOT hold across slots — that is what lets calibration correct position bias.
         rng = np.random.default_rng(1)
         Q = rng.random((40, 4, 4))
         Q /= Q.sum(axis=2, keepdims=True)
         cal = OrderPreservingCalibrator(epochs=5).fit(Q)
-        out = cal.calibrate(Q)
-        for before, after in zip(Q.reshape(-1, 4), out.reshape(-1, 4)):
+        out = cal.transform(Q)
+        for j in range(4):
+            before = Q[:, :, j].reshape(-1)
+            after = out[:, :, j].reshape(-1)
             np.testing.assert_array_equal(np.argsort(before), np.argsort(after))
+
+    def test_per_slot_maps_can_change_a_single_view_argmax(self):
+        # The reason the calibrator is per-slot at all. A single shared monotone map
+        # cannot change a k-way argmax, so fitting one would reproduce the baseline
+        # exactly; distinct per-slot maps can and do move the decision.
+        cal = OrderPreservingCalibrator()
+        cal.values_ = np.array([0.0, 0.4, 0.6, 1.0])
+        cal.mapped_ = np.array([
+            [0.0, 0.05, 0.10, 1.0],   # slot 0 heavily damped (a biased position)
+            [0.0, 0.90, 0.95, 1.0],
+            [0.0, 0.90, 0.95, 1.0],
+            [0.0, 0.90, 0.95, 1.0],
+        ])
+        P = np.array([[0.6, 0.4, 0.0, 0.0]])
+        self.assertEqual(int(np.argmax(P, axis=1)[0]), 0)
+        self.assertEqual(int(np.argmax(cal.calibrate(P), axis=1)[0]), 1)
 
     def test_calibrated_views_are_distributions(self):
         rng = np.random.default_rng(2)
@@ -120,13 +144,13 @@ class TestCalibratorInternals(unittest.TestCase):
         values = np.unique(np.concatenate([Q.reshape(-1), [0.0, 1.0]]))
         idx = np.searchsorted(values, Q)
         cal = OrderPreservingCalibrator(lam=0.05)
-        theta = np.zeros(len(values) - 1)
+        theta = np.zeros((4, len(values) - 1))
         first = cal._loss_and_dg(cal._g_from_theta(theta), idx)[0]
         for _ in range(20):
             g = cal._g_from_theta(theta)
             _, dg = cal._loss_and_dg(g, idx)
-            theta -= cal.lr * cal._theta_grad(theta, dg)
-            theta -= theta.mean()
+            theta = theta - cal.lr * cal._theta_grad(theta, dg)
+            theta -= theta.mean(axis=-1, keepdims=True)
         last = cal._loss_and_dg(cal._g_from_theta(theta), idx)[0]
         self.assertLess(last, first)
 
@@ -167,23 +191,46 @@ class TestCacheLoading(unittest.TestCase):
 
 
 class TestEvaluate(unittest.TestCase):
-    def test_reports_all_regimes_on_heldout_items(self):
-        rng = np.random.default_rng(4)
-        n = 200
-        y = rng.integers(0, 4, size=n)
-        Q = rng.random((n, 4, 4)) * 0.2
-        for i in range(n):
-            Q[i, :, y[i]] += 1.0
-        Q /= Q.sum(axis=2, keepdims=True)
+    @staticmethod
+    def _biased_cache(n=600, k=4, slot0_boost=1.0, seed=4):
+        """Synthetic cache in slot space with a controllable slot-0 preference.
 
-        res = evaluate([(Q, y)], calib_frac=0.02, epochs=3)
-        self.assertEqual(res["n_calib"] + res["n_test"], n)
-        self.assertEqual(set(res["methods"]), {"baseline", "calibraeval@1", "cyclic", "calibraeval@4"})
-        # signal is strong and position-independent here, so everything should be near-perfect
-        for name, m in res["methods"].items():
-            self.assertGreater(m["acc"], 0.9, msg=name)
+        Content option i is placed at slot (i - c) % k under view c, matching the
+        real cache, then slot 0's mass is inflated to simulate position bias.
+        """
+        rng = np.random.default_rng(seed)
+        y = rng.integers(0, k, size=n)
+        P = np.empty((n, k, k))
+        for item in range(n):
+            for c in range(k):
+                row = rng.random(k) * 0.3
+                row[(y[item] - c) % k] += 1.0     # the correct option, at its slot
+                row[0] += slot0_boost              # position bias, always on slot 0
+                P[item, c] = row / row.sum()
+        return P, y
+
+    def test_reports_all_regimes_on_heldout_items(self):
+        P, y = self._biased_cache(slot0_boost=0.0)
+        res = evaluate([(P, y)], calib_frac=0.1, epochs=5)
+        self.assertEqual(res["n_calib"] + res["n_test"], len(y))
+        self.assertEqual(set(res["methods"]),
+                         {"baseline", "calibraeval@1", "cyclic", "calibraeval@4"})
         self.assertEqual(res["methods"]["baseline"]["cost"], 1.0)
         self.assertEqual(res["methods"]["calibraeval@4"]["cost"], 4.0)
+        # no position bias and a clean signal -> the uncalibrated routes are strong
+        self.assertGreater(res["methods"]["baseline"]["acc"], 0.9)
+        self.assertGreater(res["methods"]["cyclic"]["acc"], 0.9)
+
+    def test_calibration_reduces_position_bias_when_it_exists(self):
+        # The point of the method: with a slot-0 preference baked in, the
+        # uncalibrated baseline over-predicts whichever content option sits at slot
+        # 0, inflating recall_std. Per-slot calibration should pull that back.
+        P, y = self._biased_cache(slot0_boost=0.9)
+        res = evaluate([(P, y)], calib_frac=0.2, epochs=40)
+        base = res["methods"]["baseline"]
+        cal = res["methods"]["calibraeval@1"]
+        self.assertGreater(base["recall_std"], 0.05, "fixture failed to inject bias")
+        self.assertLess(cal["recall_std"], base["recall_std"])
 
     def test_calibration_split_is_excluded_from_scoring(self):
         rng = np.random.default_rng(5)
