@@ -1,0 +1,339 @@
+"""CalibraEval (Li et al., ACL 2025) adapted to k-way MCQ, run on cached probabilities.
+
+Why this file exists
+--------------------
+The released implementation (https://github.com/CSHaitao/CalibraEval) is hard-wired
+to *binary* pairwise LLM-as-judge data: `normalize.py` renormalizes over exactly
+{A, B}, `CalibraEval.py` consumes one scalar per prompt (`prompt_i_logit['A']`),
+and `eval.py` scores pairwise agreement against labels in {-1, +1}. None of that
+runs on 4-option MCQ, so the method is re-implemented here against the same
+objective, generalized from 2 options / 3 prompt variants to k options / m
+cyclic permutations.
+
+What is kept from the original
+------------------------------
+* The calibration map g is a monotone step function on observed probabilities,
+  parameterized as a normalized cumulative sum of exp(theta) — this is what makes
+  the Non-parametric Order-Preserving Algorithm order-preserving by construction.
+* The label-free objective: calibrated distributions should (a) sum to one within
+  a view, (b) agree across views of the same item, while (c) a regularizer keeps
+  the map from collapsing everything onto the uniform 1/k.
+* An isotonic fit of the learned map, so it can be applied to unseen values.
+
+Where this deviates, and why
+----------------------------
+* Gradients are derived analytically here (and checked against finite differences
+  in tests/test_calibraeval_mcq.py) rather than transcribed from the released
+  `calculate_loss_and_gradient`, which reuses `exps[s1 - 1]` inside the s2 and s3
+  gradient branches where the chain rule calls for `exps[s2 - 1]` / `exps[s3 - 1]`.
+  Its `calculate_loss` also omits the `lam` factor that its gradient applies to the
+  second term. Reproducing those would reproduce bugs, not the published method.
+* Binary consistency `g(p1) + g(p3) = 1` generalizes to `sum_i g(q[c][i]) = 1`.
+* Binary invariance `g(p1) = g(p2)` generalizes to the across-view variance of
+  `g(q[c][i])` for fixed content option i.
+
+Notation
+--------
+`P[c][j]` is the cached probability of option-ID slot j under cyclic permutation c.
+Permutation c places content option i at slot (i - c) mod k, so the probability the
+model assigned to *content* option i under view c is `q[c][i] = P[c][(i - c) % k]`.
+Gold labels are content indices, matching `labels_idx_for_curves` in eval_clm.py,
+so accuracy and recall_std here are computed in the same space as the cached
+Baseline / PriDe / ACCEL numbers.
+"""
+
+import argparse
+import json
+import os
+from typing import List, Optional, Sequence, Tuple
+
+import numpy as np
+
+# Long enough for both the 4-choice tasks and 5-choice CSQA; k itself is read
+# off the cached probability block rather than assumed.
+OPTION_IDS = "ABCDE"
+
+
+# --------------------------------------------------------------------------
+# metrics (mirrors eval_clm_online._recall_std so numbers are comparable)
+# --------------------------------------------------------------------------
+
+def recall_std(labels: Sequence[int], preds: Sequence[int], k: int) -> float:
+    """Std of per-class recall. Classes never appearing as gold are ignored."""
+    if k <= 0:
+        return float("nan")
+    positives = [0] * k
+    true_pos = [0] * k
+    for y, p in zip(labels, preds):
+        y, p = int(y), int(p)
+        if 0 <= y < k:
+            positives[y] += 1
+            if p == y:
+                true_pos[y] += 1
+    recalls = [true_pos[c] / float(positives[c]) for c in range(k) if positives[c] > 0]
+    if not recalls:
+        return float("nan")
+    return float(np.std(np.asarray(recalls, dtype=np.float64)))
+
+
+def accuracy(labels: Sequence[int], preds: Sequence[int]) -> float:
+    if not len(labels):
+        return float("nan")
+    return float(np.mean([int(y) == int(p) for y, p in zip(labels, preds)]))
+
+
+# --------------------------------------------------------------------------
+# cache loading
+# --------------------------------------------------------------------------
+
+def to_content_space(probs: Sequence[Sequence[float]], k: int) -> np.ndarray:
+    """(views, slots) cached probabilities -> (views, content options).
+
+    Content option i sits at slot (i - c) % k under cyclic permutation c.
+    """
+    arr = np.asarray(probs, dtype=np.float64)
+    out = np.empty_like(arr)
+    for c in range(arr.shape[0]):
+        for i in range(k):
+            out[c, i] = arr[c, (i - c) % k]
+    return out
+
+
+def load_cached_run(path: str, k: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Read one <task>_run<r>.jsonl -> (Q, y).
+
+    Q has shape (n_items, n_views, k) in content space; y holds gold content indices.
+    `k` is inferred from the first usable record unless given — ARC/MMLU/RACE are
+    4-choice but CSQA is 5-choice, so it must not be hardcoded. Records whose
+    probability block is not (>=2 views, k options) are skipped: a truncated or
+    single-view record cannot support a cross-view consistency objective.
+    """
+    Q, y = [], []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if rec.get("type") != "result":
+                continue
+            data = rec.get("data") or {}
+            probs = data.get("probs")
+            ideal = data.get("ideal")
+            if not probs or ideal is None:
+                continue
+            arr = np.asarray(probs, dtype=np.float64)
+            if arr.ndim != 2 or arr.shape[0] < 2:
+                continue
+            if k is None:
+                k = int(arr.shape[1])
+            if arr.shape[1] != k:
+                continue
+            gold = OPTION_IDS.index(str(ideal)) if str(ideal) in OPTION_IDS else None
+            if gold is None:
+                continue
+            Q.append(to_content_space(arr, k))
+            y.append(gold)
+    if not Q:
+        raise ValueError(f"no usable records in {path}")
+    views = min(q.shape[0] for q in Q)
+    return np.stack([q[:views] for q in Q]), np.asarray(y, dtype=np.int64)
+
+
+# --------------------------------------------------------------------------
+# Non-parametric Order-Preserving Algorithm
+# --------------------------------------------------------------------------
+
+class OrderPreservingCalibrator:
+    """Monotone map g on [0,1], fitted label-free to make views mutually consistent.
+
+    g is a step function over the sorted unique observed probabilities: with
+    e = exp(theta), S_m = sum_{n<m} e_n and T = S_N, the map sends the m-th
+    smallest observed value to S_m / T. Monotonicity is structural (e_n > 0), so
+    the fit can never reorder two options — that is the "order-preserving" property.
+    """
+
+    def __init__(self, lam: float = 0.05, lr: float = 10.0, epochs: int = 30, seed: int = 0):
+        self.lam = float(lam)
+        self.lr = float(lr)
+        self.epochs = int(epochs)
+        self.seed = int(seed)
+        self.values_: Optional[np.ndarray] = None
+        self.mapped_: Optional[np.ndarray] = None
+
+    # -- internals ---------------------------------------------------------
+    @staticmethod
+    def _g_from_theta(theta: np.ndarray) -> np.ndarray:
+        """theta (N,) -> g (N+1,), the normalized cumulative sum. g[0]=0, g[N]=1."""
+        e = np.exp(theta - theta.max())
+        cs = np.concatenate([[0.0], np.cumsum(e)])
+        return cs / cs[-1]
+
+    @staticmethod
+    def _theta_grad(theta: np.ndarray, dg: np.ndarray) -> np.ndarray:
+        """Chain dL/dg (N+1,) back to dL/dtheta (N,).
+
+        With g_m = S_m / T:  dg_m/dtheta_n = e_n * (1{n < m} - g_m) / T.
+        So dL/dtheta_n = (e_n / T) * (sum_{m > n} dg_m - sum_m dg_m * g_m).
+        """
+        e = np.exp(theta - theta.max())
+        T = e.sum()
+        g = OrderPreservingCalibrator._g_from_theta(theta)
+        # rev[n] = sum_{m >= n} dg_m over m = 0..N, so rev[1:][n] = sum_{m > n} dg_m
+        rev = np.cumsum(dg[::-1])[::-1]
+        return (e / T) * (rev[1:] - float(np.dot(dg, g)))
+
+    def _loss_and_dg(self, g: np.ndarray, idx: np.ndarray) -> Tuple[float, np.ndarray]:
+        """Objective and dL/dg for calibrated views.
+
+        idx has shape (n_items, n_views, k) holding indices into g.
+        """
+        n_items, n_views, k = idx.shape
+        gi = g[idx]                                   # calibrated probabilities
+        dg = np.zeros_like(g)
+        n = float(n_items)
+
+        # (a) each calibrated view should be a distribution
+        resid = gi.sum(axis=2) - 1.0                  # (items, views)
+        loss_sum = float(np.sum(resid ** 2)) / n
+        np.add.at(dg, idx, (2.0 * resid / n)[:, :, None] * np.ones((1, 1, k)))
+
+        # (b) views of the same item should agree per content option
+        mean_over_views = gi.mean(axis=1, keepdims=True)
+        dev = gi - mean_over_views                    # (items, views, k)
+        loss_inv = float(np.sum(dev ** 2)) / n
+        np.add.at(dg, idx, (2.0 * dev / n))
+
+        # (c) keep the map away from the uniform collapse (subtracted, as in the paper)
+        spread = gi - 1.0 / k
+        loss_reg = float(np.sum(spread ** 2)) / n
+        np.add.at(dg, idx, (-2.0 * self.lam * spread / n))
+
+        return loss_sum + loss_inv - self.lam * loss_reg, dg
+
+    # -- public ------------------------------------------------------------
+    def fit(self, Q: np.ndarray, verbose: bool = False) -> "OrderPreservingCalibrator":
+        """Fit on observed probabilities Q of shape (items, views, k). Labels unused."""
+        flat = Q.reshape(-1)
+        values = np.unique(np.concatenate([flat, [0.0, 1.0]]))
+        idx = np.searchsorted(values, Q)              # exact hits by construction
+        theta = np.zeros(len(values) - 1, dtype=np.float64)
+
+        for epoch in range(self.epochs):
+            g = self._g_from_theta(theta)
+            loss, dg = self._loss_and_dg(g, idx)
+            grad = self._theta_grad(theta, dg)
+            theta -= self.lr * grad
+            theta -= theta.mean()                     # fix the shift degeneracy
+            if verbose:
+                print(f"  epoch {epoch:3d}  loss={loss:.6f}")
+
+        self.values_ = values
+        # values[m] -> g[m]; the endpoints pin g(0)=0 and g(1)=1.
+        self.mapped_ = self._g_from_theta(theta)
+        # Enforce the isotonic view the original code fits at the end. The map is
+        # already monotone, so this only clips into range.
+        self.mapped_ = np.clip(np.maximum.accumulate(self.mapped_), 0.0, 1.0)
+        return self
+
+    def transform(self, Q: np.ndarray) -> np.ndarray:
+        """Apply g elementwise, interpolating between observed values."""
+        if self.values_ is None:
+            raise RuntimeError("fit() first")
+        return np.interp(Q, self.values_, self.mapped_)
+
+    def calibrate(self, Q: np.ndarray) -> np.ndarray:
+        """Apply g and renormalize each view to a distribution."""
+        out = self.transform(Q)
+        total = out.sum(axis=-1, keepdims=True)
+        return np.divide(out, total, out=np.full_like(out, 1.0 / out.shape[-1]), where=total > 0)
+
+
+# --------------------------------------------------------------------------
+# evaluation
+# --------------------------------------------------------------------------
+
+def evaluate(Q: np.ndarray, y: np.ndarray, calib_frac: float = 0.02, lam: float = 0.05,
+             epochs: int = 30, seed: int = 0) -> dict:
+    """Head-to-head numbers on one (model, dataset, run).
+
+    The calibrator is fitted on a label-free prefix of `calib_frac` items — the same
+    split ACCEL uses for its prior — and every reported number is computed on the
+    remaining items only, so nothing is scored on data the map saw.
+    """
+    n_items, n_views, k = Q.shape
+    n_calib = max(1, int(round(calib_frac * n_items)))
+    Q_calib, Q_test, y_test = Q[:n_calib], Q[n_calib:], y[n_calib:]
+
+    cal = OrderPreservingCalibrator(lam=lam, epochs=epochs, seed=seed).fit(Q_calib)
+
+    out = {
+        "n_items_total": int(n_items),
+        "n_calib": int(n_calib),
+        "n_test": int(len(y_test)),
+        "n_views": int(n_views),
+        "k": int(k),
+        "methods": {},
+    }
+
+    def record(name: str, preds: np.ndarray, cost: float):
+        out["methods"][name] = {
+            "cost": float(cost),
+            "acc": accuracy(y_test, preds),
+            "recall_std": recall_std(y_test, preds, k),
+        }
+
+    # No debiasing: the model's answer under the original ordering.
+    record("baseline", np.argmax(Q_test[:, 0, :], axis=1), 1.0)
+
+    # CalibraEval at the same budget as baseline: one view, calibrated.
+    record("calibraeval@1", np.argmax(cal.calibrate(Q_test[:, 0, :]), axis=1), 1.0)
+
+    # Cyclic ensembling without calibration, and with it, at full budget.
+    record("cyclic", np.argmax(Q_test.mean(axis=1), axis=1), float(n_views))
+    record(f"calibraeval@{n_views}", np.argmax(cal.calibrate(Q_test).mean(axis=1), axis=1),
+           float(n_views))
+
+    return out
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--run_files", nargs="+", required=True,
+                        help="cached <task>_run<r>.jsonl paths")
+    parser.add_argument("--label", default="", help="tag written into the output json")
+    parser.add_argument("--calib_frac", type=float, default=0.02)
+    parser.add_argument("--lam", type=float, default=0.05)
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--out", default=None, help="write results json here")
+    args = parser.parse_args()
+
+    per_run = []
+    for path in args.run_files:
+        Q, y = load_cached_run(path)
+        res = evaluate(Q, y, calib_frac=args.calib_frac, lam=args.lam, epochs=args.epochs)
+        res["run_file"] = path
+        per_run.append(res)
+        print(f"[{os.path.basename(path)}] n_test={res['n_test']} views={res['n_views']}")
+        for name, m in res["methods"].items():
+            print(f"    {name:>18s}  cost={m['cost']:.2f}  acc={m['acc']:.4f}  rstd={m['recall_std']:.4f}")
+
+    # Average across the seed runs, which is how the paper reports these.
+    summary = {}
+    for name in per_run[0]["methods"]:
+        summary[name] = {
+            key: float(np.mean([r["methods"][name][key] for r in per_run]))
+            for key in ("cost", "acc", "recall_std")
+        }
+    print("\n=== mean over runs ===")
+    for name, m in summary.items():
+        print(f"  {name:>18s}  cost={m['cost']:.2f}  acc={m['acc']:.4f}  rstd={m['recall_std']:.4f}")
+
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump({"label": args.label, "per_run": per_run, "mean": summary}, f, indent=2)
+        print(f"\nwrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()
