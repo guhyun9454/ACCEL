@@ -190,7 +190,9 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
+    print(f"[smoke] loading ARC rows: data={args.data} limit={args.limit}", flush=True)
     rows = load_arc(Path(args.data), args.limit)
+    print(f"[smoke] loading model config/tokenizer: {args.model}", flush=True)
     config = AutoConfig.from_pretrained(args.model, cache_dir=args.cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(
         args.model,
@@ -204,6 +206,7 @@ def main() -> None:
         else AutoModelForCausalLM
     )
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    print(f"[smoke] loading model weights: dtype={dtype}", flush=True)
     model = model_cls.from_pretrained(
         args.model,
         device_map="auto",
@@ -212,6 +215,7 @@ def main() -> None:
         cache_dir=args.cache_dir,
     )
     model.eval()
+    print(f"[smoke] model ready on {model.device}", flush=True)
 
     prompts: List[str] = []
     layout: List[Tuple[str, int, int, int]] = []
@@ -228,6 +232,11 @@ def main() -> None:
     baseline_indices = [idx for idx, entry in enumerate(layout) if entry[0] == "baseline"]
     pair_indices = [idx for idx, entry in enumerate(layout) if entry[0] != "baseline"]
     all_probs = np.zeros((len(prompts), 4), dtype=np.float32)
+    print(
+        f"[smoke] scoring {len(baseline_indices)} baseline prompts "
+        f"and {len(pair_indices)} pairwise prompts",
+        flush=True,
+    )
     all_probs[baseline_indices] = score_prompts(
         model,
         tokenizer,
@@ -246,6 +255,7 @@ def main() -> None:
     )
     all_probs[pair_indices, :2] = pair_probs
     elapsed = time.time() - started
+    print(f"[smoke] scoring complete in {elapsed:.1f}s", flush=True)
 
     records = [
         {
@@ -317,4 +327,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
