@@ -5,12 +5,15 @@ live in two places: ACCEL and PriDe in the sweep that `eval_clm.py` writes to
 `<task>_three_curves_points.json`, and CalibraEval in the json produced by
 `calibraeval_mcq.py`. This merges them per (model, dataset).
 
-Two unit traps in the sweep file, both handled here:
+Three traps in the sweep file, all handled here:
 * `acc` is stored as a **percentage** (78.88) while `recall_std` is a fraction
   (0.0300). Everything is emitted as fractions.
-* `curves.ours_pride.by_alpha[<prefix %>][<variant>]` is indexed by the PriDe
-  prefix, and within it `p` is the th1 percentile — so the operating point the
-  logs call `ours_pride_th12_α0.5_2%` is `by_alpha["2"]["th1/2"]` at `p == 0.5`.
+* ACCEL is `curves.empirical_pride`, not `curves.ours_pride` — the latter is the
+  earlier threshold-cascade line and returns plausible numbers for a different
+  method.
+* Each model has a dozen `__<result_tag>` directories and several carry an
+  `empirical_pride` curve with identical flat/online/empirical/latin settings, so
+  only the exact result_tag identifies the canonical run.
 
 Usage:
     python compare_cost_axis.py --results_root . --tasks arc csqa \
@@ -122,30 +125,36 @@ def load_calibraeval(path: str) -> dict:
     return out
 
 
-def find_sweep(results_root: str, task: str, model: str,
-               require_empirical: bool = True) -> Optional[str]:
-    """Locate the sweep file that actually holds the paper's method.
+# The canonical run per task, given by the person who submitted them. There are
+# a dozen `__<result_tag>` variant directories per model and several of them
+# carry an `empirical_pride` curve with flat/online/empirical/latin settings, so
+# matching on those settings does NOT identify the run -- only the tag does.
+CANONICAL_TAG = {
+    "arc": "empirical_latin_flat_0502",
+    "csqa": "empirical_latin_flat_0502",
+    "mmlu": "empirical_latin_flat",
+    "race": "empirical_latin_flat_0502",
+    "rewardbench": "empirical_latin_flat_0502",
+    "mtbench": "empirical_latin_flat_0502",
+    "prefbench": "empirical_latin_flat_0502",
+}
 
-    The untagged `<task>_full_id-*` directory is an older run whose
-    three_curves_points.json has no `empirical_pride` curve at all; only the
-    `__<result_tag>` run does. I previously filtered the tagged directories out
-    on the assumption that untagged was canonical, which meant the file
-    containing ACCEL was never opened. Selection is now by content -- whichever
-    file carries the curve -- rather than by directory naming.
+
+def find_sweep(results_root: str, task: str, model: str,
+               tag: Optional[str] = None) -> Optional[str]:
+    """Locate the canonical sweep file for (task, model), by exact result_tag.
+
+    Returns None rather than falling back to another directory: a near-miss here
+    silently substitutes a different experiment, which is exactly how earlier
+    numbers came from the wrong run.
     """
+    tag = tag or CANONICAL_TAG.get(task)
+    if not tag:
+        return None
     pattern = os.path.join(results_root, f"results_{task}", f"0s_{model}",
-                           f"{task}_full_id-*", f"{task}_three_curves_points.json")
+                           f"{task}_full_id-*__{tag}", f"{task}_three_curves_points.json")
     hits = sorted(glob.glob(pattern))
-    if not require_empirical:
-        return hits[0] if hits else None
-    for path in hits:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                if "empirical_pride" in (json.load(f).get("curves") or {}):
-                    return path
-        except (ValueError, OSError):
-            continue
-    return None
+    return hits[0] if hits else None
 
 
 def main():
@@ -164,7 +173,10 @@ def main():
             if not sweep_path:
                 missing.append(f"{model}/{task}: no three_curves_points.json")
                 continue
-            entry = {"model": model, "task": task, "methods": load_sweep(sweep_path)}
+            entry = {"model": model, "task": task, "sweep": sweep_path,
+                     "methods": load_sweep(sweep_path)}
+            if "accel" not in entry["methods"]:
+                missing.append(f"{model}/{task}: sweep has no empirical_pride curve")
 
             ce_path = os.path.join(args.calibraeval_dir, f"{model}_{task}.json")
             if os.path.exists(ce_path):
