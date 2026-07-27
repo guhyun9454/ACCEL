@@ -348,3 +348,37 @@ class TestPriorDivisionControl(unittest.TestCase):
         res = evaluate([(P, y)], estimation="full", max_epochs=10)
         self.assertLess(res["methods"]["prior_division@1"]["recall_std"],
                         res["methods"]["baseline"]["recall_std"])
+
+
+class TestCheckpointedFit(unittest.TestCase):
+    """One pass must give the same maps as separate runs to each stopping point."""
+
+    @staticmethod
+    def _data(seed=0, n=40):
+        rng = np.random.default_rng(seed)
+        Q = rng.random((n, 4, 4))
+        Q /= Q.sum(axis=2, keepdims=True)
+        return Q
+
+    def test_yields_every_requested_checkpoint_in_order(self):
+        Q = self._data()
+        seen = [e for e, _ in OrderPreservingCalibrator().fit_with_checkpoints(Q, [3, 1, 7])]
+        self.assertEqual(seen, [1, 3, 7])
+
+    def test_checkpoint_matches_an_independent_run_to_that_epoch(self):
+        # If these diverged, a multi-checkpoint sweep would not be reporting the
+        # same thing as running each stopping point separately.
+        Q = self._data(seed=5)
+        target = 6
+        via_ckpt = None
+        for epoch, cal in OrderPreservingCalibrator().fit_with_checkpoints(Q, [2, target]):
+            if epoch == target:
+                via_ckpt = cal.calibrate(Q[:, 0, :]).copy()
+        direct = OrderPreservingCalibrator(max_epochs=target, tol=0.0).fit(Q)
+        np.testing.assert_allclose(via_ckpt, direct.calibrate(Q[:, 0, :]), rtol=1e-10)
+
+    def test_map_is_usable_at_each_checkpoint(self):
+        Q = self._data(seed=7)
+        for _, cal in OrderPreservingCalibrator().fit_with_checkpoints(Q, [2, 5]):
+            out = cal.calibrate(Q[:, 0, :])
+            np.testing.assert_allclose(out.sum(axis=-1), 1.0, rtol=1e-9)

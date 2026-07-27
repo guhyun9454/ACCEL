@@ -267,6 +267,37 @@ class OrderPreservingCalibrator:
         return loss_sum + loss_inv - self.lam * loss_reg, dg
 
     # -- public ------------------------------------------------------------
+    def snapshot(self, theta: np.ndarray, values: np.ndarray) -> None:
+        """Freeze the current parameters into an applicable map."""
+        self.values_ = values
+        self.mapped_ = np.clip(np.maximum.accumulate(self._g_from_theta(theta), axis=-1), 0.0, 1.0)
+
+    def fit_with_checkpoints(self, Q: np.ndarray, checkpoints):
+        """Fit once, yielding (epoch, self) at each checkpoint.
+
+        The objective keeps decreasing well past any practical epoch budget and
+        the resulting RStd is not monotone in the epoch count, so no single
+        stopping point is defensible on its own. Reporting the same tally at
+        several stopping points shows whether a conclusion depends on where
+        training was halted. Doing it in one pass costs the same as the longest
+        checkpoint instead of one run per stopping point.
+        """
+        k = Q.shape[2]
+        values = np.unique(np.concatenate([Q.reshape(-1), [0.0, 1.0]]))
+        idx = np.searchsorted(values, Q)
+        theta = np.zeros((k, len(values) - 1), dtype=np.float64)
+        targets = sorted(set(int(c) for c in checkpoints))
+
+        for epoch in range(1, max(targets) + 1):
+            g = self._g_from_theta(theta)
+            _, dg = self._loss_and_dg(g, idx)
+            theta = theta - self.lr * self._theta_grad(theta, dg)
+            theta -= theta.mean(axis=-1, keepdims=True)
+            if epoch in targets:
+                self.n_epochs_run_ = epoch
+                self.snapshot(theta, values)
+                yield epoch, self
+
     def fit(self, Q: np.ndarray, verbose: bool = False) -> "OrderPreservingCalibrator":
         """Fit on observed probabilities Q, shape (items, views, k) in slot space.
 
@@ -293,12 +324,10 @@ class OrderPreservingCalibrator:
                     break
             prev_loss = loss
 
-        self.values_ = values
         # values[m] -> g[j, m] for slot j; the endpoints pin g(0)=0 and g(1)=1.
-        mapped = self._g_from_theta(theta)
-        # The isotonic step the original code applies at the end. Rows are already
-        # monotone by construction, so this only guards against numerical drift.
-        self.mapped_ = np.clip(np.maximum.accumulate(mapped, axis=-1), 0.0, 1.0)
+        # The clip/accumulate is the isotonic step the original code applies at
+        # the end; rows are already monotone, so it only guards numerical drift.
+        self.snapshot(theta, values)
         return self
 
     def transform(self, Q: np.ndarray) -> np.ndarray:
