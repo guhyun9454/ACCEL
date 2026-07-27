@@ -32,14 +32,24 @@ def sweep_payload():
         },
         "ours_pride": {"by_alpha": {
             # keyed by PriDe PREFIX; `p` inside is the th1 PERCENTILE.
-            "0.5": {"th1/2": {
-                "p": [0.5, 1.0, 2.0, 5.0],
-                "cost": [1.0210, 1.0305, 1.0410, 1.0800],
-                "acc": [78.900, 78.950, 79.010, 79.100],
-                "recall_std": [0.03700, 0.03600, 0.03450, 0.03300],
-            }},
-            # a decoy: reading the two levels the wrong way round lands here
-            "2": {"th1/2": {
+            "2": {
+                # the paper's setting: prefix alpha=2%, primary variant
+                "th1/sqrt2": {
+                    "p": [0.5, 1.0, 2.0, 5.0],
+                    "cost": [1.0210, 1.0305, 1.0410, 1.0800],
+                    "acc": [78.900, 78.950, 79.010, 79.100],
+                    "recall_std": [0.03700, 0.03600, 0.03450, 0.03300],
+                },
+                # decoy: the superseded variant at the same indices
+                "th1/2": {
+                    "p": [0.5, 1.0, 2.0, 5.0],
+                    "cost": [9.91, 9.92, 9.93, 9.94],
+                    "acc": [1.0, 1.0, 1.0, 1.0],
+                    "recall_std": [9.9, 9.9, 9.9, 9.9],
+                },
+            },
+            # decoy: reading the prefix level wrong lands here
+            "0.5": {"th1/sqrt2": {
                 "p": [0.5, 1.0, 2.0],
                 "cost": [1.0730, 1.0807, 1.0904],
                 "acc": [79.084, 78.970, 78.970],
@@ -90,19 +100,18 @@ class TestLoadSweep(unittest.TestCase):
         self.assertAlmostEqual(p["acc"], 0.7920)
 
     def test_accel_matches_the_logged_operating_point(self):
-        # eval_clm.py logs `ours_pride_th12_α0.5_2%` from
-        #     for alpha in pride_alphas:   # PriDe prefix  -> 0.5
-        #         for p in pride_fracs:    # th1 percentile -> 2
-        # so the prefix is 0.5 and the th1 percentile is 2, not the reverse.
-        # The decoy block by_alpha["2"] at p=0.5 is what the flipped reading
-        # returns, and it is a different configuration entirely (cost 1.073 vs
-        # 1.041) -- with no error to reveal the mistake.
+        # Paper Figure 1: calibration prefix alpha = 2%, threshold percentile
+        # beta swept from 2. by_alpha is keyed by the prefix and `p` inside is
+        # beta, and the plotted method is PRIMARY_OURS_LABEL = "th1/sqrt2".
+        # Both decoys below are real blocks at plausible-looking indices, so a
+        # wrong reading returns numbers rather than an error.
         a = self.methods["accel"]
-        self.assertAlmostEqual(a["prefix_pct"], 0.5)
+        self.assertAlmostEqual(a["prefix_pct"], 2.0)
         self.assertAlmostEqual(a["th1_pct"], 2.0)
         self.assertAlmostEqual(a["cost"], 1.0410)
         self.assertAlmostEqual(a["acc"], 0.79010)
-        self.assertNotAlmostEqual(a["cost"], 1.0730, msg="read the decoy block")
+        self.assertNotAlmostEqual(a["cost"], 1.0730, msg="read the wrong prefix")
+        self.assertLess(a["recall_std"], 1.0, "read the superseded th1/2 variant")
 
     def test_all_recall_stds_stay_fractions(self):
         for name, m in self.methods.items():

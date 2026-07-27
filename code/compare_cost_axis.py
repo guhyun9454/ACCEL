@@ -24,21 +24,24 @@ import json
 import os
 from typing import Optional
 
-# The configuration the sweep commands actually ran (--empirical_pride,
-# --empirical_transition_mode latin, alpha 2%).
+# Pinned to the configuration the paper reports, not to whatever a log line
+# happened to show. Figure 1: "For our proposed framework (ACCEL), we fix the
+# calibration prefix ratio at alpha = 2% and vary the threshold percentile
+# beta in {2,5,10,20,30,40,50,60,70,80}."
 #
-# The logged operating point is `ours_pride_th12_α0.5_2%`. eval_clm.py builds
-# that label as
-#     for alpha in pride_alphas:      # PriDe prefix
-#         for p in pride_fracs:       # th1 percentile
-#             f"ours_pride_th12_α{alpha}_{p}%"
-# so alpha=0.5 is the *prefix* and 2% is the *th1 percentile* -- the opposite of
-# what the names suggest. by_alpha is keyed by the prefix, and `p` inside each
-# block is the th1 percentile, hence by_alpha["0.5"] at p == 2.0.
+# Mapping into three_curves_points.json, verified against eval_clm.py:
+#   curves.ours_pride.by_alpha is keyed by the PriDe prefix (pride_alphas),
+#   and `p` inside each block is the threshold percentile -- it is passed to
+#   get_heur_stats_by_th1_p(cobjs, th1_p) with sweep_key="th1_p".
+# So the paper's setting is by_alpha["2"] at p = beta.
+#
+# Variant: eval_clm.py defines PRIMARY_OURS_LABEL = "th1/sqrt2" and
+# LEGACY_OURS_LABEL = "th1/2". The primary one is what curves.ours carries, so
+# that is the method the paper plots; "th1/2" is a superseded variant.
 PRIDE_PREFIX_PCT = 2.0        # PriDe's own alpha sweep, read from default_pride.p
-ACCEL_VARIANT = "th1/2"
-ACCEL_PREFIX_KEY = "0.5"      # by_alpha key = PriDe prefix used by ACCEL
-ACCEL_TH1_PCT = 2.0           # p inside that block = th1 percentile
+ACCEL_VARIANT = "th1/sqrt2"   # PRIMARY_OURS_LABEL
+ACCEL_PREFIX_KEY = "2"        # by_alpha key = calibration prefix alpha = 2%
+ACCEL_TH1_PCT = 2.0           # beta, the cheapest point of the paper's sweep
 
 
 def _as_fraction(acc) -> float:
