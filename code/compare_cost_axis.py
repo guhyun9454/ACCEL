@@ -24,24 +24,26 @@ import json
 import os
 from typing import Optional
 
-# Pinned to the configuration the paper reports, not to whatever a log line
-# happened to show. Figure 1: "For our proposed framework (ACCEL), we fix the
-# calibration prefix ratio at alpha = 2% and vary the threshold percentile
-# beta in {2,5,10,20,30,40,50,60,70,80}."
+# ACCEL = the empirical-residual + Latin-square method, which lives in
+# `curves.empirical_pride` -- NOT in `curves.ours_pride`. The latter holds the
+# threshold-cascade variants (th1/2, th1/sqrt2, online sqrt) from the earlier ARR
+# line; they carry the word "ours" but are a different method.
 #
-# Mapping into three_curves_points.json, verified against eval_clm.py:
-#   curves.ours_pride.by_alpha is keyed by the PriDe prefix (pride_alphas),
-#   and `p` inside each block is the threshold percentile -- it is passed to
-#   get_heur_stats_by_th1_p(cobjs, th1_p) with sweep_key="th1_p".
-# So the paper's setting is by_alpha["2"] at p = beta.
+# Identified by matching the run command
+# (--empirical_pride --empirical_residual_model empirical
+#  --empirical_stage_schedule flat --empirical_transition_mode latin)
+# and paper §3.5 ("flat schedule ... online running beta-th percentile") against
+# the log family `empirical_pride_pct_flat_online_latin_a{alpha}_{beta}%`.
+# Values were then cross-checked: the json curve and those log lines agree to 4
+# decimals at every beta, so this is confirmed by two independent sources rather
+# than by assumption.
 #
-# Variant: eval_clm.py defines PRIMARY_OURS_LABEL = "th1/sqrt2" and
-# LEGACY_OURS_LABEL = "th1/2". The primary one is what curves.ours carries, so
-# that is the method the paper plots; "th1/2" is a superseded variant.
+# `empirical_pride.by_alpha` has a single key "2" (the calibration prefix
+# alpha=2% of paper Fig. 1), and `p` inside `primary` is beta.
 PRIDE_PREFIX_PCT = 2.0        # PriDe's own alpha sweep, read from default_pride.p
-ACCEL_VARIANT = "th1/sqrt2"   # PRIMARY_OURS_LABEL
-ACCEL_PREFIX_KEY = "2"        # by_alpha key = calibration prefix alpha = 2%
-ACCEL_TH1_PCT = 2.0           # beta, the cheapest point of the paper's sweep
+ACCEL_PREFIX_KEY = "2"        # calibration prefix alpha = 2%
+ACCEL_BLOCK = "primary"
+ACCEL_BETA = 2.0              # cheapest point of the paper's beta sweep
 
 
 def _as_fraction(acc) -> float:
@@ -85,21 +87,27 @@ def load_sweep(path: str) -> dict:
             "alpha_pct": float(pride["p"][i]),
         }
 
-    by_alpha = (curves.get("ours_pride") or {}).get("by_alpha") or {}
-    variant = None
-    for key in (ACCEL_PREFIX_KEY, str(float(ACCEL_PREFIX_KEY))):
-        if key in by_alpha:
-            variant = by_alpha[key].get(ACCEL_VARIANT)
-            break
-    if variant and variant.get("p"):
-        i = _nearest_index(variant["p"], ACCEL_TH1_PCT)
-        out["accel"] = {
-            "cost": float(variant["cost"][i]),
-            "acc": _as_fraction(variant["acc"][i]),
-            "recall_std": float(variant["recall_std"][i]),
-            "prefix_pct": float(ACCEL_PREFIX_KEY),
-            "th1_pct": float(variant["p"][i]),
-        }
+    emp = curves.get("empirical_pride")
+    if emp:
+        by_alpha = emp.get("by_alpha") or {}
+        block = None
+        for key in (ACCEL_PREFIX_KEY, str(float(ACCEL_PREFIX_KEY))):
+            if key in by_alpha:
+                block = by_alpha[key].get(ACCEL_BLOCK)
+                break
+        if block and block.get("p"):
+            i = _nearest_index(block["p"], ACCEL_BETA)
+            out["accel"] = {
+                "cost": float(block["cost"][i]),
+                "acc": _as_fraction(block["acc"][i]),
+                "recall_std": float(block["recall_std"][i]),
+                "prefix_pct": float(ACCEL_PREFIX_KEY),
+                "beta": float(block["p"][i]),
+                "schedule": emp.get("threshold_schedule"),
+                "percentile_mode": emp.get("percentile_mode"),
+                "residual_model": emp.get("residual_model"),
+                "transition_mode": emp.get("transition_mode"),
+            }
     return out
 
 
@@ -114,11 +122,30 @@ def load_calibraeval(path: str) -> dict:
     return out
 
 
-def find_sweep(results_root: str, task: str, model: str) -> Optional[str]:
+def find_sweep(results_root: str, task: str, model: str,
+               require_empirical: bool = True) -> Optional[str]:
+    """Locate the sweep file that actually holds the paper's method.
+
+    The untagged `<task>_full_id-*` directory is an older run whose
+    three_curves_points.json has no `empirical_pride` curve at all; only the
+    `__<result_tag>` run does. I previously filtered the tagged directories out
+    on the assumption that untagged was canonical, which meant the file
+    containing ACCEL was never opened. Selection is now by content -- whichever
+    file carries the curve -- rather than by directory naming.
+    """
     pattern = os.path.join(results_root, f"results_{task}", f"0s_{model}",
                            f"{task}_full_id-*", f"{task}_three_curves_points.json")
-    hits = [p for p in glob.glob(pattern) if "__" not in os.path.basename(os.path.dirname(p))]
-    return hits[0] if hits else None
+    hits = sorted(glob.glob(pattern))
+    if not require_empirical:
+        return hits[0] if hits else None
+    for path in hits:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                if "empirical_pride" in (json.load(f).get("curves") or {}):
+                    return path
+        except (ValueError, OSError):
+            continue
+    return None
 
 
 def main():
