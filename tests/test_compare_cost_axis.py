@@ -31,13 +31,20 @@ def sweep_payload():
             "recall_std": [0.0350, 0.0385, 0.0355, 0.0299],
         },
         "ours_pride": {"by_alpha": {
+            # keyed by PriDe PREFIX; `p` inside is the th1 PERCENTILE.
+            "0.5": {"th1/2": {
+                "p": [0.5, 1.0, 2.0, 5.0],
+                "cost": [1.0210, 1.0305, 1.0410, 1.0800],
+                "acc": [78.900, 78.950, 79.010, 79.100],
+                "recall_std": [0.03700, 0.03600, 0.03450, 0.03300],
+            }},
+            # a decoy: reading the two levels the wrong way round lands here
             "2": {"th1/2": {
                 "p": [0.5, 1.0, 2.0],
                 "cost": [1.0730, 1.0807, 1.0904],
                 "acc": [79.084, 78.970, 78.970],
                 "recall_std": [0.03529, 0.03390, 0.03258],
             }},
-            "5": {"th1/2": {"p": [0.5], "cost": [9.9], "acc": [1.0], "recall_std": [9.9]}},
         }},
     }}
 
@@ -82,13 +89,20 @@ class TestLoadSweep(unittest.TestCase):
         self.assertAlmostEqual(p["cost"], 1.059)
         self.assertAlmostEqual(p["acc"], 0.7920)
 
-    def test_accel_reads_the_2pct_prefix_block_at_th1_0p5(self):
-        # by_alpha is keyed by PriDe prefix; p inside it is the th1 percentile.
-        # Picking the wrong level silently returns another configuration.
+    def test_accel_matches_the_logged_operating_point(self):
+        # eval_clm.py logs `ours_pride_th12_α0.5_2%` from
+        #     for alpha in pride_alphas:   # PriDe prefix  -> 0.5
+        #         for p in pride_fracs:    # th1 percentile -> 2
+        # so the prefix is 0.5 and the th1 percentile is 2, not the reverse.
+        # The decoy block by_alpha["2"] at p=0.5 is what the flipped reading
+        # returns, and it is a different configuration entirely (cost 1.073 vs
+        # 1.041) -- with no error to reveal the mistake.
         a = self.methods["accel"]
-        self.assertAlmostEqual(a["cost"], 1.0730)
-        self.assertAlmostEqual(a["th1_pct"], 0.5)
-        self.assertAlmostEqual(a["acc"], 0.79084)
+        self.assertAlmostEqual(a["prefix_pct"], 0.5)
+        self.assertAlmostEqual(a["th1_pct"], 2.0)
+        self.assertAlmostEqual(a["cost"], 1.0410)
+        self.assertAlmostEqual(a["acc"], 0.79010)
+        self.assertNotAlmostEqual(a["cost"], 1.0730, msg="read the decoy block")
 
     def test_all_recall_stds_stay_fractions(self):
         for name, m in self.methods.items():

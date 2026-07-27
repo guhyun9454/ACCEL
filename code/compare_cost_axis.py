@@ -26,9 +26,19 @@ from typing import Optional
 
 # The configuration the sweep commands actually ran (--empirical_pride,
 # --empirical_transition_mode latin, alpha 2%).
-PRIDE_PREFIX_PCT = 2.0
+#
+# The logged operating point is `ours_pride_th12_α0.5_2%`. eval_clm.py builds
+# that label as
+#     for alpha in pride_alphas:      # PriDe prefix
+#         for p in pride_fracs:       # th1 percentile
+#             f"ours_pride_th12_α{alpha}_{p}%"
+# so alpha=0.5 is the *prefix* and 2% is the *th1 percentile* -- the opposite of
+# what the names suggest. by_alpha is keyed by the prefix, and `p` inside each
+# block is the th1 percentile, hence by_alpha["0.5"] at p == 2.0.
+PRIDE_PREFIX_PCT = 2.0        # PriDe's own alpha sweep, read from default_pride.p
 ACCEL_VARIANT = "th1/2"
-ACCEL_TH1_PCT = 0.5
+ACCEL_PREFIX_KEY = "0.5"      # by_alpha key = PriDe prefix used by ACCEL
+ACCEL_TH1_PCT = 2.0           # p inside that block = th1 percentile
 
 
 def _as_fraction(acc) -> float:
@@ -74,7 +84,7 @@ def load_sweep(path: str) -> dict:
 
     by_alpha = (curves.get("ours_pride") or {}).get("by_alpha") or {}
     variant = None
-    for key in (str(int(PRIDE_PREFIX_PCT)), str(PRIDE_PREFIX_PCT)):
+    for key in (ACCEL_PREFIX_KEY, str(float(ACCEL_PREFIX_KEY))):
         if key in by_alpha:
             variant = by_alpha[key].get(ACCEL_VARIANT)
             break
@@ -84,7 +94,7 @@ def load_sweep(path: str) -> dict:
             "cost": float(variant["cost"][i]),
             "acc": _as_fraction(variant["acc"][i]),
             "recall_std": float(variant["recall_std"][i]),
-            "alpha_pct": PRIDE_PREFIX_PCT,
+            "prefix_pct": float(ACCEL_PREFIX_KEY),
             "th1_pct": float(variant["p"][i]),
         }
     return out
