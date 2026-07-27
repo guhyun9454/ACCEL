@@ -397,6 +397,17 @@ def evaluate(parts, estimation: str = "full", calib_frac: float = 0.02,
         """(items, views, k) slot space -> content space, un-rotating each view."""
         return np.stack([to_content_space(item, k) for item in views_slot])
 
+    # Validity control. A per-slot monotone map fitted to make views agree is
+    # suspiciously close to just learning the option-position prior, which is what
+    # PriDe removes by division. If this far simpler baseline matches
+    # calibraeval@1, then what the comparison measures is "a better prior
+    # estimator", not "CalibraEval" — so it is reported alongside rather than
+    # left implicit.
+    prior = Q_calib.reshape(-1, k).mean(axis=0)
+    prior = prior / prior.sum()
+    divided = Q_test[:, 0, :] / prior[None, :]
+    record("prior_division@1", np.argmax(divided, axis=1), 1.0)
+
     # View 0 presents options in their original order, so slot index == content index.
     record("baseline", np.argmax(Q_test[:, 0, :], axis=1), 1.0)
 

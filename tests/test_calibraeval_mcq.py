@@ -214,7 +214,8 @@ class TestEvaluate(unittest.TestCase):
         res = evaluate([(P, y)], estimation='prefix', calib_frac=0.1, max_epochs=5)
         self.assertEqual(res["n_calib"] + res["n_test"], len(y))
         self.assertEqual(set(res["methods"]),
-                         {"baseline", "calibraeval@1", "cyclic", "calibraeval@4"})
+                         {"baseline", "calibraeval@1", "prior_division@1",
+                          "cyclic", "calibraeval@4"})
         self.assertEqual(res["methods"]["baseline"]["cost"], 1.0)
         self.assertEqual(res["methods"]["calibraeval@4"]["cost"], 4.0)
         # no position bias and a clean signal -> the uncalibrated routes are strong
@@ -296,3 +297,22 @@ class TestEvaluate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPriorDivisionControl(unittest.TestCase):
+    """The control that tells us what the competitor column is actually measuring."""
+
+    def test_it_is_reported(self):
+        P, y = TestEvaluate._biased_cache(n=120)
+        res = evaluate([(P, y)], estimation="full", max_epochs=10)
+        self.assertIn("prior_division@1", res["methods"])
+        self.assertEqual(res["methods"]["prior_division@1"]["cost"], 1.0)
+
+    def test_it_removes_an_injected_slot_prior(self):
+        # With a slot-0 preference baked in, dividing by the estimated per-slot
+        # prior must cut recall_std relative to the raw baseline -- otherwise the
+        # control is not doing its job and cannot rule anything out.
+        P, y = TestEvaluate._biased_cache(n=600, slot0_boost=0.9)
+        res = evaluate([(P, y)], estimation="full", max_epochs=10)
+        self.assertLess(res["methods"]["prior_division@1"]["recall_std"],
+                        res["methods"]["baseline"]["recall_std"])
