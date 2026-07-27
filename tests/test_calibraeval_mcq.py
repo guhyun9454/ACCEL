@@ -107,7 +107,7 @@ class TestCalibratorInternals(unittest.TestCase):
         rng = np.random.default_rng(1)
         Q = rng.random((40, 4, 4))
         Q /= Q.sum(axis=2, keepdims=True)
-        cal = OrderPreservingCalibrator(epochs=5).fit(Q)
+        cal = OrderPreservingCalibrator(max_epochs=5).fit(Q)
         out = cal.transform(Q)
         for j in range(4):
             before = Q[:, :, j].reshape(-1)
@@ -134,7 +134,7 @@ class TestCalibratorInternals(unittest.TestCase):
         rng = np.random.default_rng(2)
         Q = rng.random((20, 4, 4))
         Q /= Q.sum(axis=2, keepdims=True)
-        cal = OrderPreservingCalibrator(epochs=5).fit(Q)
+        cal = OrderPreservingCalibrator(max_epochs=5).fit(Q)
         np.testing.assert_allclose(cal.calibrate(Q).sum(axis=-1), 1.0, rtol=1e-9)
 
     def test_loss_decreases(self):
@@ -211,7 +211,7 @@ class TestEvaluate(unittest.TestCase):
 
     def test_reports_all_regimes_on_heldout_items(self):
         P, y = self._biased_cache(slot0_boost=0.0)
-        res = evaluate([(P, y)], calib_frac=0.1, epochs=5)
+        res = evaluate([(P, y)], estimation='prefix', calib_frac=0.1, max_epochs=5)
         self.assertEqual(res["n_calib"] + res["n_test"], len(y))
         self.assertEqual(set(res["methods"]),
                          {"baseline", "calibraeval@1", "cyclic", "calibraeval@4"})
@@ -226,7 +226,7 @@ class TestEvaluate(unittest.TestCase):
         # uncalibrated baseline over-predicts whichever content option sits at slot
         # 0, inflating recall_std. Per-slot calibration should pull that back.
         P, y = self._biased_cache(slot0_boost=0.9)
-        res = evaluate([(P, y)], calib_frac=0.2, epochs=40)
+        res = evaluate([(P, y)], estimation='prefix', calib_frac=0.2, max_epochs=40)
         base = res["methods"]["baseline"]
         cal = res["methods"]["calibraeval@1"]
         self.assertGreater(base["recall_std"], 0.05, "fixture failed to inject bias")
@@ -237,7 +237,7 @@ class TestEvaluate(unittest.TestCase):
         Q = rng.random((100, 4, 4))
         Q /= Q.sum(axis=2, keepdims=True)
         y = rng.integers(0, 4, size=100)
-        res = evaluate([(Q, y)], calib_frac=0.1, epochs=2)
+        res = evaluate([(Q, y)], estimation='prefix', calib_frac=0.1, max_epochs=2)
         self.assertEqual(res["n_calib"], 10)
         self.assertEqual(res["n_test"], 90)
 
@@ -250,7 +250,7 @@ class TestEvaluate(unittest.TestCase):
             Q = rng.random((40, 4, 4))
             Q /= Q.sum(axis=2, keepdims=True)
             parts.append((Q, rng.integers(0, 4, size=40)))
-        res = evaluate(parts, calib_frac=0.1, epochs=2)
+        res = evaluate(parts, estimation='prefix', calib_frac=0.1, max_epochs=2)
         self.assertEqual(res["n_blocks"], 5)
         self.assertEqual(res["n_calib"], 5 * 4)     # 10% of each 40-item block
         self.assertEqual(res["n_test"], 5 * 36)
@@ -258,6 +258,40 @@ class TestEvaluate(unittest.TestCase):
     def test_rejects_bare_arrays(self):
         with self.assertRaises(TypeError):
             evaluate(np.zeros((4, 4, 4)), np.zeros(4))
+
+    def test_rejects_unknown_estimation_mode(self):
+        P, y = self._biased_cache(n=40)
+        with self.assertRaises(ValueError):
+            evaluate([(P, y)], estimation="half")
+
+    def test_full_estimation_uses_and_scores_every_item(self):
+        # Paper §4.3: the calibration map is fitted on the whole test set without
+        # gold labels, and results are reported over that same set.
+        P, y = self._biased_cache(n=120, slot0_boost=0.9)
+        res = evaluate([(P, y)], estimation="full", max_epochs=20)
+        self.assertEqual(res["estimation"], "full")
+        self.assertEqual(res["n_calib"], len(y))
+        self.assertEqual(res["n_test"], len(y))
+
+    def test_prefix_mode_fits_on_a_small_holdout_and_scores_the_rest(self):
+        # Deliberately not asserting that one mode scores better than the other:
+        # which wins is an empirical question about real data, and a synthetic
+        # fixture can be made to favour either.
+        P, y = self._biased_cache(n=600, slot0_boost=0.9)
+        prefix = evaluate([(P, y)], estimation="prefix", calib_frac=0.02, max_epochs=30)
+        self.assertEqual(prefix["n_calib"], 12)
+        self.assertEqual(prefix["n_test"], 588)
+        self.assertEqual(prefix["estimation"], "prefix")
+
+    def test_relative_loss_stopping_triggers(self):
+        # A loose tolerance must stop early; the epoch cap is only a backstop.
+        P, y = self._biased_cache(n=200)
+        res = evaluate([(P, y)], estimation="full", max_epochs=500, tol=1e-2)
+        self.assertTrue(res["converged"])
+        self.assertLess(res["epochs_run"], 500)
+
+    def test_default_lambda_is_the_paper_value(self):
+        self.assertEqual(OrderPreservingCalibrator().lam, 0.5)
 
 
 if __name__ == "__main__":

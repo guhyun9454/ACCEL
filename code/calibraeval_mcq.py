@@ -168,13 +168,28 @@ class OrderPreservingCalibrator:
     is how this was caught.
     """
 
-    def __init__(self, lam: float = 0.05, lr: float = 10.0, epochs: int = 30, seed: int = 0):
+    # Paper §4.3: lambda = 0.5, gamma (lr) = 10.
+    # NOTE the released code calls iso_regression(..., lam=0.05) — a 10x
+    # disagreement with the paper. The paper value is the default here; pass lam
+    # explicitly to reproduce the repo instead.
+    #
+    # The paper stops when the summed parameter change drops below eps = 0.001.
+    # That threshold does not transfer: our grid has one parameter per distinct
+    # observed probability *per option slot* (~9.6k x 4 = 38k on a real dataset),
+    # and sum|dtheta| starts around 80 and decays slowly, so an absolute sum of
+    # 1e-3 is unreachable regardless of convergence. Stopping on the relative
+    # change in the objective instead is scale-free and measures the same thing.
+    def __init__(self, lam: float = 0.5, lr: float = 10.0, max_epochs: int = 2000,
+                 tol: float = 1e-6, seed: int = 0):
         self.lam = float(lam)
         self.lr = float(lr)
-        self.epochs = int(epochs)
+        self.max_epochs = int(max_epochs)
+        self.tol = float(tol)
         self.seed = int(seed)
         self.values_: Optional[np.ndarray] = None
         self.mapped_: Optional[np.ndarray] = None
+        self.n_epochs_run_: int = 0
+        self.converged_: bool = False
 
     # -- internals ---------------------------------------------------------
     @staticmethod
@@ -262,13 +277,21 @@ class OrderPreservingCalibrator:
         idx = np.searchsorted(values, Q)              # exact hits by construction
         theta = np.zeros((k, len(values) - 1), dtype=np.float64)
 
-        for epoch in range(self.epochs):
+        prev_loss = None
+        for epoch in range(self.max_epochs):
             g = self._g_from_theta(theta)
             loss, dg = self._loss_and_dg(g, idx)
             theta = theta - self.lr * self._theta_grad(theta, dg)
             theta -= theta.mean(axis=-1, keepdims=True)   # fix the per-row shift degeneracy
+            self.n_epochs_run_ = epoch + 1
             if verbose:
-                print(f"  epoch {epoch:3d}  loss={loss:.6f}")
+                print(f"  epoch {epoch:4d}  loss={loss:.8f}")
+            if prev_loss is not None:
+                rel = abs(prev_loss - loss) / max(abs(prev_loss), 1e-12)
+                if rel < self.tol:
+                    self.converged_ = True
+                    break
+            prev_loss = loss
 
         self.values_ = values
         # values[m] -> g[j, m] for slot j; the endpoints pin g(0)=0 and g(1)=1.
@@ -299,44 +322,67 @@ class OrderPreservingCalibrator:
 # evaluation
 # --------------------------------------------------------------------------
 
-def evaluate(parts, calib_frac: float = 0.02, lam: float = 0.05,
-             epochs: int = 30, seed: int = 0) -> dict:
+def evaluate(parts, estimation: str = "full", calib_frac: float = 0.02,
+             lam: float = 0.5, max_epochs: int = 2000, tol: float = 1e-6,
+             seed: int = 0) -> dict:
     """Head-to-head numbers for one run.
 
-    `parts` is a list of (Q, y) blocks — one per cached file. MMLU stores a file
-    per subject, so the calibration prefix is taken *within each block* and then
-    pooled; taking it from the concatenation instead would draw the whole
-    calibration set from whichever subject sorts first. For ARC/CSQA there is a
-    single block and this reduces to a plain prefix.
+    `parts` is a list of (Q, y) blocks — one per cached file (MMLU ships one file
+    per subject; ARC/CSQA/RACE ship one).
 
-    The calibrator never sees labels, and every reported number is computed on the
-    held-out remainder only.
+    `estimation` selects the calibration-set protocol:
+
+    * ``"full"`` (default, and what the paper does) — the map is fitted on **all**
+      test items without their labels, and every method is scored on all items.
+      Paper §4.3: *"the entire test set without the gold labels … For a fair
+      comparison, we opted for the latter approach."* CalibraEval is label-free
+      and reuses the already-computed observed distributions, so this costs it
+      nothing extra. Giving it a small prefix instead handicaps it — Figure 6
+      shows 10 % already recovers >85 % of the full-data benefit.
+    * ``"prefix"`` — fit on the first `calib_frac` of each block and score on the
+      remainder. Kept only to show what the handicapped setting looks like. The
+      prefix is taken *within* each block, because on MMLU a prefix of the
+      concatenation would come entirely from whichever subject sorts first.
+
+    Labels are never used for fitting under either mode.
     """
     if isinstance(parts, np.ndarray):  # single (Q, y) passed directly
         raise TypeError("evaluate() takes a list of (Q, y) blocks")
+    if estimation not in ("full", "prefix"):
+        raise ValueError(f"estimation must be 'full' or 'prefix', got {estimation!r}")
 
-    calib_blocks, test_Q, test_y = [], [], []
-    for Q, y in parts:
-        n_calib = max(1, int(round(calib_frac * len(Q))))
-        calib_blocks.append(Q[:n_calib])
-        test_Q.append(Q[n_calib:])
-        test_y.append(y[n_calib:])
+    if estimation == "full":
+        Q_test = np.concatenate([Q for Q, _ in parts], axis=0)
+        y_test = np.concatenate([y for _, y in parts], axis=0)
+        Q_calib = Q_test
+    else:
+        calib_blocks, test_Q, test_y = [], [], []
+        for Q, y in parts:
+            n_calib = max(1, int(round(calib_frac * len(Q))))
+            calib_blocks.append(Q[:n_calib])
+            test_Q.append(Q[n_calib:])
+            test_y.append(y[n_calib:])
+        Q_calib = np.concatenate(calib_blocks, axis=0)
+        Q_test = np.concatenate(test_Q, axis=0)
+        y_test = np.concatenate(test_y, axis=0)
 
-    Q_calib = np.concatenate(calib_blocks, axis=0)
-    Q_test = np.concatenate(test_Q, axis=0)
-    y_test = np.concatenate(test_y, axis=0)
     n_items = sum(len(Q) for Q, _ in parts)
     n_views, k = Q_test.shape[1], Q_test.shape[2]
 
-    cal = OrderPreservingCalibrator(lam=lam, epochs=epochs, seed=seed).fit(Q_calib)
+    cal = OrderPreservingCalibrator(lam=lam, max_epochs=max_epochs, tol=tol,
+                                    seed=seed).fit(Q_calib)
 
     out = {
         "n_items_total": int(n_items),
+        "estimation": estimation,
         "n_calib": int(len(Q_calib)),
         "n_test": int(len(y_test)),
         "n_blocks": len(parts),
         "n_views": int(n_views),
         "k": int(k),
+        "lam": float(lam),
+        "epochs_run": int(cal.n_epochs_run_),
+        "converged": bool(cal.converged_),
         "methods": {},
     }
 
@@ -385,9 +431,14 @@ def main():
     parser.add_argument("--run_files", nargs="+", required=True,
                         help="cached <task>_run<r>.jsonl paths")
     parser.add_argument("--label", default="", help="tag written into the output json")
-    parser.add_argument("--calib_frac", type=float, default=0.02)
-    parser.add_argument("--lam", type=float, default=0.05)
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--estimation", default="full", choices=["full", "prefix"],
+                        help="'full' = paper protocol (whole test set, label-free)")
+    parser.add_argument("--calib_frac", type=float, default=0.02,
+                        help="only used when --estimation prefix")
+    parser.add_argument("--lam", type=float, default=0.5, help="paper value; repo uses 0.05")
+    parser.add_argument("--max_epochs", type=int, default=2000)
+    parser.add_argument("--tol", type=float, default=1e-6,
+                        help="relative objective change at which to stop")
     parser.add_argument("--out", default=None, help="write results json here")
     args = parser.parse_args()
 
@@ -396,11 +447,14 @@ def main():
     for run_key in sorted(groups):
         files = sorted(groups[run_key])
         parts = [load_cached_run(p) for p in files]
-        res = evaluate(parts, calib_frac=args.calib_frac, lam=args.lam, epochs=args.epochs)
+        res = evaluate(parts, estimation=args.estimation, calib_frac=args.calib_frac,
+                       lam=args.lam, max_epochs=args.max_epochs, tol=args.tol)
         res["run"] = run_key
         res["n_files"] = len(files)
         per_run.append(res)
-        print(f"[run{run_key}] files={len(files)} n_test={res['n_test']} views={res['n_views']} k={res['k']}")
+        print(f"[run{run_key}] files={len(files)} n_test={res['n_test']} views={res['n_views']} "
+              f"k={res['k']} est={res['estimation']} lam={res['lam']} "
+              f"epochs={res['epochs_run']} converged={res['converged']}")
         for name, m in res["methods"].items():
             print(f"    {name:>18s}  cost={m['cost']:.2f}  acc={m['acc']:.4f}  rstd={m['recall_std']:.4f}")
 
