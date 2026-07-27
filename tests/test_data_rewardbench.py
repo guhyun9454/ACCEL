@@ -5,9 +5,20 @@ import random
 import sys
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code" / "data_rewardbench"))
+# Every data_*/process.py is named "process", so a plain `import process` binds
+# whichever directory happened to be imported first and the other test modules
+# silently get the wrong one. Load this one by path under a unique name.
+import importlib.util
 
-from process import collapse_ws, collect, to_row  # noqa: E402
+_spec = importlib.util.spec_from_file_location(
+    "rewardbench_process",
+    Path(__file__).resolve().parents[1] / "code" / "data_rewardbench" / "process.py")
+_rb = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_rb)
+
+collapse_ws = _rb.collapse_ws
+collect = _rb.collect
+to_row = _rb.to_row
 
 SAMPLE = {
     "prompt": "What is 2+2?  ",
