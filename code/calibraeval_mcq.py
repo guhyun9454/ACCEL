@@ -355,6 +355,7 @@ def evaluate(parts, estimation: str = "full", calib_frac: float = 0.02,
         Q_test = np.concatenate([Q for Q, _ in parts], axis=0)
         y_test = np.concatenate([y for _, y in parts], axis=0)
         Q_calib = Q_test
+        block_sizes = [len(Q) for Q, _ in parts]
     else:
         calib_blocks, test_Q, test_y = [], [], []
         for Q, y in parts:
@@ -365,6 +366,7 @@ def evaluate(parts, estimation: str = "full", calib_frac: float = 0.02,
         Q_calib = np.concatenate(calib_blocks, axis=0)
         Q_test = np.concatenate(test_Q, axis=0)
         y_test = np.concatenate(test_y, axis=0)
+        block_sizes = [len(b) for b in test_Q]
 
     n_items = sum(len(Q) for Q, _ in parts)
     n_views, k = Q_test.shape[1], Q_test.shape[2]
@@ -387,11 +389,35 @@ def evaluate(parts, estimation: str = "full", calib_frac: float = 0.02,
     }
 
     def record(name: str, preds: np.ndarray, cost: float):
-        out["methods"][name] = {
+        # recall_std is reported BOTH ways because they are different quantities and
+        # eval_clm.py uses the macro one for MMLU (_macro_mean_std_over_runs:
+        # "57개 과목 macro 평균"). One MMLU subject has ~100-200 items, so ~25-50
+        # per gold position; per-class recall on that few items carries enough
+        # sampling noise that the macro average sits at a floor set by subject size
+        # rather than by the method. Pooling all 57 subjects gives >3000 items per
+        # position and that floor disappears. Comparing a pooled number against
+        # eval_clm's macro number silently compares different things -- which is
+        # exactly the mistake this field exists to prevent.
+        entry = {
             "cost": float(cost),
             "acc": accuracy(y_test, preds),
-            "recall_std": recall_std(y_test, preds, k),
+            "recall_std_pooled": recall_std(y_test, preds, k),
         }
+        if len(block_sizes) > 1:
+            per_block, start = [], 0
+            for size in block_sizes:
+                stop = start + size
+                r = recall_std(y_test[start:stop], preds[start:stop], k)
+                if np.isfinite(r):
+                    per_block.append(r)
+                start = stop
+            entry["recall_std_macro"] = float(np.mean(per_block)) if per_block else float("nan")
+            entry["n_blocks_scored"] = len(per_block)
+        else:
+            entry["recall_std_macro"] = entry["recall_std_pooled"]
+        # Default view matches eval_clm.py: macro when there are subjects.
+        entry["recall_std"] = entry["recall_std_macro"]
+        out["methods"][name] = entry
 
     def content(views_slot: np.ndarray) -> np.ndarray:
         """(items, views, k) slot space -> content space, un-rotating each view."""

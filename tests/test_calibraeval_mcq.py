@@ -209,6 +209,38 @@ class TestEvaluate(unittest.TestCase):
                 P[item, c] = row / row.sum()
         return P, y
 
+    def test_macro_and_pooled_recall_std_differ_on_multi_subject_data(self):
+        # eval_clm.py macro-averages recall_std over MMLU's 57 subjects; pooling
+        # instead gives a different quantity, and comparing one against the other
+        # is the mistake this pair of fields exists to prevent.
+        # The signal has to be weak enough that the model actually errs; with a
+        # clean signal every recall is 1.0 and both figures are trivially 0.
+        rng = np.random.default_rng(11)
+        parts = []
+        for _ in range(20):                      # 20 "subjects", 40 items each
+            n, k = 40, 4
+            y = rng.integers(0, k, size=n)
+            P = np.empty((n, k, k))
+            for item in range(n):
+                for c in range(k):
+                    row = rng.random(k)
+                    row[(y[item] - c) % k] += 0.25   # weak preference for the answer
+                    P[item, c] = row / row.sum()
+            parts.append((P, y))
+        res = evaluate(parts, estimation="full", max_epochs=10)
+        m = res["methods"]["baseline"]
+        self.assertEqual(m["recall_std"], m["recall_std_macro"])
+        self.assertEqual(m["n_blocks_scored"], 20)
+        self.assertGreater(m["recall_std_pooled"], 0.0, "fixture produced no errors")
+        # ~10 items per gold position per subject: sampling noise alone lifts the
+        # macro average well above the pooled figure.
+        self.assertGreater(m["recall_std_macro"], m["recall_std_pooled"])
+
+    def test_single_block_makes_macro_equal_pooled(self):
+        P, y = self._biased_cache(n=200)
+        m = evaluate([(P, y)], estimation="full", max_epochs=5)["methods"]["baseline"]
+        self.assertAlmostEqual(m["recall_std_macro"], m["recall_std_pooled"])
+
     def test_reports_all_regimes_on_heldout_items(self):
         P, y = self._biased_cache(slot0_boost=0.0)
         res = evaluate([(P, y)], estimation='prefix', calib_frac=0.1, max_epochs=5)
