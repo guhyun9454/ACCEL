@@ -142,6 +142,10 @@ def parse_arguments():
                         help="Seed for PRIDE random prefix sampling (default=0).")
     parser.add_argument("--empirical_pride", action="store_true",
                         help="Enable empirical-residual PriDe with adaptive Latin-square permutations.")
+    parser.add_argument("--repeat_options", action="store_true",
+                        help="Repeat the option list a second time immediately before 'Answer:' in every prompt "
+                             "(baseline + escalation views). Mitigation experiment for slot-stickiness bias "
+                             "under swap-based permutation views (see docs/worklog/260729-jh-race-schedule-diagnosis.md).")
     parser.add_argument("--empirical_logit_delta", type=float, default=1e-12,
                         help="Stabilization delta used when converting PriDe priors to centered logits.")
     parser.add_argument("--empirical_residual_model", type=str, default="logistic_normal",
@@ -385,23 +389,31 @@ def prepare_eval(args, eval_name):
     question_prefix = '' if task == 'race' else 'Question: '
 
     # create_user_prompt
+    repeat_options_flag = bool(getattr(args, 'repeat_options', False))
+
     def create_user_prompt(question: str, options: List[str]):
         if setting in ['noid']:
-            user_prompt = f"{question_prefix}{question.strip()}\nOptions:\n" + \
-                "\n".join([f"{answer}".strip()
-                           for option_id, answer in zip(option_ids, options)]) + \
-                "\nAnswer:"
+            options_block = "\n".join([f"{answer}".strip()
+                           for option_id, answer in zip(option_ids, options)])
+            user_prompt = f"{question_prefix}{question.strip()}\nOptions:\n{options_block}\n"
+            if repeat_options_flag:
+                user_prompt += f"\nOptions:\n{options_block}\n"
+            user_prompt += "Answer:"
         elif setting in ['shuffle_both']:
             shuffled_option_ids, shuffled_options = shuffle_options_with_ids(option_ids, options)
-            user_prompt = f"{question_prefix}{question.strip()}\nOptions:\n" + \
-                "\n".join([f"{option_id}. {answer}".strip()
-                           for option_id, answer in zip(shuffled_option_ids, shuffled_options)]) + \
-                "\nAnswer:"
+            options_block = "\n".join([f"{option_id}. {answer}".strip()
+                           for option_id, answer in zip(shuffled_option_ids, shuffled_options)])
+            user_prompt = f"{question_prefix}{question.strip()}\nOptions:\n{options_block}\n"
+            if repeat_options_flag:
+                user_prompt += f"\nOptions:\n{options_block}\n"
+            user_prompt += "Answer:"
         else:
-            user_prompt = f"{question_prefix}{question.strip()}\nOptions:\n" + \
-                "\n".join([f"{option_id}. {answer}".strip()
-                           for option_id, answer in zip(option_ids, options)]) + \
-                "\nAnswer:"
+            options_block = "\n".join([f"{option_id}. {answer}".strip()
+                           for option_id, answer in zip(option_ids, options)])
+            user_prompt = f"{question_prefix}{question.strip()}\nOptions:\n{options_block}\n"
+            if repeat_options_flag:
+                user_prompt += f"\nOptions:\n{options_block}\n"
+            user_prompt += "Answer:"
         return user_prompt
 
     # prepare_few_shot_samples

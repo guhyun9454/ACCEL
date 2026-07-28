@@ -409,12 +409,12 @@ def _extract_question_from_user_prompt(user_prompt: str) -> str:
     return str(user_prompt)
 
 
-def _build_option_user_prompt(question: str, options: List[str], option_ids: List[str]) -> str:
-    return (
-        f"Question: {question.strip()}\nOptions:\n"
-        + "\n".join(f"{option_id}. {answer}".strip() for option_id, answer in zip(option_ids, options))
-        + "\nAnswer:"
-    )
+def _build_option_user_prompt(question: str, options: List[str], option_ids: List[str], repeat_options: bool = False) -> str:
+    options_block = "\n".join(f"{option_id}. {answer}".strip() for option_id, answer in zip(option_ids, options))
+    text = f"Question: {question.strip()}\nOptions:\n{options_block}\n"
+    if repeat_options:
+        text += f"\nOptions:\n{options_block}\n"
+    return text + "Answer:"
 
 
 def _invert_slot_to_content_perm(slot_to_content: Tuple[int, ...]) -> np.ndarray:
@@ -2919,7 +2919,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                     prompts = []
                     for perm in cyclic_schedule:
                         opts = [m["options"][int(i)] for i in perm]
-                        prompts.append([m["sys_msg"], _build_option_user_prompt(m["question"], opts, option_ids)])
+                        prompts.append([m["sys_msg"], _build_option_user_prompt(m["question"], opts, option_ids, repeat_options=bool(getattr(args, "repeat_options", False)))])
                     result = eval_fn((pos, (prompts, m["options"], m["ideal"])), random.Random(0))
                     arr = np.asarray(result["data"]["probs"], dtype=np.float64)
                     if arr.shape != (k, k):
@@ -2961,7 +2961,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                         calls = list(prefix_calls[pos])
                     else:
                         identity = [[m["sys_msg"], _build_option_user_prompt(
-                            m["question"], m["options"], option_ids
+                            m["question"], m["options"], option_ids, repeat_options=bool(getattr(args, "repeat_options", False))
                         )]]
                         result = eval_fn((pos, (identity, m["options"], m["ideal"])), random.Random(0))
                         stage_probs = [np.asarray(result["data"]["probs"][0], dtype=np.float64)]
@@ -2983,7 +2983,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                                 break
                             perm = schedule[len(stage_probs)]
                             opts = [m["options"][int(i)] for i in perm]
-                            prompt = [[m["sys_msg"], _build_option_user_prompt(m["question"], opts, option_ids)]]
+                            prompt = [[m["sys_msg"], _build_option_user_prompt(m["question"], opts, option_ids, repeat_options=bool(getattr(args, "repeat_options", False)))]]
                             next_result = eval_fn((pos, (prompt, m["options"], m["ideal"])), random.Random(0))
                             stage_probs.append(np.asarray(next_result["data"]["probs"][0], dtype=np.float64))
                             calls.extend(list(next_result["data"].get("api_calls") or []))
@@ -4283,7 +4283,7 @@ def main():
                                                 permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
                                                 probing_inputs_emp.append([
                                                     str(prompt_meta["sys_msg"]),
-                                                    _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
+                                                    _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids, repeat_options=bool(getattr(args, "repeat_options", False))),
                                                 ])
                                             empirical_sample = (
                                                 int(prompt_meta["idx"]),
