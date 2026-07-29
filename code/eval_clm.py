@@ -4387,7 +4387,7 @@ def main():
                                                 permuted_options = [raw_options[int(content_idx)] for content_idx in slot_to_content]
                                                 probing_inputs_emp.append([
                                                     str(prompt_meta["sys_msg"]),
-                                                    _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids),
+                                                    _build_option_user_prompt(str(prompt_meta["question"]), permuted_options, option_ids, repeat_options=bool(getattr(args, "repeat_options", False))),
                                                 ])
 
                                             empirical_sample = (
