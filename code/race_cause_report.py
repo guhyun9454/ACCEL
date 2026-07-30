@@ -117,6 +117,143 @@ def _group_summary(rows: List[Dict[str, Any]], total_n: int) -> Dict[str, Any]:
     }
 
 
+def _prior_estimator_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compare empirical stage-1 correction with PriDe's arithmetic-mean prior."""
+    n_rows = len(rows)
+    empirical_correct = sum(
+        int(row["pred_by_stage"][0]) == int(row["label_idx"])
+        for row in rows
+    )
+    pride_correct = sum(
+        int(row["pride_base_pred_idx"]) == int(row["label_idx"])
+        for row in rows
+    )
+    empirical_wins = sum(
+        int(row["pred_by_stage"][0]) == int(row["label_idx"])
+        and int(row["pride_base_pred_idx"]) != int(row["label_idx"])
+        for row in rows
+    )
+    pride_wins = sum(
+        int(row["pred_by_stage"][0]) != int(row["label_idx"])
+        and int(row["pride_base_pred_idx"]) == int(row["label_idx"])
+        for row in rows
+    )
+    return {
+        "n": n_rows,
+        "empirical_stage1_accuracy": (
+            float(empirical_correct / n_rows) if n_rows else float("nan")
+        ),
+        "pride_base_accuracy": (
+            float(pride_correct / n_rows) if n_rows else float("nan")
+        ),
+        "empirical_minus_pride": (
+            float((empirical_correct - pride_correct) / n_rows)
+            if n_rows
+            else float("nan")
+        ),
+        "prediction_disagreement": (
+            float(np.mean([
+                int(row["pred_by_stage"][0]) != int(row["pride_base_pred_idx"])
+                for row in rows
+            ]))
+            if n_rows
+            else float("nan")
+        ),
+        "empirical_wins": int(empirical_wins),
+        "pride_wins": int(pride_wins),
+        "net_empirical_wins": int(empirical_wins - pride_wins),
+    }
+
+
+def _router_stage_summary(traced: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Expose schedule potential separately from the online router decision."""
+    rows = [
+        row for row in traced if not bool(row.get("prefix_forced", False))
+    ]
+    n_rows = len(rows)
+    if not rows:
+        return {
+            "n_nonprefix": 0,
+            "stop_stage_histogram": {},
+            "stagewise": {},
+        }
+
+    stage_ids = sorted({
+        int(stage_id)
+        for row in rows
+        for stage_id in row["decision_stages"]
+    })
+    stagewise = {}
+    for stage_id in stage_ids:
+        available = []
+        for row in rows:
+            stage_to_pred = {
+                int(current_stage): int(prediction)
+                for current_stage, prediction in zip(
+                    row["decision_stages"], row["pred_by_stage"]
+                )
+            }
+            if stage_id in stage_to_pred:
+                available.append((row, stage_to_pred[stage_id]))
+        stage_correct = sum(
+            int(prediction) == int(row["label_idx"])
+            for row, prediction in available
+        )
+        corrected = sum(
+            int(row["stage1_correct"]) == 0
+            and int(prediction) == int(row["label_idx"])
+            for row, prediction in available
+        )
+        broken = sum(
+            int(row["stage1_correct"]) == 1
+            and int(prediction) != int(row["label_idx"])
+            for row, prediction in available
+        )
+        stagewise[str(stage_id)] = {
+            "n": len(available),
+            "accuracy": (
+                float(stage_correct / len(available))
+                if available
+                else float("nan")
+            ),
+            "w2c_vs_stage1": int(corrected),
+            "c2w_vs_stage1": int(broken),
+            "net_corrections_vs_stage1": int(corrected - broken),
+        }
+
+    oracle_correct = sum(
+        any(
+            int(prediction) == int(row["label_idx"])
+            for prediction in row["pred_by_stage"]
+        )
+        for row in rows
+    )
+    last_stage_correct = sum(
+        int(row["pred_by_stage"][-1]) == int(row["label_idx"])
+        for row in rows
+    )
+    router_correct = sum(int(row["accel_correct"]) for row in rows)
+    stage1_correct = sum(int(row["stage1_correct"]) for row in rows)
+    stop_histogram = defaultdict(int)
+    for row in rows:
+        stop_histogram[str(int(row["stop_stage"]))] += 1
+
+    return {
+        "n_nonprefix": n_rows,
+        "stage1_accuracy": float(stage1_correct / n_rows),
+        "router_accuracy": float(router_correct / n_rows),
+        "last_stage_accuracy": float(last_stage_correct / n_rows),
+        "oracle_any_stage_accuracy": float(oracle_correct / n_rows),
+        "router_net_corrections_vs_stage1": int(router_correct - stage1_correct),
+        "available_oracle_corrections_vs_stage1": int(
+            oracle_correct - stage1_correct
+        ),
+        "router_regret_to_oracle": int(oracle_correct - router_correct),
+        "stop_stage_histogram": dict(sorted(stop_histogram.items())),
+        "stagewise": stagewise,
+    }
+
+
 def build_decomposition(
     trajectories: List[Dict[str, Any]],
     percentile: float,
@@ -176,6 +313,10 @@ def build_decomposition(
             else float("nan")
         ),
         "groups": groups,
+        "prior_estimator": {
+            "all": _prior_estimator_summary(traced),
+            "nonprefix": _prior_estimator_summary(nonprefix),
+        },
         "routing": {
             "n_escalated_nonprefix": len(routed),
             "stage1_wrong_precision": (
@@ -192,6 +333,7 @@ def build_decomposition(
             "c2w": int(routed_c2w),
             "net_corrections": int(routed_w2c - routed_c2w),
         },
+        "router_stage_analysis": _router_stage_summary(traced),
         "contribution_check": float(sum(
             group["weighted_contribution"] for group in groups.values()
         )),

@@ -28,6 +28,8 @@ def trajectory(
         "conf_by_stage": confidences,
         "true_prob_by_stage": [0.25, 0.25, 0.25, 0.25],
         "pride_pred_idx": pride_prediction,
+        "pride_base_pred_idx": pride_prediction,
+        "pride_cyclic_pred_idx": pride_prediction,
     }
 
 
@@ -51,6 +53,26 @@ class TestRaceCauseReport(unittest.TestCase):
         )
         self.assertEqual(report["routing"]["w2c"], 1)
         self.assertEqual(report["routing"]["c2w"], 0)
+        self.assertEqual(
+            report["prior_estimator"]["all"]["net_empirical_wins"],
+            -1,
+        )
+        self.assertAlmostEqual(
+            report["router_stage_analysis"]["stagewise"]["1"]["accuracy"],
+            1 / 3,
+        )
+        self.assertAlmostEqual(
+            report["router_stage_analysis"]["stagewise"]["2"]["accuracy"],
+            2 / 3,
+        )
+        self.assertEqual(
+            report["router_stage_analysis"]["stop_stage_histogram"],
+            {"1": 2, "2": 1},
+        )
+        self.assertEqual(
+            report["router_stage_analysis"]["router_regret_to_oracle"],
+            0,
+        )
 
 
 if __name__ == "__main__":
