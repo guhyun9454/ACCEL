@@ -55,6 +55,10 @@ from eval_clm_online import (
 from eval_clm_plots import _plot_three_curves_acc_recall_std
 from eval_clm_reporting import _log_baseline_report, _log_named_report
 from api_inference import CommercialAPIClient, OnlinePercentileRouter
+from race_prompt_utils import (
+    build_option_user_prompt as _build_option_user_prompt,
+    extract_question_from_user_prompt as _extract_question_from_user_prompt,
+)
 
 from utils import (
     _orange, _blue, _purple,
@@ -400,21 +404,6 @@ def _estimate_logistic_normal_pride_bank(
         "used_priors": int(priors_arr.shape[0]),
     })
     return mean_prior, np.asarray(mu_hat, dtype=np.float64), np.asarray(residual_samples, dtype=np.float64), np.asarray(shrunk_cov, dtype=np.float64), meta
-
-
-def _extract_question_from_user_prompt(user_prompt: str) -> str:
-    marker = "\nOptions:\n"
-    if user_prompt.startswith("Question: ") and marker in user_prompt:
-        return user_prompt[len("Question: "): user_prompt.index(marker)]
-    return str(user_prompt)
-
-
-def _build_option_user_prompt(question: str, options: List[str], option_ids: List[str], repeat_options: bool = False) -> str:
-    options_block = "\n".join(f"{option_id}. {answer}".strip() for option_id, answer in zip(option_ids, options))
-    text = f"Question: {question.strip()}\nOptions:\n{options_block}\n"
-    if repeat_options:
-        text += f"\nOptions:\n{options_block}\n"
-    return text + "Answer:"
 
 
 def _invert_slot_to_content_perm(slot_to_content: Tuple[int, ...]) -> np.ndarray:
