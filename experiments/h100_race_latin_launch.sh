@@ -9,6 +9,8 @@ RUN_ROOT="${ACCEL_RUN_ROOT:-/dataset/disc/run/accel-race-clean}"
 LOG_ROOT="${ACCEL_LOG_ROOT:-/dataset/disc/logs/accel-race-clean}"
 RESULT_TAG="${ACCEL_RESULT_TAG:-race_latin_single_options_3seed_h100_0730}"
 MODEL_RUNNER="$REPO/experiments/h100_race_latin_model.sh"
+WAIT_FOR_GATED="${ACCEL_WAIT_FOR_GATED:-0}"
+GATED_READY_MARKER="${ACCEL_GATED_READY_MARKER:-$RUN_ROOT/gated-transfer.complete}"
 
 models=(
     allenai/Olmo-3-7B-Instruct
@@ -36,6 +38,10 @@ missing=0
 for model in "${models[@]}"; do
     cache_dir="$HF_MODELS/models--${model//\//--}"
     if ! find -L "$cache_dir/snapshots" -type f -name config.json -print -quit 2>/dev/null | grep -q .; then
+        if [[ "$WAIT_FOR_GATED" == "1" ]] && [[ "$model" == "google/gemma-3-4b-it" || "$model" == meta-llama/* ]]; then
+            echo "WAITING_FOR_GATED model=$model marker=$GATED_READY_MARKER"
+            continue
+        fi
         echo "NOT_READY model=$model cache=$cache_dir" >&2
         missing=1
     fi
@@ -80,10 +86,19 @@ launch_worker() {
         gpu="$2"
         result_tag="$3"
         statusfile="$4"
-        shift 4
+        wait_for_gated="$5"
+        gated_ready_marker="$6"
+        shift 6
         failures=0
         echo "WORKER_START worker=$worker_id gpu=$gpu tag=$result_tag time=$(date --iso-8601=seconds)"
         for model in "$@"; do
+            if [[ "$wait_for_gated" == "1" ]] && [[ "$model" == "google/gemma-3-4b-it" || "$model" == meta-llama/* ]]; then
+                echo "WORKER_MODEL_WAIT worker=$worker_id gpu=$gpu model=$model marker=$gated_ready_marker time=$(date --iso-8601=seconds)"
+                while [[ ! -s "$gated_ready_marker" ]]; do
+                    sleep 30
+                done
+                echo "WORKER_MODEL_READY worker=$worker_id gpu=$gpu model=$model time=$(date --iso-8601=seconds)"
+            fi
             echo "WORKER_MODEL_START worker=$worker_id gpu=$gpu model=$model time=$(date --iso-8601=seconds)"
             env CUDA_VISIBLE_DEVICES="$gpu" ACCEL_RESULT_TAG="$result_tag" \
                 singularity exec --nv --bind /dataset:/dataset "$ACCEL_SIF" \
@@ -97,7 +112,7 @@ launch_worker() {
         echo "WORKER_END worker=$worker_id gpu=$gpu failures=$failures time=$(date --iso-8601=seconds)"
         printf "%s\n" "$failures" > "$statusfile"
         exit "$failures"
-    ' bash "$worker_id" "$gpu" "$RESULT_TAG" "$statusfile" "$@" \
+    ' bash "$worker_id" "$gpu" "$RESULT_TAG" "$statusfile" "$WAIT_FOR_GATED" "$GATED_READY_MARKER" "$@" \
         >> "$log" 2>&1 < /dev/null &
     local pid=$!
     printf '%s\n' "$pid" > "$pidfile"
@@ -115,18 +130,19 @@ cleanup_failed_launch() {
 }
 trap cleanup_failed_launch ERR
 
-# Three workers per H100. Each worker processes its static queue sequentially.
-launch_worker 0 4 "${models[0]}" "${models[6]}" "${models[12]}"
+# Three workers per H100. Public models run first; gated models wait for the
+# transfer-complete marker when ACCEL_WAIT_FOR_GATED=1.
+launch_worker 0 4 "${models[0]}" "${models[12]}" "${models[1]}"
 new_pids+=("$(cat "$RUN_ROOT/worker0-gpu4.pid")")
-launch_worker 1 4 "${models[1]}" "${models[7]}" "${models[13]}"
+launch_worker 1 4 "${models[6]}" "${models[13]}" "${models[2]}"
 new_pids+=("$(cat "$RUN_ROOT/worker1-gpu4.pid")")
-launch_worker 2 4 "${models[2]}" "${models[8]}" "${models[14]}"
+launch_worker 2 4 "${models[7]}" "${models[14]}" "${models[3]}"
 new_pids+=("$(cat "$RUN_ROOT/worker2-gpu4.pid")")
-launch_worker 3 5 "${models[3]}" "${models[9]}"
+launch_worker 3 5 "${models[8]}" "${models[9]}" "${models[4]}"
 new_pids+=("$(cat "$RUN_ROOT/worker3-gpu5.pid")")
-launch_worker 4 5 "${models[4]}" "${models[10]}"
+launch_worker 4 5 "${models[10]}" "${models[5]}"
 new_pids+=("$(cat "$RUN_ROOT/worker4-gpu5.pid")")
-launch_worker 5 5 "${models[5]}" "${models[11]}"
+launch_worker 5 5 "${models[11]}"
 new_pids+=("$(cat "$RUN_ROOT/worker5-gpu5.pid")")
 
 supervisor_log="$LOG_ROOT/supervisor.log"
