@@ -57,6 +57,7 @@ from eval_clm_reporting import _log_baseline_report, _log_named_report
 from api_inference import CommercialAPIClient, OnlinePercentileRouter
 from race_prompt_utils import (
     build_option_user_prompt as _build_option_user_prompt,
+    build_stage_prompt_signature as _build_stage_prompt_signature,
     extract_question_from_user_prompt as _extract_question_from_user_prompt,
 )
 
@@ -1277,10 +1278,30 @@ def _append_empirical_stage_cache(cache_path: str, row: dict) -> None:
         f.flush()
 
 
-def _cached_empirical_stage_probs(cache_row: Optional[dict], sample_id: int, k: int, stage_schedule) -> Optional[np.ndarray]:
+_EMPIRICAL_STAGE_CACHE_VERSION = 2
+
+
+def _empirical_stage_cache_identity(args, transition_mode: str, prompt_signature: str) -> dict:
+    return {
+        "version": _EMPIRICAL_STAGE_CACHE_VERSION,
+        "model_id": str(getattr(args, "pretrained_model_path", "")),
+        "transition_mode": str(transition_mode),
+        "prompt_signature": str(prompt_signature),
+    }
+
+
+def _cached_empirical_stage_probs(
+    cache_row: Optional[dict],
+    sample_id: int,
+    k: int,
+    stage_schedule,
+    cache_identity: dict,
+) -> Optional[np.ndarray]:
     if not cache_row:
         return None
     try:
+        if any(cache_row.get(key) != value for key, value in cache_identity.items()):
+            return None
         if int(cache_row.get("sample_id")) != int(sample_id):
             return None
         if int(cache_row.get("k")) != int(k):
@@ -3884,6 +3905,8 @@ def main():
                         empirical_prefix_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_empirical_prefix_fractions", None)) if 0.0 <= float(x) <= 100.0]
                         if not empirical_prefix_list:
                             empirical_prefix_list = list(pride_prefix_list)
+                        if empirical_enabled:
+                            pride_prefix_list = sorted(set(pride_prefix_list) | set(empirical_prefix_list))
                         ours_th1_list = [float(x) for x in _parse_percent_value_list(getattr(args, "plot_pride_ours_fractions", "0.5,1,2,5,10,20,30,40,50,60,70,80,90,100")) if 0.0 <= float(x) <= 100.0]
                         if not ours_th1_list:
                             ours_th1_list = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
@@ -3891,6 +3914,7 @@ def main():
                         # n_runs>1이면 외부 run_idx당 1회만 (이미 다른 결과). n_runs==1이면 n_runs번 curve variation
                         inner_run_indices = [run_idx] if use_run_suffix else list(range(n_runs))
                         for run_idx_inner in inner_run_indices:
+                            pride_reference_by_alpha: Dict[float, dict] = {}
                             cyclic_fracs_run = [int(x) for x in _parse_percent_value_list(getattr(args, "plot_cyclic_fractions", "0,10,20,30,40,50,60,70,80,90,100")) if 0 <= x <= 100]
 
                             for perc in ours_th1_list:
@@ -4041,6 +4065,11 @@ def main():
                                 arr_probe2_correct_pr = np.asarray(probe2_correct_list_pr, dtype=bool)
                                 cyclic_gap_mean_pr = np.asarray(cyclic_gap_mean_list_pr, dtype=np.float64)
                                 cyclic_gap_std_pr = np.asarray(cyclic_gap_std_list_pr, dtype=np.float64)
+                                pride_reference_by_alpha[float(pride_alpha)] = {
+                                    "prefix_ids": set(prefix_ids_set),
+                                    "base_pred_idx": list(base_pred_idx_list_pr),
+                                    "cyclic_pred_idx": list(cyclic_pred_idx_list_pr),
+                                }
                                 sigma_analysis_pride_by_alpha.setdefault(float(pride_alpha), []).append(
                                     _build_sigma_analysis_record(
                                         subject=subject,
@@ -4161,6 +4190,33 @@ def main():
                                     )
                                     empirical_covariance = np.zeros((k, k), dtype=np.float64)
                                 empirical_prefix_ids = set(int(x) for x in (empirical_meta.get("prefix_ids") or []))
+                                pride_reference = pride_reference_by_alpha.get(float(pride_alpha))
+                                if pride_reference is None:
+                                    raise ValueError(
+                                        "Missing exact PriDe reference for empirical analysis: "
+                                        f"subject={subject}, alpha={float(pride_alpha):g}"
+                                    )
+                                pride_prefix_ids = set(int(x) for x in pride_reference["prefix_ids"])
+                                pride_base_pred_idx = list(pride_reference["base_pred_idx"])
+                                pride_cyclic_pred_idx = list(pride_reference["cyclic_pred_idx"])
+                                if empirical_prefix_ids != pride_prefix_ids:
+                                    raise ValueError(
+                                        "Empirical/PriDe prefix mismatch: "
+                                        f"subject={subject}, alpha={float(pride_alpha):g}, "
+                                        f"empirical={len(empirical_prefix_ids)}, "
+                                        f"pride={len(pride_prefix_ids)}"
+                                    )
+                                if (
+                                    len(pride_base_pred_idx) != len(labels_idx_for_curves)
+                                    or len(pride_cyclic_pred_idx) != len(labels_idx_for_curves)
+                                ):
+                                    raise ValueError(
+                                        "PriDe reference length mismatch: "
+                                        f"subject={subject}, alpha={float(pride_alpha):g}, "
+                                        f"labels={len(labels_idx_for_curves)}, "
+                                        f"base={len(pride_base_pred_idx)}, "
+                                        f"cyclic={len(pride_cyclic_pred_idx)}"
+                                    )
                                 empirical_stage_cache_path = _empirical_stage_cache_path(
                                     args,
                                     subject=str(subject),
@@ -4168,7 +4224,11 @@ def main():
                                     use_run_suffix=bool(use_run_suffix),
                                     alpha=float(pride_alpha),
                                 )
-                                empirical_stage_cache = _load_empirical_stage_cache(empirical_stage_cache_path)
+                                empirical_stage_cache = (
+                                    {}
+                                    if bool(getattr(args, "force", False))
+                                    else _load_empirical_stage_cache(empirical_stage_cache_path)
+                                )
                                 empirical_stage_cache_hits = 0
                                 empirical_stage_cache_misses = 0
                                 if empirical_stage_cache:
@@ -4251,6 +4311,19 @@ def main():
                                         )
                                         stage_shifts = None
                                     raw_options = list(prompt_meta["options"])
+                                    stage_prompt_signature = _build_stage_prompt_signature(
+                                        system_message=str(prompt_meta["sys_msg"]),
+                                        question=str(prompt_meta["question"]),
+                                        options=raw_options,
+                                        option_ids=option_ids,
+                                        stage_schedule=stage_schedule,
+                                        repeat_options=bool(getattr(args, "repeat_options", False)),
+                                    )
+                                    empirical_stage_cache_identity = _empirical_stage_cache_identity(
+                                        args=args,
+                                        transition_mode=empirical_transition_mode,
+                                        prompt_signature=stage_prompt_signature,
+                                    )
                                     empirical_api_calls = []
                                     cached_stage_row = empirical_stage_cache.get(int(sample_pos))
                                     if empirical_transition_mode == "probe_cyclic":
@@ -4260,6 +4333,7 @@ def main():
                                             sample_id=int(prompt_meta["idx"]),
                                             k=int(k),
                                             stage_schedule=stage_schedule,
+                                            cache_identity=empirical_stage_cache_identity,
                                         )
                                         if (
                                             api_backend and all_stage_probs is not None
@@ -4284,7 +4358,7 @@ def main():
                                             all_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
                                             cache_row = {
                                                 "type": "empirical_stage_cache",
-                                                "version": 1,
+                                                **empirical_stage_cache_identity,
                                                 "subject": str(subject),
                                                 "run_idx": int(run_idx),
                                                 "alpha": float(pride_alpha),
@@ -4359,6 +4433,7 @@ def main():
                                             sample_id=int(prompt_meta["idx"]),
                                             k=int(k),
                                             stage_schedule=stage_schedule,
+                                            cache_identity=empirical_stage_cache_identity,
                                         )
                                         if (
                                             api_backend and empirical_stage_probs is not None
@@ -4392,7 +4467,7 @@ def main():
                                                 empirical_stage_probs = extra_stage_probs
                                             cache_row = {
                                                 "type": "empirical_stage_cache",
-                                                "version": 1,
+                                                **empirical_stage_cache_identity,
                                                 "subject": str(subject),
                                                 "run_idx": int(run_idx),
                                                 "alpha": float(pride_alpha),
@@ -4528,11 +4603,11 @@ def main():
                                     )
                                     pride_reference_preds = []
                                     for sample_pos, row in enumerate(analysis_trajectories):
-                                        pride_prefix_forced = bool(sample_pos in prefix_ids_set)
+                                        pride_prefix_forced = bool(sample_pos in pride_prefix_ids)
                                         pride_pred_idx = (
-                                            int(cyclic_pred_idx_list_pr[sample_pos])
+                                            int(pride_cyclic_pred_idx[sample_pos])
                                             if pride_prefix_forced
-                                            else int(base_pred_idx_list_pr[sample_pos])
+                                            else int(pride_base_pred_idx[sample_pos])
                                         )
                                         pride_reference_preds.append(pride_pred_idx)
                                         row.update({
@@ -4541,8 +4616,8 @@ def main():
                                                 pride_pred_idx == int(labels_idx_for_curves[sample_pos])
                                             ),
                                             "pride_prefix_forced": pride_prefix_forced,
-                                            "pride_base_pred_idx": int(base_pred_idx_list_pr[sample_pos]),
-                                            "pride_cyclic_pred_idx": int(cyclic_pred_idx_list_pr[sample_pos]),
+                                            "pride_base_pred_idx": int(pride_base_pred_idx[sample_pos]),
+                                            "pride_cyclic_pred_idx": int(pride_cyclic_pred_idx[sample_pos]),
                                         })
                                     analysis_summary["pride_reference"] = {
                                         "alpha": float(pride_alpha),
@@ -4558,15 +4633,8 @@ def main():
                                             pride_reference_preds,
                                             k,
                                         )),
-                                        "n_prefix": int(len(prefix_ids_set)),
+                                        "n_prefix": int(len(pride_prefix_ids)),
                                     }
-                                    if empirical_prefix_ids != prefix_ids_set:
-                                        logger.warning(
-                                            "Empirical/PriDe prefix mismatch: "
-                                            f"subject={subject}, alpha={float(pride_alpha):g}, "
-                                            f"empirical={len(empirical_prefix_ids)}, "
-                                            f"pride={len(prefix_ids_set)}"
-                                        )
                                     analysis_record = {
                                         "task": str(args.task),
                                         "subject": str(subject),

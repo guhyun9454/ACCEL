@@ -11,6 +11,7 @@ _prompt_utils = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_prompt_utils)
 
 build_option_user_prompt = _prompt_utils.build_option_user_prompt
+build_stage_prompt_signature = _prompt_utils.build_stage_prompt_signature
 extract_question_from_user_prompt = _prompt_utils.extract_question_from_user_prompt
 
 
@@ -56,6 +57,31 @@ class TestRacePromptRegression(unittest.TestCase):
         self.assertEqual(rendered.count("\nQuestion:"), 1)
         self.assertEqual(rendered.count("\nOptions:\n"), 2)
         self.assertEqual(rendered.count("Answer:"), 1)
+
+    def test_stage_prompt_signature_tracks_exact_prompt_configuration(self):
+        common = {
+            "system_message": "Choose one.",
+            "question": "Article:\nPassage.\n\nQuestion: Choose.",
+            "options": ["a", "b", "c", "d"],
+            "option_ids": list("ABCD"),
+            "stage_schedule": [
+                [0, 1, 2, 3],
+                [1, 0, 3, 2],
+            ],
+        }
+
+        signature = build_stage_prompt_signature(**common)
+        self.assertEqual(signature, build_stage_prompt_signature(**common))
+        self.assertNotEqual(
+            signature,
+            build_stage_prompt_signature(**common, repeat_options=True),
+        )
+        self.assertNotEqual(
+            signature,
+            build_stage_prompt_signature(
+                **{**common, "stage_schedule": [[0, 1, 2, 3], [2, 3, 0, 1]]}
+            ),
+        )
 
 
 if __name__ == "__main__":
