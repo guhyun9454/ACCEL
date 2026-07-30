@@ -45,6 +45,10 @@ def trace_online_percentile(
             and decision_stages
         ):
             raise ValueError(f"inconsistent trajectory for sample {row.get('sample_id')}")
+        if decision_stages[0] != 1:
+            raise ValueError(
+                f"trajectory must start at stage 1 for sample {row.get('sample_id')}"
+            )
 
         forced_prefix = bool(row.get("prefix_forced", False))
         stop_stage = int(decision_stages[-1])
@@ -117,8 +121,8 @@ def _group_summary(rows: List[Dict[str, Any]], total_n: int) -> Dict[str, Any]:
     }
 
 
-def _prior_estimator_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Compare empirical stage-1 correction with PriDe's arithmetic-mean prior."""
+def _stage1_correction_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compare empirical residual-mixture stage 1 with PriDe base correction."""
     n_rows = len(rows)
     empirical_correct = sum(
         int(row["pred_by_stage"][0]) == int(row["label_idx"])
@@ -140,7 +144,7 @@ def _prior_estimator_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     )
     return {
         "n": n_rows,
-        "empirical_stage1_accuracy": (
+        "empirical_mixture_stage1_accuracy": (
             float(empirical_correct / n_rows) if n_rows else float("nan")
         ),
         "pride_base_accuracy": (
@@ -173,7 +177,15 @@ def _router_stage_summary(traced: List[Dict[str, Any]]) -> Dict[str, Any]:
     n_rows = len(rows)
     if not rows:
         return {
+            "scope": "nonprefix",
             "n_nonprefix": 0,
+            "stage1_accuracy": float("nan"),
+            "router_accuracy": float("nan"),
+            "last_stage_accuracy": float("nan"),
+            "oracle_any_stage_accuracy": float("nan"),
+            "router_net_corrections_vs_stage1_count": 0,
+            "available_oracle_corrections_vs_stage1_count": 0,
+            "router_regret_to_oracle_count": 0,
             "stop_stage_histogram": {},
             "stagewise": {},
         }
@@ -216,9 +228,9 @@ def _router_stage_summary(traced: List[Dict[str, Any]]) -> Dict[str, Any]:
                 if available
                 else float("nan")
             ),
-            "w2c_vs_stage1": int(corrected),
-            "c2w_vs_stage1": int(broken),
-            "net_corrections_vs_stage1": int(corrected - broken),
+            "w2c_vs_stage1_count": int(corrected),
+            "c2w_vs_stage1_count": int(broken),
+            "net_corrections_vs_stage1_count": int(corrected - broken),
         }
 
     oracle_correct = sum(
@@ -239,16 +251,19 @@ def _router_stage_summary(traced: List[Dict[str, Any]]) -> Dict[str, Any]:
         stop_histogram[str(int(row["stop_stage"]))] += 1
 
     return {
+        "scope": "nonprefix",
         "n_nonprefix": n_rows,
         "stage1_accuracy": float(stage1_correct / n_rows),
         "router_accuracy": float(router_correct / n_rows),
         "last_stage_accuracy": float(last_stage_correct / n_rows),
         "oracle_any_stage_accuracy": float(oracle_correct / n_rows),
-        "router_net_corrections_vs_stage1": int(router_correct - stage1_correct),
-        "available_oracle_corrections_vs_stage1": int(
+        "router_net_corrections_vs_stage1_count": int(
+            router_correct - stage1_correct
+        ),
+        "available_oracle_corrections_vs_stage1_count": int(
             oracle_correct - stage1_correct
         ),
-        "router_regret_to_oracle": int(oracle_correct - router_correct),
+        "router_regret_to_oracle_count": int(oracle_correct - router_correct),
         "stop_stage_histogram": dict(sorted(stop_histogram.items())),
         "stagewise": stagewise,
     }
@@ -313,9 +328,9 @@ def build_decomposition(
             else float("nan")
         ),
         "groups": groups,
-        "prior_estimator": {
-            "all": _prior_estimator_summary(traced),
-            "nonprefix": _prior_estimator_summary(nonprefix),
+        "stage1_correction": {
+            "all": _stage1_correction_summary(traced),
+            "nonprefix": _stage1_correction_summary(nonprefix),
         },
         "routing": {
             "n_escalated_nonprefix": len(routed),

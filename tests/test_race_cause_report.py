@@ -54,7 +54,7 @@ class TestRaceCauseReport(unittest.TestCase):
         self.assertEqual(report["routing"]["w2c"], 1)
         self.assertEqual(report["routing"]["c2w"], 0)
         self.assertEqual(
-            report["prior_estimator"]["all"]["net_empirical_wins"],
+            report["stage1_correction"]["all"]["net_empirical_wins"],
             -1,
         )
         self.assertAlmostEqual(
@@ -70,9 +70,16 @@ class TestRaceCauseReport(unittest.TestCase):
             {"1": 2, "2": 1},
         )
         self.assertEqual(
-            report["router_stage_analysis"]["router_regret_to_oracle"],
+            report["router_stage_analysis"]["router_regret_to_oracle_count"],
             0,
         )
+
+    def test_rejects_trajectory_that_does_not_start_at_stage_one(self):
+        row = trajectory(0, 0, [0, 0, 0, 0], [0.9, 0.9, 0.9, 0.9], 0)
+        row["decision_stages"] = [2, 3, 4, 5]
+
+        with self.assertRaisesRegex(ValueError, "must start at stage 1"):
+            _report.build_decomposition([row], percentile=2, k=4)
 
 
 if __name__ == "__main__":

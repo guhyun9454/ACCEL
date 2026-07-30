@@ -83,3 +83,12 @@ python race_cause_report.py \
   --k 4 \
   --stage-schedule flat \
   --output "$report_path"
+
+raw_results_path="${analysis_dir%/empirical_analysis}/race.jsonl"
+prior_report_path="$analysis_dir/race_empirical_alpha2_prior_ablation.json"
+python race_prior_ablation.py \
+  "$raw_results_path" \
+  --task race \
+  --alpha 2 \
+  --option-ids ABCD \
+  --output "$prior_report_path"
