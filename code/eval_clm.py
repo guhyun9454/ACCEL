@@ -4526,6 +4526,47 @@ def main():
                                         sweep_values=[float(x) for x in empirical_sweep_values],
                                         heuristic_points=cobj_emp["heuristic_points"],
                                     )
+                                    pride_reference_preds = []
+                                    for sample_pos, row in enumerate(analysis_trajectories):
+                                        pride_prefix_forced = bool(sample_pos in prefix_ids_set)
+                                        pride_pred_idx = (
+                                            int(cyclic_pred_idx_list_pr[sample_pos])
+                                            if pride_prefix_forced
+                                            else int(base_pred_idx_list_pr[sample_pos])
+                                        )
+                                        pride_reference_preds.append(pride_pred_idx)
+                                        row.update({
+                                            "pride_pred_idx": pride_pred_idx,
+                                            "pride_correct": int(
+                                                pride_pred_idx == int(labels_idx_for_curves[sample_pos])
+                                            ),
+                                            "pride_prefix_forced": pride_prefix_forced,
+                                            "pride_base_pred_idx": int(base_pred_idx_list_pr[sample_pos]),
+                                            "pride_cyclic_pred_idx": int(cyclic_pred_idx_list_pr[sample_pos]),
+                                        })
+                                    analysis_summary["pride_reference"] = {
+                                        "alpha": float(pride_alpha),
+                                        "n_samples": int(len(pride_reference_preds)),
+                                        "accuracy": float(np.mean([
+                                            int(pred_idx) == int(label_idx)
+                                            for pred_idx, label_idx in zip(
+                                                pride_reference_preds, labels_idx_for_curves
+                                            )
+                                        ])),
+                                        "recall_std": float(_recall_std(
+                                            labels_idx_for_curves,
+                                            pride_reference_preds,
+                                            k,
+                                        )),
+                                        "n_prefix": int(len(prefix_ids_set)),
+                                    }
+                                    if empirical_prefix_ids != prefix_ids_set:
+                                        logger.warning(
+                                            "Empirical/PriDe prefix mismatch: "
+                                            f"subject={subject}, alpha={float(pride_alpha):g}, "
+                                            f"empirical={len(empirical_prefix_ids)}, "
+                                            f"pride={len(prefix_ids_set)}"
+                                        )
                                     analysis_record = {
                                         "task": str(args.task),
                                         "subject": str(subject),
