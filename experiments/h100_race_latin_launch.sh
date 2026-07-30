@@ -73,6 +73,7 @@ launch_worker() {
     local log="$LOG_ROOT/worker${worker_id}-gpu${gpu}.log"
     local pidfile="$RUN_ROOT/worker${worker_id}-gpu${gpu}.pid"
     local statusfile="$RUN_ROOT/worker${worker_id}-gpu${gpu}.status"
+    shift 2
 
     if [[ -s "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
         echo "REFUSING: worker $worker_id already runs as pid $(cat "$pidfile")." >&2
