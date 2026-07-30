@@ -16,6 +16,9 @@ RESULT_TAG="${ACCEL_RESULT_TAG:-race_cause_${TRANSITION_MODE}_0730}"
 export HF_HOME
 export HF_HUB_CACHE
 export HF_HUB_DISABLE_XET=1
+export MPLCONFIGDIR="${MPLCONFIGDIR:-$REPO/.cache/matplotlib}"
+export PYTHONPATH="$REPO/.deps${PYTHONPATH:+:$PYTHONPATH}"
+mkdir -p "$MPLCONFIGDIR"
 
 # shellcheck disable=SC1090
 source "$CONDA_SH"
