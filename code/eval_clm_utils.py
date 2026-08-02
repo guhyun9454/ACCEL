@@ -278,7 +278,7 @@ def parse_arguments():
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
         task = eval_args[0]
-        if task not in ['mmlu', 'arc', 'csqa', 'race'] + list(PAIRWISE_TASKS):
+        if task not in ['mmlu', 'arc', 'csqa', 'race', 'gpqa'] + list(PAIRWISE_TASKS):
             raise ValueError(f"Unknown task: {task}")
 
         num_few_shot = int(eval_args[1])
