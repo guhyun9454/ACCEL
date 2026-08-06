@@ -24,6 +24,16 @@ Forked baseline for the ICLR 2024 Spotlight paper "Large Language Models Are Not
 
 Note: this table reflects the `main` (upstream PriDe) view. The active `sm/table_3_4_1` branch adds `tests/`, `code/api_inference.py` (commercial-API backend + model registry), `code/eval_clm_online.py`/`eval_clm_reporting.py`/`eval_clm_plots.py`, and Streamlit result tooling.
 
+### RACE task naming (fixed convention — do not repurpose)
+
+| Task name | Meaning | Data |
+|---|---|---|
+| `race` | **RACE-H only** (n=3498 test). Historical name — every legacy result dir, canonical tag, wandb project (`3_race_*`) and log family assumes this. Never widen it to mean M+H. | `code/data_race/` (payloads committed) |
+| `racem` | RACE-M only (n=1436 test) | `code/data_racem/process.py` (payloads generated) |
+| `raceall` | RACE M+H pooled (n=4934) — prior and router threshold estimated over the pooled set, NOT the same experiment as `race`+`racem` side by side | `code/data_raceall/process.py` (payloads generated) |
+
+All three share the RACE prompt shape (`Article:` header folded into the question column, empty `question_prefix`) — any prompt-path change must be checked against all three plus the escalation-stage renderer in `eval_clm.py` (`_build_option_user_prompt` / `_extract_question_from_user_prompt`, buggy until 2026-07-30; see `docs/worklog/260730-jh-race-escalation-prompt-bug.md` in the workspace).
+
 ## For AI Agents
 
 ### Testing
