@@ -4,6 +4,7 @@
 import os
 import sys
 import gc
+import hashlib
 import json
 import copy
 import logging
@@ -1292,10 +1293,61 @@ def _append_empirical_stage_cache(cache_path: str, row: dict) -> None:
         f.flush()
 
 
-def _cached_empirical_stage_probs(cache_row: Optional[dict], sample_id: int, k: int, stage_schedule) -> Optional[np.ndarray]:
+_EMPIRICAL_STAGE_CACHE_VERSION = 2
+
+
+def _build_stage_prompt_signature(
+    system_message: str,
+    question: str,
+    options: List[str],
+    option_ids: List[str],
+    stage_schedule,
+) -> str:
+    """Hash the exact rendered stage prompts used to produce cached logits."""
+    rendered_prompts = []
+    for slot_to_content in stage_schedule:
+        permuted_options = [str(options[int(content_idx)]) for content_idx in slot_to_content]
+        rendered_prompts.append(
+            _build_option_user_prompt(
+                question=str(question),
+                options=permuted_options,
+                option_ids=[str(option_id) for option_id in option_ids],
+            )
+        )
+    payload = {
+        "system_message": str(system_message),
+        "rendered_user_prompts": rendered_prompts,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _empirical_stage_cache_identity(args, transition_mode: str, prompt_signature: str) -> dict:
+    return {
+        "version": _EMPIRICAL_STAGE_CACHE_VERSION,
+        "model_id": str(getattr(args, "pretrained_model_path", "")),
+        "transition_mode": str(transition_mode),
+        "prompt_signature": str(prompt_signature),
+    }
+
+
+def _cached_empirical_stage_probs(
+    cache_row: Optional[dict],
+    sample_id: int,
+    k: int,
+    stage_schedule,
+    cache_identity: dict,
+) -> Optional[np.ndarray]:
     if not cache_row:
         return None
     try:
+        if any(cache_row.get(key) != value for key, value in cache_identity.items()):
+            return None
         if int(cache_row.get("sample_id")) != int(sample_id):
             return None
         if int(cache_row.get("k")) != int(k):
@@ -4266,6 +4318,18 @@ def main():
                                         )
                                         stage_shifts = None
                                     raw_options = list(prompt_meta["options"])
+                                    stage_prompt_signature = _build_stage_prompt_signature(
+                                        system_message=str(prompt_meta["sys_msg"]),
+                                        question=str(prompt_meta["question"]),
+                                        options=raw_options,
+                                        option_ids=option_ids,
+                                        stage_schedule=stage_schedule,
+                                    )
+                                    empirical_stage_cache_identity = _empirical_stage_cache_identity(
+                                        args=args,
+                                        transition_mode=empirical_transition_mode,
+                                        prompt_signature=stage_prompt_signature,
+                                    )
                                     empirical_api_calls = []
                                     cached_stage_row = empirical_stage_cache.get(int(sample_pos))
                                     if empirical_transition_mode == "probe_cyclic":
@@ -4275,6 +4339,7 @@ def main():
                                             sample_id=int(prompt_meta["idx"]),
                                             k=int(k),
                                             stage_schedule=stage_schedule,
+                                            cache_identity=empirical_stage_cache_identity,
                                         )
                                         if (
                                             api_backend and all_stage_probs is not None
@@ -4299,7 +4364,7 @@ def main():
                                             all_stage_probs = np.vstack([base_row.reshape(1, -1), extra_stage_probs])
                                             cache_row = {
                                                 "type": "empirical_stage_cache",
-                                                "version": 1,
+                                                **empirical_stage_cache_identity,
                                                 "subject": str(subject),
                                                 "run_idx": int(run_idx),
                                                 "alpha": float(pride_alpha),
@@ -4374,6 +4439,7 @@ def main():
                                             sample_id=int(prompt_meta["idx"]),
                                             k=int(k),
                                             stage_schedule=stage_schedule,
+                                            cache_identity=empirical_stage_cache_identity,
                                         )
                                         if (
                                             api_backend and empirical_stage_probs is not None
@@ -4407,7 +4473,7 @@ def main():
                                                 empirical_stage_probs = extra_stage_probs
                                             cache_row = {
                                                 "type": "empirical_stage_cache",
-                                                "version": 1,
+                                                **empirical_stage_cache_identity,
                                                 "subject": str(subject),
                                                 "run_idx": int(run_idx),
                                                 "alpha": float(pride_alpha),
