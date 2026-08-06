@@ -14,7 +14,7 @@ Forked baseline for the ICLR 2024 Spotlight paper "Large Language Models Are Not
 | `code/debias_base.py` | Base (no-debias) eval. |
 | `code/eval_clm.py` / `eval_clm_utils.py` | Causal-LM scoring (log-likelihood over option-ID tokens). |
 | `code/eval_ichat.py` / `eval_ichat_utils.py` | Instruct/chat-model eval path. |
-| `code/load_model_simple.py` | Project-local helper to load HF models (added in this fork; see git log). |
+| `code/load_model_simple.py` | Project-local helper to load HF models (**untracked on purpose** — see Modifying). |
 | `code/run_all.py` | Orchestrator that loops over datasets/models. |
 | `code/scripts/` | Upstream shell entry points (`run_debias.sh`, `run_ichat.sh`, `run_llama-7b.sh`). |
 | `experiments/` | **ACCEL-side scripts** — Korean prompt variants (`arc-csqa-ko*.sh`), `pride.bash`, multi-GPU launchers, model-download helpers. Do not push these upstream. |
@@ -39,6 +39,7 @@ Note: this table reflects the `main` (upstream PriDe) view. The active `sm/table
 ### Modifying
 - Anything genuinely useful upstream (bug fix, broader feature) → commit on a topic branch and consider a PR; everything ACCEL-specific stays under `experiments/` so the upstream diff is small.
 - `code/__pycache__/` is ignored. Do not check it in.
+- **Cluster-ops scripts (H100/moana/Seraph launchers, model-download helpers) are NOT committed to this repo** (user rule, 2026-08-06). They live untracked in the shared checkout (`experiments/{run_8gpu,_grab_y1_8gpu,_run_download,_run_model,check_and_run,download_large_models,test_single_gpu}.sh`, `code/load_model_simple.py`) — do not clean them, do not `git add` them. Cluster operation knowledge belongs in the `h100`/`seraph` skills, not here.
 
 ### Where context lives
 - Method-level "what PriDe does and why ACCEL extends it" → `../../docs/method.md`.
