@@ -7,3 +7,5 @@
 /tmp_perm_noise_model2
 /tmp_peak_label_test
 /tmp_fullref_test
+.omc/
+__pycache__/
