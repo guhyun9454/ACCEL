@@ -417,12 +417,15 @@ def series(payload: dict, curve: str, metric: str) -> Dict[float, Tuple[float, f
     return out
 
 
-def aggregate(series_list: List[Dict[float, Tuple[float, float]]], max_pct: Optional[float]):
+def aggregate(series_list: List[Dict[float, Tuple[float, float]]],
+              max_pct: Optional[float], min_pct: Optional[float] = None):
     """Mean over models at each sweep point.  Returns (cost, y, y_std, n)."""
     xs = sorted(set().union(*[set(s) for s in series_list])) if series_list else []
     rows = []
     for x in xs:
         if max_pct is not None and x > max_pct:
+            continue
+        if min_pct is not None and x < min_pct:
             continue
         cs = [s[x][0] for s in series_list if x in s]
         ys = [s[x][1] for s in series_list if x in s]
@@ -450,7 +453,8 @@ METRICS = [("delta_acc", "Δ Accuracy (%)", "Δ Accuracy"),
 
 
 def make_figure(task: str, set_label: str, payloads: List[dict], max_pct: Optional[float],
-                show_band: bool, overall_label: str = "Overall mean"):
+                show_band: bool, min_pct: Optional[float] = None,
+                overall_label: str = "Overall mean"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -461,7 +465,9 @@ def make_figure(task: str, set_label: str, payloads: List[dict], max_pct: Option
             sl = [s for s in (series(p, curve, metric) for p in payloads) if s]
             if not sl:
                 continue
-            x, y, ystd, _ = aggregate(sl, max_pct)
+            # min_pct trims the sweep parameter of the two swept curves; cyclic
+            # keeps fraction 0 so the (cost 1, delta 0) origin stays on the plot.
+            x, y, ystd, _ = aggregate(sl, max_pct, None if curve == "cyclic" else min_pct)
             if x.size == 0:
                 continue
             if show_band and ystd.size == y.size:
@@ -475,7 +481,11 @@ def make_figure(task: str, set_label: str, payloads: List[dict], max_pct: Option
         ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
         ax.grid(True, linestyle="--", alpha=0.35)
         ax.tick_params(labelsize=14)
-        ax.legend(loc="lower right" if metric == "delta_acc" else "upper right", fontsize=18)
+        if metric == "delta_rstd":
+            # lower Rstd is better, so flip the axis: improvement points up,
+            # same reading direction as the accuracy panel.
+            ax.invert_yaxis()
+        ax.legend(loc="lower right", fontsize=18)
     fig.suptitle(f"{task} — {set_label} (n={len(payloads)})", fontsize=18)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return fig
@@ -496,6 +506,8 @@ def main():
     ap.add_argument("--require_n_runs", default=None, help="e.g. 3 to keep only 3-run sweeps")
     ap.add_argument("--max_pct", type=float, default=80.0,
                     help="drop sweep points above this percentile (100 = keep all)")
+    ap.add_argument("--min_pct", type=float, default=2.0,
+                    help="drop PriDe alpha / ACCEL beta below this (cyclic is not trimmed)")
     ap.add_argument("--band", action="store_true", help="shade ±1 std across models")
     ap.add_argument("--discover", action="store_true", help="only print what was found")
     args = ap.parse_args()
@@ -539,7 +551,8 @@ def main():
             if args.discover or not picked:
                 continue
             fig = make_figure(task, set_label, [r["payload"] for r in picked],
-                              None if args.max_pct >= 100 else args.max_pct, args.band)
+                              None if args.max_pct >= 100 else args.max_pct, args.band,
+                              min_pct=(None if args.min_pct <= 0 else args.min_pct))
             out = os.path.join(args.out_dir, f"{task}_{set_key}.png")
             fig.savefig(out, bbox_inches="tight")
             print(f"  -> {out}")
