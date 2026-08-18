@@ -30,6 +30,7 @@ import json
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -52,15 +53,22 @@ CANONICAL_TAG: Dict[str, str] = {
 ACCEL_ALPHA_KEY = "2"
 ACCEL_BLOCK = "primary"
 
-# the settings the alpha-2 primary block must report, so that the curve really
-# is `empirical_pride_pct_flat_online_latin_a2_*`
-REQUIRED_EMPIRICAL_META = {
-    "sweep_mode": "percentile",
-    "percentile_mode": "online",
-    "threshold_schedule": "flat",
-    "transition_mode": "latin",
-    "residual_model": "empirical",
-}
+# The settings that make the curve `empirical_pride_pct_flat_online_latin_a2_*`.
+# Each entry is (payload meta key, CLI flag, required value).  Older runs do not
+# record every key in the payload -- `percentile_mode` in particular was added
+# later -- so the CLI flag is the authority and the payload is checked only when
+# it is present.  The flag defaults come from code/eval_clm_utils.py.
+REQUIRED_EMPIRICAL = [
+    ("sweep_mode", "--empirical_sweep_mode", "percentile"),
+    ("percentile_mode", "--empirical_percentile_mode", "online"),
+    ("threshold_schedule", "--empirical_stage_schedule", "flat"),
+    ("transition_mode", "--empirical_transition_mode", "latin"),
+    ("residual_model", "--empirical_residual_model", "empirical"),
+]
+
+# The canonical sweep is zero-shot; the `*_5` projects are the 5-shot variant and
+# must never be mixed in.  Option-label set is fixed per task.
+REQUIRED_OPTION_ID_SET = {"csqa": "ABCDE", "mmlu": "ABCD", "arc": "ABCD", "raceall": "ABCD"}
 
 
 # --------------------------------------------------------------------------
@@ -95,6 +103,15 @@ NEW_5 = [
     "Llama-3.3-70B-Instruct",
 ]
 
+# Some large models were launched from a local snapshot directory, so W&B
+# recorded the snapshot hash as `model_name`.  Map those back to readable names.
+MODEL_ALIASES: Dict[str, str] = {
+    "145dc2508c480a64b47242f160d286cff94a2343": "gemma-4-31B-it",
+    "495f39366efef23836d0cfae4fbe635880d2be31": "Qwen2.5-72B-Instruct",
+    "5ede1c97bbab6ce5cda5812749b4c0bdf79b18dd": "Qwen2.5-32B-Instruct",
+}
+
+
 MODEL_SETS: Dict[str, Tuple[str, List[str]]] = {
     "paper15": ("15 models (paper)", PAPER_15),
     "all20": ("20 models (paper 15 + 5 large)", PAPER_15 + NEW_5),
@@ -102,14 +119,20 @@ MODEL_SETS: Dict[str, Tuple[str, List[str]]] = {
 }
 
 
-def _norm_model(name: str) -> str:
-    """Canonical key for model matching: lowercase, strip org prefix and punctuation."""
+def _display_model(name: str) -> str:
     s = str(name or "").strip()
     if "/" in s:
         s = s.rsplit("/", 1)[-1]
-    s = s.lower()
-    s = re.sub(r"[^a-z0-9]+", "", s)
-    return s
+    return MODEL_ALIASES.get(s, s)
+
+
+def _norm_model(name: str) -> str:
+    """Canonical key for model matching: lowercase, strip org prefix and punctuation."""
+    s = _display_model(name).lower()
+    return re.sub(r"[^a-z0-9]+", "", s)
+
+
+ALL_MODEL_KEYS = {_norm_model(m) for m in (PAPER_15 + NEW_5)}
 
 
 # --------------------------------------------------------------------------
@@ -130,6 +153,20 @@ def _arg_value(argv: List[str], flag: str) -> Optional[str]:
         if a.startswith(flag + "="):
             return a.split("=", 1)[1]
     return None
+
+
+def _to_plain(obj):
+    """W&B summaries hand back SummarySubDict, which is NOT a dict subclass."""
+    if isinstance(obj, dict):
+        return {str(k): _to_plain(v) for k, v in obj.items()}
+    if hasattr(obj, "keys") and hasattr(obj, "__getitem__"):
+        try:
+            return {str(k): _to_plain(obj[k]) for k in obj.keys()}
+        except Exception:
+            return {}
+    if isinstance(obj, (list, tuple)):
+        return [_to_plain(v) for v in obj]
+    return obj
 
 
 def _run_metadata_args(run) -> List[str]:
@@ -154,14 +191,32 @@ def _empirical_meta(payload: dict) -> Dict[str, Any]:
     }
 
 
-def _check_accel_curve(payload: dict) -> Tuple[bool, str]:
-    """Verify the payload really carries empirical_pride_pct_flat_online_latin_a2."""
+def _check_accel_curve(payload: dict, argv: List[str], task: str) -> Tuple[bool, str]:
+    """Verify this run really is the canonical empirical_pride_pct_flat_online_latin_a2 sweep."""
     meta = _empirical_meta(payload)
     problems = []
-    for key, want in REQUIRED_EMPIRICAL_META.items():
-        got = meta.get(key, "")
-        if got != want:
-            problems.append(f"{key}={got or '?'}!={want}")
+
+    for meta_key, flag, want in REQUIRED_EMPIRICAL:
+        got_flag = _arg_value(argv, flag)
+        if got_flag is not None and str(got_flag).strip().lower() != want:
+            problems.append(f"{flag}={got_flag}!={want}")
+        got_meta = meta.get(meta_key, "")
+        if got_meta and got_meta != want:
+            problems.append(f"{meta_key}={got_meta}!={want}")
+
+    if str(_arg_value(argv, "--plot_empirical_prefix_fractions") or "2").strip() != "2":
+        problems.append("prefix_fractions!=2")
+    if "--empirical_pride" not in argv:
+        problems.append("--empirical_pride missing")
+
+    eval_names = str(_arg_value(argv, "--eval_names") or "")
+    if eval_names and eval_names != f"{task},0,full":
+        problems.append(f"eval_names={eval_names}!={task},0,full")
+    want_ids = REQUIRED_OPTION_ID_SET.get(task)
+    got_ids = _arg_value(argv, "--option_id_set")
+    if want_ids and got_ids and got_ids != want_ids:
+        problems.append(f"option_id_set={got_ids}!={want_ids}")
+
     if ACCEL_ALPHA_KEY not in meta["alphas"]:
         problems.append(f"alpha 2 missing (has {meta['alphas']})")
     else:
@@ -191,7 +246,6 @@ def collect_runs(
         if verbose:
             print(f"[scan] {len(projects)} projects under {entity}", file=sys.stderr)
 
-    wanted_tags = {CANONICAL_TAG[t] for t in tasks if t in CANONICAL_TAG}
     records: List[dict] = []
 
     for project in projects:
@@ -204,25 +258,25 @@ def collect_runs(
         if verbose:
             print(f"[scan] {entity}/{project}: {len(runs)} runs", file=sys.stderr)
 
-        for run in runs:
+        def _fetch(run):
             cpath = _cache_path(cache_dir, entity, project, run.id)
             if os.path.exists(cpath) and not refresh:
                 try:
                     with open(cpath, "r", encoding="utf-8") as f:
-                        cached = json.load(f)
+                        return run, json.load(f)
                 except Exception:
-                    cached = None
+                    pass
+            cfg = run.config or {}
+            model_raw = cfg.get("model_name") or cfg.get("pretrained_model_path")
+            if _norm_model(model_raw) not in ALL_MODEL_KEYS or run.state != "finished":
+                # cheap reject: no metadata download for runs we would drop anyway
+                cached = {"skip": True, "result_tag": None}
             else:
-                cached = None
-
-            if cached is None:
                 argv = _run_metadata_args(run)
                 tag = _arg_value(argv, "--result_tag")
-                if tag not in wanted_tags:
-                    cached = {"skip": True, "result_tag": tag}
-                else:
+                if True:
                     try:
-                        summary = dict(run.summary)
+                        summary = _to_plain(run.summary)
                     except Exception:
                         summary = {}
                     points = summary.get("three_curves_points_v1") or {}
@@ -238,24 +292,27 @@ def collect_runs(
                         "created_at": str(run.created_at),
                         "result_tag": tag,
                         "argv": argv,
-                        "model_name": (run.config or {}).get("model_name"),
-                        "pretrained_model_path": (run.config or {}).get("pretrained_model_path"),
+                        "model_name": cfg.get("model_name"),
+                        "pretrained_model_path": cfg.get("pretrained_model_path"),
                         "points_by_task": {str(k): v for k, v in points.items()},
                     }
-                with open(cpath, "w", encoding="utf-8") as f:
-                    json.dump(cached, f)
+            with open(cpath, "w", encoding="utf-8") as f:
+                json.dump(cached, f)
+            return run, cached
 
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            fetched = list(pool.map(_fetch, runs))
+
+        for run, cached in fetched:
             if cached.get("skip"):
                 continue
             for task in tasks:
-                if CANONICAL_TAG.get(task) != cached.get("result_tag"):
-                    continue
                 payload = (cached.get("points_by_task") or {}).get(task)
                 if not isinstance(payload, dict):
                     continue
-                ok, why = _check_accel_curve(payload)
-                model = cached.get("model_name") or cached.get("pretrained_model_path") or cached.get("name")
                 argv = cached.get("argv") or []
+                ok, why = _check_accel_curve(payload, argv, task)
+                model = _display_model(cached.get("model_name") or cached.get("pretrained_model_path") or cached.get("name"))
                 records.append({
                     "task": task,
                     "model": str(model),
@@ -264,6 +321,7 @@ def collect_runs(
                     "state": cached.get("state"),
                     "created_at": cached.get("created_at"),
                     "result_tag": cached.get("result_tag"),
+                    "canonical_tag": (cached.get("result_tag") == CANONICAL_TAG.get(task)),
                     "n_runs": _arg_value(argv, "--n_runs"),
                     "option_id_set": _arg_value(argv, "--option_id_set"),
                     "accel_ok": ok,
@@ -287,7 +345,8 @@ def pick_one_per_model(records: List[dict], require_n_runs: Optional[str]) -> Di
         if cur is None:
             best[key] = r
             continue
-        rank = lambda x: (x.get("state") == "finished", str(x.get("created_at") or ""))
+        rank = lambda x: (bool(x.get("canonical_tag")), x.get("state") == "finished",
+                          str(x.get("created_at") or ""))
         if rank(r) > rank(cur):
             best[key] = r
     return best
@@ -456,8 +515,10 @@ def main():
         for r in sorted(task_recs, key=lambda r: r["model"]):
             mark = "OK " if r["accel_ok"] else "BAD"
             picked = "*" if chosen.get(r["model_key"]) is r else " "
-            print(f" {picked}{mark} {r['model']:<34} {r['run_path']:<44} "
-                  f"n_runs={r['n_runs']} {'' if r['accel_ok'] else '<< ' + r['accel_why']}")
+            flag = "  " if r["canonical_tag"] else "! "
+            print(f" {picked}{mark}{flag}{r['model']:<32} {r['run_path']:<42} "
+                  f"tag={r['result_tag']:<26} n_runs={r['n_runs']}"
+                  f"{'' if r['accel_ok'] else '  << ' + r['accel_why']}")
 
         manifest[task] = {}
         for set_key in args.sets:
@@ -468,7 +529,9 @@ def main():
                 (picked.append(rec) if rec else missing.append(m))
             manifest[task][set_key] = {
                 "label": set_label,
-                "runs": [{"model": r["model"], "run_path": r["run_path"]} for r in picked],
+                "runs": [{"model": r["model"], "run_path": r["run_path"],
+                          "result_tag": r["result_tag"], "canonical_tag": r["canonical_tag"],
+                          "n_runs": r["n_runs"]} for r in picked],
                 "missing": missing,
             }
             print(f"  [{set_key}] {len(picked)}/{len(models)} models"

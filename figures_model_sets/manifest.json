@@ -1,0 +1,1192 @@
+{
+  "csqa": {
+    "paper15": {
+      "label": "15 models (paper)",
+      "runs": [
+        {
+          "model": "Olmo-3-7B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/dlupez9b",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Mistral-7B-Instruct-v0.3",
+          "run_path": "capde/3_csqa_emp_latin_real/pjvt62l1",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-3-4b-it",
+          "run_path": "capde/3_csqa_emp_latin_real/n41ijkd0",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B",
+          "run_path": "capde/3_csqa_emp_latin_real/dxdjcqtv",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/kam251fl",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B",
+          "run_path": "capde/3_csqa_emp_latin_real/cuqhemjx",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/lmditkfe",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-4-mini-instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/gpkew9m6",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-3-mini-4k-instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/13hrq93v",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen3-4B-Instruct-2507",
+          "run_path": "capde/3_csqa_emp_latin_real/qx6t8uz4",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B",
+          "run_path": "capde/3_csqa_emp_latin_real/56zbrvwt",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/jztmp74j",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-3B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/e55okhuz",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Ministral-8B-Instruct-2410",
+          "run_path": "capde/3_csqa_emp_latin_real/iyusknl2",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-8B",
+          "run_path": "capde/3_csqa_emp_latin_real/oowltohj",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": []
+    },
+    "all20": {
+      "label": "20 models (paper 15 + 5 large)",
+      "runs": [
+        {
+          "model": "Olmo-3-7B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/dlupez9b",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Mistral-7B-Instruct-v0.3",
+          "run_path": "capde/3_csqa_emp_latin_real/pjvt62l1",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-3-4b-it",
+          "run_path": "capde/3_csqa_emp_latin_real/n41ijkd0",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B",
+          "run_path": "capde/3_csqa_emp_latin_real/dxdjcqtv",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/kam251fl",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B",
+          "run_path": "capde/3_csqa_emp_latin_real/cuqhemjx",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/lmditkfe",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-4-mini-instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/gpkew9m6",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-3-mini-4k-instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/13hrq93v",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen3-4B-Instruct-2507",
+          "run_path": "capde/3_csqa_emp_latin_real/qx6t8uz4",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B",
+          "run_path": "capde/3_csqa_emp_latin_real/56zbrvwt",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/jztmp74j",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-3B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/e55okhuz",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Ministral-8B-Instruct-2410",
+          "run_path": "capde/3_csqa_emp_latin_real/iyusknl2",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-8B",
+          "run_path": "capde/3_csqa_emp_latin_real/oowltohj",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-4-31B-it",
+          "run_path": "capde/3_csqa_emp_latin_real/icinsrmc",
+          "result_tag": "empirical_latin_flat_0619",
+          "canonical_tag": false,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-32B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/8ocxz63a",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-72B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/up2x2oyl",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-70B",
+          "run_path": "capde/3_csqa_emp_latin_real/yuf6kafz",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.3-70B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/auybsajc",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": []
+    },
+    "large5": {
+      "label": "5 large models",
+      "runs": [
+        {
+          "model": "gemma-4-31B-it",
+          "run_path": "capde/3_csqa_emp_latin_real/icinsrmc",
+          "result_tag": "empirical_latin_flat_0619",
+          "canonical_tag": false,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-32B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/8ocxz63a",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-72B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/up2x2oyl",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-70B",
+          "run_path": "capde/3_csqa_emp_latin_real/yuf6kafz",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.3-70B-Instruct",
+          "run_path": "capde/3_csqa_emp_latin_real/auybsajc",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": []
+    }
+  },
+  "mmlu": {
+    "paper15": {
+      "label": "15 models (paper)",
+      "runs": [
+        {
+          "model": "Olmo-3-7B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/avoxybbo",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Mistral-7B-Instruct-v0.3",
+          "run_path": "capde/3_mmlu_emp_latin/tun0fsya",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-3-4b-it",
+          "run_path": "capde/3_mmlu_emp_latin/nn5knq94",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B",
+          "run_path": "capde/3_mmlu_emp_latin/1oppho4p",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/qgr7la6m",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B",
+          "run_path": "capde/3_mmlu_emp_latin/gamt5k4z",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/8y24gm4i",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-4-mini-instruct",
+          "run_path": "capde/3_mmlu_emp_latin/15dg93cu",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-3-mini-4k-instruct",
+          "run_path": "capde/3_mmlu_emp_latin/y25on33a",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen3-4B-Instruct-2507",
+          "run_path": "capde/3_mmlu_emp_latin/tb9w2sar",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B",
+          "run_path": "capde/3_mmlu_emp_latin/ol3n8obq",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/55ie867o",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-3B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/9xtn23y0",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Ministral-8B-Instruct-2410",
+          "run_path": "capde/3_mmlu_emp_latin/epa30msg",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-8B",
+          "run_path": "capde/3_mmlu_emp_latin/fvrjwtlu",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": []
+    },
+    "all20": {
+      "label": "20 models (paper 15 + 5 large)",
+      "runs": [
+        {
+          "model": "Olmo-3-7B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/avoxybbo",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Mistral-7B-Instruct-v0.3",
+          "run_path": "capde/3_mmlu_emp_latin/tun0fsya",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-3-4b-it",
+          "run_path": "capde/3_mmlu_emp_latin/nn5knq94",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B",
+          "run_path": "capde/3_mmlu_emp_latin/1oppho4p",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/qgr7la6m",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B",
+          "run_path": "capde/3_mmlu_emp_latin/gamt5k4z",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/8y24gm4i",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-4-mini-instruct",
+          "run_path": "capde/3_mmlu_emp_latin/15dg93cu",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-3-mini-4k-instruct",
+          "run_path": "capde/3_mmlu_emp_latin/y25on33a",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen3-4B-Instruct-2507",
+          "run_path": "capde/3_mmlu_emp_latin/tb9w2sar",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B",
+          "run_path": "capde/3_mmlu_emp_latin/ol3n8obq",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/55ie867o",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-3B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/9xtn23y0",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Ministral-8B-Instruct-2410",
+          "run_path": "capde/3_mmlu_emp_latin/epa30msg",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-8B",
+          "run_path": "capde/3_mmlu_emp_latin/fvrjwtlu",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-4-31B-it",
+          "run_path": "capde/3_mmlu_emp_latin/8njs8meo",
+          "result_tag": "empirical_latin_flat_0619",
+          "canonical_tag": false,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-32B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/bz3itmuk",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-72B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/t0hazpfl",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-70B",
+          "run_path": "capde/3_mmlu_emp_latin/jyyw4o59",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.3-70B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/80x9f40u",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": []
+    },
+    "large5": {
+      "label": "5 large models",
+      "runs": [
+        {
+          "model": "gemma-4-31B-it",
+          "run_path": "capde/3_mmlu_emp_latin/8njs8meo",
+          "result_tag": "empirical_latin_flat_0619",
+          "canonical_tag": false,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-32B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/bz3itmuk",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-72B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/t0hazpfl",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-70B",
+          "run_path": "capde/3_mmlu_emp_latin/jyyw4o59",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.3-70B-Instruct",
+          "run_path": "capde/3_mmlu_emp_latin/80x9f40u",
+          "result_tag": "empirical_latin_flat",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": []
+    }
+  },
+  "arc": {
+    "paper15": {
+      "label": "15 models (paper)",
+      "runs": [
+        {
+          "model": "Olmo-3-7B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/eti30z4l",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Mistral-7B-Instruct-v0.3",
+          "run_path": "capde/3_arc_emp_latin_real/1b99vc5j",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-3-4b-it",
+          "run_path": "capde/3_arc_emp_latin_real/v03o3jwi",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B",
+          "run_path": "capde/3_arc_emp_latin_real/okg53iv4",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/h07za0xb",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B",
+          "run_path": "capde/3_arc_emp_latin_real/eacrfnof",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/f79bs1dn",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-4-mini-instruct",
+          "run_path": "capde/3_arc_emp_latin_real/if1bqc59",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-3-mini-4k-instruct",
+          "run_path": "capde/3_arc_emp_latin_real/pcogymvt",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen3-4B-Instruct-2507",
+          "run_path": "capde/3_arc_emp_latin_real/tvy3q4hq",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B",
+          "run_path": "capde/3_arc_emp_latin_real/qpf4l8nv",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/6h6otb5r",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-3B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/dns0a6f0",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Ministral-8B-Instruct-2410",
+          "run_path": "capde/3_arc_emp_latin_real/mug7hbp8",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-8B",
+          "run_path": "capde/3_arc_emp_latin_real/qu2fl35o",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": []
+    },
+    "all20": {
+      "label": "20 models (paper 15 + 5 large)",
+      "runs": [
+        {
+          "model": "Olmo-3-7B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/eti30z4l",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Mistral-7B-Instruct-v0.3",
+          "run_path": "capde/3_arc_emp_latin_real/1b99vc5j",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-3-4b-it",
+          "run_path": "capde/3_arc_emp_latin_real/v03o3jwi",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B",
+          "run_path": "capde/3_arc_emp_latin_real/okg53iv4",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/h07za0xb",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B",
+          "run_path": "capde/3_arc_emp_latin_real/eacrfnof",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/f79bs1dn",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-4-mini-instruct",
+          "run_path": "capde/3_arc_emp_latin_real/if1bqc59",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-3-mini-4k-instruct",
+          "run_path": "capde/3_arc_emp_latin_real/pcogymvt",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen3-4B-Instruct-2507",
+          "run_path": "capde/3_arc_emp_latin_real/tvy3q4hq",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B",
+          "run_path": "capde/3_arc_emp_latin_real/qpf4l8nv",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/6h6otb5r",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-3B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/dns0a6f0",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Ministral-8B-Instruct-2410",
+          "run_path": "capde/3_arc_emp_latin_real/mug7hbp8",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-8B",
+          "run_path": "capde/3_arc_emp_latin_real/qu2fl35o",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-4-31B-it",
+          "run_path": "capde/3_arc_emp_latin_real/l15eevxr",
+          "result_tag": "empirical_latin_flat_0619",
+          "canonical_tag": false,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-32B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/iyx93vbg",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-72B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/xnh5qvjg",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-70B",
+          "run_path": "capde/3_arc_emp_latin_real/x9l1alos",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.3-70B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/dt555qtd",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": []
+    },
+    "large5": {
+      "label": "5 large models",
+      "runs": [
+        {
+          "model": "gemma-4-31B-it",
+          "run_path": "capde/3_arc_emp_latin_real/l15eevxr",
+          "result_tag": "empirical_latin_flat_0619",
+          "canonical_tag": false,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-32B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/iyx93vbg",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-72B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/xnh5qvjg",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-70B",
+          "run_path": "capde/3_arc_emp_latin_real/x9l1alos",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.3-70B-Instruct",
+          "run_path": "capde/3_arc_emp_latin_real/dt555qtd",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": []
+    }
+  },
+  "raceall": {
+    "paper15": {
+      "label": "15 models (paper)",
+      "runs": [
+        {
+          "model": "Olmo-3-7B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/ulokda9k",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Mistral-7B-Instruct-v0.3",
+          "run_path": "capde/3_raceall_emp_latin_fix/ent5lkp3",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-3-4b-it",
+          "run_path": "capde/3_raceall_emp_latin_fix/5q6v5tvn",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B",
+          "run_path": "capde/3_raceall_emp_latin_fix/9pdn6hn5",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/w2mudgf9",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B",
+          "run_path": "capde/3_raceall_emp_latin_fix/mj0xfcn9",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/o7pcv816",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-4-mini-instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/31zds2nq",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-3-mini-4k-instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/y9jpdb1v",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen3-4B-Instruct-2507",
+          "run_path": "capde/3_raceall_emp_latin_fix/fzk2meiq",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B",
+          "run_path": "capde/3_raceall_emp_latin_fix/wq87xliz",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/6lkboebu",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-3B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/0jf4sy51",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Ministral-8B-Instruct-2410",
+          "run_path": "capde/3_raceall_emp_latin_fix/lc09et5u",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-8B",
+          "run_path": "capde/3_raceall_emp_latin_fix/mw617lga",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": []
+    },
+    "all20": {
+      "label": "20 models (paper 15 + 5 large)",
+      "runs": [
+        {
+          "model": "Olmo-3-7B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/ulokda9k",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Mistral-7B-Instruct-v0.3",
+          "run_path": "capde/3_raceall_emp_latin_fix/ent5lkp3",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "gemma-3-4b-it",
+          "run_path": "capde/3_raceall_emp_latin_fix/5q6v5tvn",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B",
+          "run_path": "capde/3_raceall_emp_latin_fix/9pdn6hn5",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.1-8B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/w2mudgf9",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B",
+          "run_path": "capde/3_raceall_emp_latin_fix/mj0xfcn9",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.2-3B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/o7pcv816",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-4-mini-instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/31zds2nq",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Phi-3-mini-4k-instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/y9jpdb1v",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen3-4B-Instruct-2507",
+          "run_path": "capde/3_raceall_emp_latin_fix/fzk2meiq",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B",
+          "run_path": "capde/3_raceall_emp_latin_fix/wq87xliz",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-7B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/6lkboebu",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-3B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/0jf4sy51",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Ministral-8B-Instruct-2410",
+          "run_path": "capde/3_raceall_emp_latin_fix/lc09et5u",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-8B",
+          "run_path": "capde/3_raceall_emp_latin_fix/mw617lga",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-32B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/dxjvus67",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-72B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/o8p7lmd2",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-70B",
+          "run_path": "capde/3_raceall_emp_latin_fix/smobtv6i",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.3-70B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/vmy38ol7",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": [
+        "gemma-4-31B-it"
+      ]
+    },
+    "large5": {
+      "label": "5 large models",
+      "runs": [
+        {
+          "model": "Qwen2.5-32B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/dxjvus67",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Qwen2.5-72B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/o8p7lmd2",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "DeepSeek-R1-Distill-Llama-70B",
+          "run_path": "capde/3_raceall_emp_latin_fix/smobtv6i",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        },
+        {
+          "model": "Llama-3.3-70B-Instruct",
+          "run_path": "capde/3_raceall_emp_latin_fix/vmy38ol7",
+          "result_tag": "empirical_latin_flat_0502",
+          "canonical_tag": true,
+          "n_runs": "3"
+        }
+      ],
+      "missing": [
+        "gemma-4-31B-it"
+      ]
+    }
+  }
+}
