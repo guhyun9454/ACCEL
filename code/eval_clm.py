@@ -2938,6 +2938,8 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                         probs_bank, list(range(k)), k, alpha / 100.0, seed,
                         args.empirical_logit_delta,
                     )
+                if args.empirical_residual_model == "zero":
+                    residual_bank = np.zeros((1, k), dtype=np.float64)
                 if set(int(x) for x in prior_meta.get("prefix_ids", [])) != prefix_ids:
                     raise RuntimeError("adaptive prefix selection diverged from the PriDe estimator")
 
@@ -3861,7 +3863,7 @@ def main():
                         if empirical_percentile_mode not in {"online", "fixed_prefix"}:
                             empirical_percentile_mode = "online"
                         empirical_residual_model = str(getattr(args, "empirical_residual_model", "logistic_normal")).strip().lower()
-                        if empirical_residual_model not in {"logistic_normal", "empirical"}:
+                        if empirical_residual_model not in {"logistic_normal", "empirical", "zero"}:
                             empirical_residual_model = "logistic_normal"
                         empirical_stage_schedule = str(getattr(args, "empirical_stage_schedule", "sqrt")).strip().lower()
                         if empirical_stage_schedule not in {"flat", "sqrt"}:
@@ -4171,6 +4173,9 @@ def main():
                                         logit_delta=empirical_logit_delta,
                                     )
                                     empirical_covariance = np.zeros((k, k), dtype=np.float64)
+                                if empirical_residual_model == "zero":
+                                    # eps=0 ablation: keep mu_hat, drop per-instance residuals entirely
+                                    empirical_residual_bank = np.zeros((1, k), dtype=np.float64)
                                 empirical_prefix_ids = set(int(x) for x in (empirical_meta.get("prefix_ids") or []))
                                 empirical_stage_cache_path = _empirical_stage_cache_path(
                                     args,
