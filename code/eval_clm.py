@@ -664,6 +664,9 @@ def _select_best_relative_cyclic_sequence(
     }
 
 
+_EMPIRICAL_RESIDUAL_WEIGHTING = "uniform"
+
+
 def _compute_empirical_stage_posteriors(
     stage_probs: np.ndarray,
     slot_to_content_schedule: List[Tuple[int, ...]],
@@ -690,20 +693,56 @@ def _compute_empirical_stage_posteriors(
 
     for stage_idx in range(len(slot_to_content_schedule)):
         per_residual = []
+        per_view_dists = []
         for residual in residuals:
             scores = np.zeros((k,), dtype=np.float64)
             prior_factor = np.exp(-(mu + residual))
+            views = []
             for inner_idx in range(stage_idx + 1):
                 inv = inverse_assignments[inner_idx]
                 stage_row = probs[inner_idx]
-                scores += stage_row[inv] * prior_factor[inv]
+                v = stage_row[inv] * prior_factor[inv]
+                tv = float(np.sum(v))
+                views.append(v / tv if (np.isfinite(tv) and tv > eps) else np.ones((k,)) / float(k))
+                scores += v
             total = float(np.sum(scores))
             if not np.isfinite(total) or total <= eps:
                 post = np.ones((k,), dtype=np.float64) / float(k)
             else:
                 post = scores / total
             per_residual.append(post)
-        posterior = np.mean(np.asarray(per_residual, dtype=np.float64), axis=0)
+            per_view_dists.append(views)
+        arr = np.asarray(per_residual, dtype=np.float64)
+        n_res = arr.shape[0]
+        wmode = _EMPIRICAL_RESIDUAL_WEIGHTING
+        if wmode == "uniform" or n_res == 1:
+            posterior = np.mean(arr, axis=0)
+        else:
+            if wmode == "confidence":
+                w = arr.max(axis=1)
+            elif wmode == "agreement":
+                logw = np.zeros((n_res,), dtype=np.float64)
+                for r_i in range(n_res):
+                    for v in per_view_dists[r_i]:
+                        logw[r_i] += np.log(float(np.dot(v, arr[r_i])) + eps)
+                logw -= float(np.max(logw))
+                w = np.exp(logw)
+            elif wmode == "proximity":
+                obs = np.asarray(probs[0], dtype=np.float64)
+                obs = obs / (float(np.sum(obs)) + eps)
+                lo = np.log(obs + eps)
+                lo = lo - float(np.mean(lo))
+                d2 = np.sum((lo[None, :] - (mu[None, :] + residuals)) ** 2, axis=1)
+                var = float(np.mean(np.var(residuals, axis=0)))
+                w = np.exp(-(d2 - float(np.min(d2))) / (2.0 * max(var, eps)))
+            else:
+                w = np.ones((n_res,), dtype=np.float64)
+            sw = float(np.sum(w))
+            if not np.isfinite(sw) or sw <= eps:
+                w = np.ones((n_res,), dtype=np.float64) / float(n_res)
+            else:
+                w = w / sw
+            posterior = np.sum(w[:, None] * arr, axis=0)
         posterior = posterior / (float(np.sum(posterior)) + eps)
         posterior_by_stage.append(posterior)
         pred_idx_by_stage.append(int(np.argmax(posterior)))
@@ -3113,6 +3152,9 @@ def main():
     hf_logging.set_verbosity_error()
 
     args = parse_arguments()
+    global _EMPIRICAL_RESIDUAL_WEIGHTING
+    _EMPIRICAL_RESIDUAL_WEIGHTING = str(
+        getattr(args, "empirical_residual_weighting", "uniform")).strip().lower()
     if len(getattr(args, "eval_names", [])) == 0:
         return
 
@@ -4473,6 +4515,7 @@ def main():
                                     "sweep_mode": empirical_sweep_mode,
                                     "percentile_mode": empirical_percentile_mode,
                                     "residual_model": empirical_residual_model,
+                                    "residual_weighting": _EMPIRICAL_RESIDUAL_WEIGHTING,
                                     "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
                                     "cov_shrinkage": float(empirical_cov_shrinkage),
                                     "transition_mode": empirical_transition_mode,
@@ -4548,6 +4591,7 @@ def main():
                                         "run_idx": int(run_idx),
                                         "alpha": float(pride_alpha),
                                         "residual_model": empirical_residual_model,
+                                        "residual_weighting": _EMPIRICAL_RESIDUAL_WEIGHTING,
                                         "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
                                         "cov_shrinkage": float(empirical_cov_shrinkage),
                                         "transition_mode": empirical_transition_mode,
