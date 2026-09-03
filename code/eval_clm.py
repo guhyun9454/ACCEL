@@ -666,6 +666,7 @@ def _select_best_relative_cyclic_sequence(
 
 _EMPIRICAL_RESIDUAL_WEIGHTING = "uniform"
 _EMPIRICAL_RESIDUAL_IDENT = False
+_EMPIRICAL_RESIDUAL_IDENT_SHRINK = 1.0
 
 
 def _identify_question_residual(
@@ -730,8 +731,11 @@ def _compute_empirical_stage_posteriors(
         stage_residuals = residuals
         if _EMPIRICAL_RESIDUAL_IDENT:
             if stage_idx + 1 >= 3:
-                stage_residuals = _identify_question_residual(
-                    probs[: stage_idx + 1], slot_to_content_schedule[: stage_idx + 1], mu
+                stage_residuals = (
+                    _EMPIRICAL_RESIDUAL_IDENT_SHRINK
+                    * _identify_question_residual(
+                        probs[: stage_idx + 1], slot_to_content_schedule[: stage_idx + 1], mu
+                    )
                 ).reshape(1, -1)
             else:
                 stage_residuals = np.zeros((1, k), dtype=np.float64)
@@ -3195,12 +3199,13 @@ def main():
     hf_logging.set_verbosity_error()
 
     args = parse_arguments()
-    global _EMPIRICAL_RESIDUAL_WEIGHTING, _EMPIRICAL_RESIDUAL_IDENT
+    global _EMPIRICAL_RESIDUAL_WEIGHTING, _EMPIRICAL_RESIDUAL_IDENT, _EMPIRICAL_RESIDUAL_IDENT_SHRINK
     _EMPIRICAL_RESIDUAL_WEIGHTING = str(
         getattr(args, "empirical_residual_weighting", "uniform")).strip().lower()
     _EMPIRICAL_RESIDUAL_IDENT = (
         str(getattr(args, "empirical_residual_model", "")).strip().lower() == "identify"
     )
+    _EMPIRICAL_RESIDUAL_IDENT_SHRINK = float(getattr(args, "empirical_ident_shrink", 1.0))
     if len(getattr(args, "eval_names", [])) == 0:
         return
 

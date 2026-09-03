@@ -147,6 +147,8 @@ def parse_arguments():
     parser.add_argument("--empirical_residual_model", type=str, default="logistic_normal",
                         choices=["logistic_normal", "empirical", "zero", "identify"],
                         help="Residual prior model for empirical PriDe. logistic_normal uses Gaussian residual Monte Carlo; empirical reuses the residual bank directly (legacy); zero drops residuals (mu-only); identify estimates the current question's own residual from its observed views once >=3 views are available (mu-only before that).")
+    parser.add_argument("--empirical_ident_shrink", type=float, default=1.0,
+                        help="Shrinkage factor for the identified per-question residual (identify mode only): the posterior correction uses mu + s*eps_hat(q). 1.0 = raw LS estimate.")
     parser.add_argument("--empirical_residual_weighting", type=str, default="uniform",
                         choices=["uniform", "agreement", "confidence", "proximity"],
                         help="Weighting of residual-bank components in stage-posterior marginalization. uniform = plain mean (paper default); agreement = cross-view consistency likelihood; confidence = per-residual posterior max; proximity = distance of the observed stage-1 logits to mu+eps_k.")
