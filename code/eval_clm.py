@@ -495,6 +495,62 @@ def _build_targeted_latin_schedule(k: int, top1_idx: int, runner_idx: int) -> Li
     return [_content_to_slot_assignment_to_perm(sched) for sched in schedules_content_to_slot]
 
 
+def _build_targeted_swaponly_schedule(k: int, top1_idx: int, runner_idx: int) -> List[Tuple[int, ...]]:
+    """
+    ABLATION of the Latin `_build_targeted_latin_schedule` (see AGENTS.md
+    latin_swaponly). Stage-1 is identity. Stage-2 SWAPS ONLY the two targeted
+    contents (top1 <-> runner) and leaves every other content in place -- i.e.
+    the "shifting" of the remaining slots is disabled, isolating the pure
+    top1/top2 swap. Later stages (3..k) are completed best-effort with the same
+    Latin search so each content still visits new slots where possible; if a full
+    Latin completion is impossible (a side effect of freezing the remainder at
+    stage-2), the leftover stage falls back to an unused cyclic rotation so the
+    schedule always has exactly k valid permutations. In practice (k=4,5) the
+    Latin search succeeds and only stage-2 differs from the latin schedule.
+    """
+    if k <= 1:
+        return [tuple(range(k))]
+    if top1_idx == runner_idx:
+        runner_idx = (int(top1_idx) + 1) % int(k)
+
+    schedules_content_to_slot: List[List[int]] = [list(range(k))]
+    swap = list(range(k))                      # identity content->slot
+    swap[int(top1_idx)] = int(runner_idx)      # swap the two targeted contents' slots
+    swap[int(runner_idx)] = int(top1_idx)      # remaining contents stay in place (no shift)
+    schedules_content_to_slot.append(swap)
+
+    for _stage in range(2, k):
+        used_by_content = [set() for _ in range(k)]
+        for sched in schedules_content_to_slot:
+            for content_idx, slot_idx in enumerate(sched):
+                used_by_content[content_idx].add(int(slot_idx))
+        allowed_slots = [sorted(set(range(k)) - used_by_content[i]) for i in range(k)]
+        candidate = _search_latin_assignment(
+            k=k,
+            allowed_slots=allowed_slots,
+            content_idx=0,
+            used_slots=set(),
+            current=[-1] * k,
+        )
+        if candidate is None:
+            existing = {tuple(_content_to_slot_assignment_to_perm(s)) for s in schedules_content_to_slot}
+            candidate = None
+            for shift in range(1, int(k)):
+                rot_slot_to_content = tuple((i + shift) % int(k) for i in range(int(k)))
+                if rot_slot_to_content in existing:
+                    continue
+                c2s = [0] * k
+                for slot_idx, content_idx in enumerate(rot_slot_to_content):
+                    c2s[int(content_idx)] = int(slot_idx)
+                candidate = c2s
+                break
+            if candidate is None:
+                candidate = list(range(k))
+        schedules_content_to_slot.append(candidate)
+
+    return [_content_to_slot_assignment_to_perm(sched) for sched in schedules_content_to_slot]
+
+
 def _build_incremental_cyclic_schedule(
     k: int,
     top1_idx: int,
@@ -3872,7 +3928,7 @@ def main():
                         empirical_mc_samples = max(1, int(getattr(args, "empirical_mc_samples", 64)))
                         empirical_cov_shrinkage = min(max(float(getattr(args, "empirical_cov_shrinkage", 0.1)), 0.0), 1.0)
                         empirical_transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
-                        if empirical_transition_mode not in {"latin", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
+                        if empirical_transition_mode not in {"latin", "latin_swaponly", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
                             empirical_transition_mode = "latin"
                         empirical_skip_residual_on_cyclic = bool(getattr(args, "empirical_skip_residual_on_cyclic", False))
                         empirical_conf_thresholds = [
@@ -4233,6 +4289,9 @@ def main():
                                     runner_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else int(top1_idx)
                                     if empirical_transition_mode == "latin" or empirical_transition_mode == "probe_cyclic":
                                         stage_schedule = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
+                                        stage_shifts = None
+                                    elif empirical_transition_mode == "latin_swaponly":
+                                        stage_schedule = _build_targeted_swaponly_schedule(k, top1_idx, runner_idx)
                                         stage_shifts = None
                                     elif empirical_transition_mode == "cyclic_learned":
                                         selected_actions = tuple()
