@@ -3928,7 +3928,7 @@ def main():
                         empirical_mc_samples = max(1, int(getattr(args, "empirical_mc_samples", 64)))
                         empirical_cov_shrinkage = min(max(float(getattr(args, "empirical_cov_shrinkage", 0.1)), 0.0), 1.0)
                         empirical_transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
-                        if empirical_transition_mode not in {"latin", "latin_swaponly", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
+                        if empirical_transition_mode not in {"latin", "latin_swaponly", "latin_swaponly_random", "latin_swaponly_worst", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
                             empirical_transition_mode = "latin"
                         empirical_skip_residual_on_cyclic = bool(getattr(args, "empirical_skip_residual_on_cyclic", False))
                         empirical_conf_thresholds = [
@@ -4292,6 +4292,30 @@ def main():
                                         stage_shifts = None
                                     elif empirical_transition_mode == "latin_swaponly":
                                         stage_schedule = _build_targeted_swaponly_schedule(k, top1_idx, runner_idx)
+                                        stage_shifts = None
+                                    elif empirical_transition_mode == "latin_swaponly_random":
+                                        # Control for latin_swaponly: swap top1 with a RANDOM other
+                                        # option (rest frozen). Isolates whether targeting the
+                                        # runner-up specifically matters, holding the single-swap
+                                        # structure fixed. Partner is seeded per sample.
+                                        others = [i for i in range(int(k)) if i != top1_idx]
+                                        if others:
+                                            rnd_seed = _stable_u32_seed(
+                                                f"{subject}:{sample_pos}:{top1_idx}:latin_swaponly_random",
+                                                empirical_seed,
+                                            )
+                                            partner_idx = int(np.random.default_rng(rnd_seed).choice(others))
+                                        else:
+                                            partner_idx = int(top1_idx)
+                                        stage_schedule = _build_targeted_swaponly_schedule(k, top1_idx, partner_idx)
+                                        stage_shifts = None
+                                    elif empirical_transition_mode == "latin_swaponly_worst":
+                                        # Lower bracket for the targeting axis: swap top1 with the
+                                        # LOWEST-ranked option (rest frozen).
+                                        partner_idx = int(sorted_idx[-1])
+                                        if partner_idx == top1_idx and int(k) > 1:
+                                            partner_idx = int(sorted_idx[-2]) if len(sorted_idx) > 1 else (int(top1_idx) + 1) % int(k)
+                                        stage_schedule = _build_targeted_swaponly_schedule(k, top1_idx, partner_idx)
                                         stage_shifts = None
                                     elif empirical_transition_mode == "cyclic_learned":
                                         selected_actions = tuple()
