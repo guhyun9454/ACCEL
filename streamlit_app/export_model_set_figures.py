@@ -451,6 +451,40 @@ STYLE = {
 METRICS = [("delta_acc", "Δ Accuracy (%)", "Δ Accuracy"),
            ("delta_rstd", "Δ Rstd (%)", "Δ Rstd")]
 
+# bottom-row dataset labels of the paper's main figure
+TASK_DISPLAY = {"mmlu": "MMLU", "csqa": "CSQA", "arc": "ARC", "raceall": "RACE"}
+
+
+def _draw_panel(ax, task: str, metric: str, ylabel: str, title: str,
+                payloads: List[dict], max_pct: Optional[float],
+                show_band: bool, min_pct: Optional[float],
+                label_prefix: str = ""):
+    for curve, st in STYLE.items():
+        sl = [s for s in (series(p, curve, metric) for p in payloads) if s]
+        if not sl:
+            continue
+        # min_pct trims the sweep parameter of the two swept curves; cyclic
+        # keeps fraction 0 so the (cost 1, delta 0) origin stays on the plot.
+        x, y, ystd, _ = aggregate(sl, max_pct, None if curve == "cyclic" else min_pct)
+        if x.size == 0:
+            continue
+        if show_band and ystd.size == y.size:
+            ax.fill_between(x, y - ystd, y + ystd, color=st["color"], alpha=0.10, linewidth=0)
+        ax.plot(x, y, color=st["color"], linestyle=":", marker=st["marker"],
+                linewidth=2.5, markersize=8, alpha=0.95,
+                label=f"{label_prefix}{st['label']}")
+    ax.set_xlabel("Computational Cost (× of default)", fontsize=20)
+    ax.set_ylabel(ylabel, fontsize=20)
+    ax.set_title(f"{task} — {title}", fontsize=20)
+    ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
+    ax.grid(True, linestyle="--", alpha=0.35)
+    ax.tick_params(labelsize=14)
+    if metric == "delta_rstd":
+        # lower Rstd is better, so flip the axis: improvement points up,
+        # same reading direction as the accuracy panel.
+        ax.invert_yaxis()
+    ax.legend(loc="lower right", fontsize=18)
+
 
 def make_figure(task: str, set_label: str, payloads: List[dict], max_pct: Optional[float],
                 show_band: bool, min_pct: Optional[float] = None,
@@ -461,34 +495,76 @@ def make_figure(task: str, set_label: str, payloads: List[dict], max_pct: Option
 
     fig, axes = plt.subplots(1, 2, figsize=(21, 6.2), dpi=160)
     for ax, (metric, ylabel, title) in zip(axes, METRICS):
-        for curve, st in STYLE.items():
-            sl = [s for s in (series(p, curve, metric) for p in payloads) if s]
-            if not sl:
-                continue
-            # min_pct trims the sweep parameter of the two swept curves; cyclic
-            # keeps fraction 0 so the (cost 1, delta 0) origin stays on the plot.
-            x, y, ystd, _ = aggregate(sl, max_pct, None if curve == "cyclic" else min_pct)
-            if x.size == 0:
-                continue
-            if show_band and ystd.size == y.size:
-                ax.fill_between(x, y - ystd, y + ystd, color=st["color"], alpha=0.10, linewidth=0)
-            ax.plot(x, y, color=st["color"], linestyle=":", marker=st["marker"],
-                    linewidth=2.5, markersize=8, alpha=0.95,
-                    label=f"{overall_label} • {st['label']}")
-        ax.set_xlabel("Computational Cost (× of default)", fontsize=20)
-        ax.set_ylabel(ylabel, fontsize=20)
-        ax.set_title(f"{task} — {title}", fontsize=20)
-        ax.axhline(y=0, color="gray", linestyle=":", alpha=0.6)
-        ax.grid(True, linestyle="--", alpha=0.35)
-        ax.tick_params(labelsize=14)
-        if metric == "delta_rstd":
-            # lower Rstd is better, so flip the axis: improvement points up,
-            # same reading direction as the accuracy panel.
-            ax.invert_yaxis()
-        ax.legend(loc="lower right", fontsize=18)
+        _draw_panel(ax, task, metric, ylabel, title, payloads, max_pct, show_band,
+                    min_pct, label_prefix=f"{overall_label} • ")
     fig.suptitle(f"{task} — {set_label} (n={len(payloads)})", fontsize=18)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return fig
+
+
+def make_paper_grid(tasks: List[str], payloads_by_task: Dict[str, List[dict]],
+                    max_pct: Optional[float], show_band: bool,
+                    min_pct: Optional[float] = None):
+    """Main-figure-style grid: columns = tasks, rows = (Δ Accuracy, Δ Rstd),
+    plain legend labels, dataset name under each column, no suptitle.
+
+    A single task renders as one row (Δ Accuracy | Δ Rstd) with one centered
+    dataset label, keeping the same per-panel styling.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ncols = len(tasks)
+    if ncols == 1:
+        fig, axes = plt.subplots(1, 2, figsize=(21, 6.6), dpi=160)
+        panels = [(axes[i], tasks[0], METRICS[i]) for i in range(2)]
+    else:
+        fig, axes = plt.subplots(2, ncols, figsize=(10.5 * ncols, 13.0), dpi=160)
+        panels = [(axes[r][c], tasks[c], METRICS[r])
+                  for r in range(2) for c in range(ncols)]
+    for ax, task, (metric, ylabel, title) in panels:
+        _draw_panel(ax, task, metric, ylabel, title, payloads_by_task[task],
+                    max_pct, show_band, min_pct)
+    fig.tight_layout(rect=(0, 0.045, 1, 1))
+    # dataset labels under each column, as in the paper's main figure
+    if ncols == 1:
+        fig.text(0.5, 0.005, TASK_DISPLAY.get(tasks[0], tasks[0]),
+                 ha="center", va="bottom", fontsize=24)
+    else:
+        for c, task in enumerate(tasks):
+            x = (axes[0][c].get_position().x0 + axes[0][c].get_position().x1) / 2
+            fig.text(x, 0.005, TASK_DISPLAY.get(task, task),
+                     ha="center", va="bottom", fontsize=26)
+    return fig
+
+
+def grid_points(tasks: List[str], payloads_by_task: Dict[str, List[dict]],
+                max_pct: Optional[float], min_pct: Optional[float]) -> Dict[str, Any]:
+    """The aggregated curves behind a paper grid, for captions/prose."""
+    out: Dict[str, Any] = {}
+    for task in tasks:
+        payloads = payloads_by_task[task]
+        out[task] = {"n_models": len(payloads)}
+        for curve in STYLE:
+            for metric, _, _ in METRICS:
+                sl = [s for s in (series(p, curve, metric) for p in payloads) if s]
+                if not sl:
+                    continue
+                lo = None if curve == "cyclic" else min_pct
+                rows = []
+                for v in sorted(set().union(*[set(s) for s in sl])):
+                    if (max_pct is not None and v > max_pct) or (lo is not None and v < lo):
+                        continue
+                    cs = [s[v][0] for s in sl if v in s]
+                    ys = [s[v][1] for s in sl if v in s]
+                    if cs:
+                        rows.append({"sweep_param": v, "cost": float(np.mean(cs)),
+                                     "mean": float(np.mean(ys)),
+                                     "std_across_models": float(np.std(ys)),
+                                     "n": len(ys)})
+                out[task].setdefault(curve, {})[metric] = rows
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -510,6 +586,10 @@ def main():
                     help="drop PriDe alpha / ACCEL beta below this (cyclic is not trimmed)")
     ap.add_argument("--band", action="store_true", help="shade ±1 std across models")
     ap.add_argument("--discover", action="store_true", help="only print what was found")
+    ap.add_argument("--paper_grid", action="store_true",
+                    help="one main-figure-style grid per set across --tasks "
+                         "(cols=tasks, rows=Δacc/Δrstd) instead of per-task figures; "
+                         "also dumps the aggregated points as JSON")
     args = ap.parse_args()
 
     records = collect_runs(args.entity, args.projects, args.tasks, args.cache_dir, args.refresh)
@@ -518,6 +598,7 @@ def main():
         return 1
 
     manifest: Dict[str, Any] = {}
+    grid_payloads: Dict[str, Dict[str, List[dict]]] = {}
     os.makedirs(args.out_dir, exist_ok=True)
 
     for task in args.tasks:
@@ -550,12 +631,32 @@ def main():
                   + (f"  MISSING: {', '.join(missing)}" if missing else ""))
             if args.discover or not picked:
                 continue
+            grid_payloads.setdefault(set_key, {})[task] = [r["payload"] for r in picked]
+            if args.paper_grid:
+                continue
             fig = make_figure(task, set_label, [r["payload"] for r in picked],
                               None if args.max_pct >= 100 else args.max_pct, args.band,
                               min_pct=(None if args.min_pct <= 0 else args.min_pct))
             out = os.path.join(args.out_dir, f"{task}_{set_key}.png")
             fig.savefig(out, bbox_inches="tight")
             print(f"  -> {out}")
+
+    if args.paper_grid and not args.discover:
+        max_pct = None if args.max_pct >= 100 else args.max_pct
+        min_pct = None if args.min_pct <= 0 else args.min_pct
+        for set_key, by_task in grid_payloads.items():
+            tasks = [t for t in args.tasks if t in by_task]
+            if not tasks:
+                continue
+            fig = make_paper_grid(tasks, by_task, max_pct, args.band, min_pct)
+            stem = f"paper_grid_{set_key}_{'-'.join(tasks)}"
+            out = os.path.join(args.out_dir, stem + ".png")
+            fig.savefig(out, bbox_inches="tight")
+            with open(os.path.join(args.out_dir, stem + "_points.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(grid_points(tasks, by_task, max_pct, min_pct), f,
+                          ensure_ascii=False, indent=2)
+            print(f"  -> {out} (+ points json)")
 
     with open(os.path.join(args.out_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
