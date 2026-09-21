@@ -169,6 +169,30 @@ def _to_plain(obj):
     return obj
 
 
+def _unflatten_points(summary: dict) -> dict:
+    """Rebuild `three_curves_points_v1` from dotted summary keys.
+
+    W&B sometimes flattens a nested summary update into per-leaf keys like
+    `three_curves_points_v1.raceall.curves.cyclic.acc`.  Path segments are
+    split on ".", which is safe for the canonical payload (task names and
+    the by_alpha key "2" contain no dots).
+    """
+    out: Dict[str, Any] = {}
+    prefix = "three_curves_points_v1."
+    for k, v in summary.items():
+        if not str(k).startswith(prefix):
+            continue
+        parts = str(k)[len(prefix):].split(".")
+        cur = out
+        for p in parts[:-1]:
+            nxt = cur.setdefault(p, {})
+            if not isinstance(nxt, dict):
+                nxt = cur[p] = {}
+            cur = nxt
+        cur[parts[-1]] = v
+    return out
+
+
 def _run_metadata_args(run) -> List[str]:
     """argv of the run.  `run.metadata` lazily downloads wandb-metadata.json."""
     try:
@@ -282,6 +306,10 @@ def collect_runs(
                     points = summary.get("three_curves_points_v1") or {}
                     if not isinstance(points, dict):
                         points = {}
+                    if not points:
+                        # Some runs (e.g. rqitu860) store the payload flattened
+                        # into dotted summary keys instead of one nested dict.
+                        points = _unflatten_points(summary)
                     cached = {
                         "skip": False,
                         "run_id": run.id,
