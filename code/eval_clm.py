@@ -6,6 +6,7 @@ import sys
 import gc
 import json
 import copy
+import itertools
 import logging
 import random
 import math
@@ -549,6 +550,54 @@ def _build_targeted_swaponly_schedule(k: int, top1_idx: int, runner_idx: int) ->
         schedules_content_to_slot.append(candidate)
 
     return [_content_to_slot_assignment_to_perm(sched) for sched in schedules_content_to_slot]
+
+
+def _build_latin_v2_completion_schedule(
+    k: int,
+    top1_idx: int,
+    runner_idx: int,
+    completion: str,
+    seed: int = 0,
+) -> List[Tuple[int, ...]]:
+    """
+    ABLATION of the Latin completion (see AGENTS.md latin_v2_*). Stages 1-2 are
+    identical to `_build_targeted_latin_schedule` (identity, then the canonical
+    targeted top1<->runner swap + shift of the rest), so only stages 3..k differ:
+      - "random": each later stage is a uniformly random permutation (seeded)
+        not already in the schedule; revisiting a slot is allowed, so the full
+        schedule is generally NOT a Latin square.
+      - "anti": each later stage is the unused permutation that MAXIMIZES the
+        number of contents placed in a slot they already visited (ties broken
+        lexicographically) -- the least-Latin completion, a lower bracket.
+    Returns slot->content permutations.
+    """
+    if k <= 1:
+        return [tuple(range(k))]
+    base = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
+    schedule: List[Tuple[int, ...]] = [tuple(int(x) for x in p) for p in base[:2]]
+    all_perms = list(itertools.permutations(range(int(k))))
+    rng = np.random.default_rng(int(seed))
+
+    for _stage in range(2, k):
+        used = set(schedule)
+        candidates = [p for p in all_perms if p not in used]
+        if completion == "random":
+            nxt = candidates[int(rng.integers(len(candidates)))]
+        elif completion == "anti":
+            visited = [set() for _ in range(k)]
+            for p in schedule:
+                for slot_idx, content_idx in enumerate(p):
+                    visited[int(content_idx)].add(int(slot_idx))
+
+            def _revisits(p: Tuple[int, ...]) -> int:
+                return sum(1 for slot_idx, content_idx in enumerate(p) if slot_idx in visited[int(content_idx)])
+
+            nxt = max(candidates, key=_revisits)
+        else:
+            raise ValueError(f"Unknown latin_v2 completion: {completion}")
+        schedule.append(tuple(int(x) for x in nxt))
+
+    return schedule
 
 
 def _build_incremental_cyclic_schedule(
@@ -3928,7 +3977,7 @@ def main():
                         empirical_mc_samples = max(1, int(getattr(args, "empirical_mc_samples", 64)))
                         empirical_cov_shrinkage = min(max(float(getattr(args, "empirical_cov_shrinkage", 0.1)), 0.0), 1.0)
                         empirical_transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
-                        if empirical_transition_mode not in {"latin", "latin_swaponly", "latin_swaponly_random", "latin_swaponly_worst", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
+                        if empirical_transition_mode not in {"latin", "latin_swaponly", "latin_swaponly_random", "latin_swaponly_worst", "latin_v2_random", "latin_v2_anti", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
                             empirical_transition_mode = "latin"
                         empirical_skip_residual_on_cyclic = bool(getattr(args, "empirical_skip_residual_on_cyclic", False))
                         empirical_conf_thresholds = [
@@ -4316,6 +4365,21 @@ def main():
                                         if partner_idx == top1_idx and int(k) > 1:
                                             partner_idx = int(sorted_idx[-2]) if len(sorted_idx) > 1 else (int(top1_idx) + 1) % int(k)
                                         stage_schedule = _build_targeted_swaponly_schedule(k, top1_idx, partner_idx)
+                                        stage_shifts = None
+                                    elif empirical_transition_mode in {"latin_v2_random", "latin_v2_anti"}:
+                                        # Latin-completion ablation: canonical latin stages 1-2,
+                                        # stages 3..k replaced by a non-Latin completion.
+                                        completion_seed = _stable_u32_seed(
+                                            f"{subject}:{sample_pos}:{top1_idx}:{runner_idx}:{empirical_transition_mode}",
+                                            empirical_seed,
+                                        )
+                                        stage_schedule = _build_latin_v2_completion_schedule(
+                                            k,
+                                            top1_idx,
+                                            runner_idx,
+                                            completion="random" if empirical_transition_mode == "latin_v2_random" else "anti",
+                                            seed=completion_seed,
+                                        )
                                         stage_shifts = None
                                     elif empirical_transition_mode == "cyclic_learned":
                                         selected_actions = tuple()
