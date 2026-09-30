@@ -600,6 +600,23 @@ def _build_latin_v2_completion_schedule(
     return schedule
 
 
+def _build_full_random_schedule(k: int, seed: int = 0) -> List[Tuple[int, ...]]:
+    """
+    NULL baseline for the permutation design. Stage 1 is identity; stages 2..k
+    are uniformly random distinct non-identity permutations drawn from all k!
+    orders -- no targeting, no shift, no cyclic or Latin structure. Independent
+    of the stage-1 ranking.
+    Returns slot->content permutations.
+    """
+    if k <= 1:
+        return [tuple(range(k))]
+    identity = tuple(range(int(k)))
+    others = [p for p in itertools.permutations(range(int(k))) if p != identity]
+    rng = np.random.default_rng(int(seed))
+    picks = rng.choice(len(others), size=int(k) - 1, replace=False)
+    return [identity] + [tuple(int(x) for x in others[int(i)]) for i in picks]
+
+
 def _build_incremental_cyclic_schedule(
     k: int,
     top1_idx: int,
@@ -3977,7 +3994,7 @@ def main():
                         empirical_mc_samples = max(1, int(getattr(args, "empirical_mc_samples", 64)))
                         empirical_cov_shrinkage = min(max(float(getattr(args, "empirical_cov_shrinkage", 0.1)), 0.0), 1.0)
                         empirical_transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
-                        if empirical_transition_mode not in {"latin", "latin_swaponly", "latin_swaponly_random", "latin_swaponly_worst", "latin_v2_random", "latin_v2_anti", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
+                        if empirical_transition_mode not in {"latin", "latin_swaponly", "latin_swaponly_random", "latin_swaponly_worst", "latin_v2_random", "latin_v2_anti", "full_random", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
                             empirical_transition_mode = "latin"
                         empirical_skip_residual_on_cyclic = bool(getattr(args, "empirical_skip_residual_on_cyclic", False))
                         empirical_conf_thresholds = [
@@ -4380,6 +4397,15 @@ def main():
                                             completion="random" if empirical_transition_mode == "latin_v2_random" else "anti",
                                             seed=completion_seed,
                                         )
+                                        stage_shifts = None
+                                    elif empirical_transition_mode == "full_random":
+                                        # Null baseline: uniformly random distinct orders, not
+                                        # conditioned on the stage-1 ranking.
+                                        full_random_seed = _stable_u32_seed(
+                                            f"{subject}:{sample_pos}:full_random",
+                                            empirical_seed,
+                                        )
+                                        stage_schedule = _build_full_random_schedule(k, seed=full_random_seed)
                                         stage_shifts = None
                                     elif empirical_transition_mode == "cyclic_learned":
                                         selected_actions = tuple()
