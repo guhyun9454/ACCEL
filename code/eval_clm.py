@@ -558,11 +558,14 @@ def _build_latin_v2_completion_schedule(
     runner_idx: int,
     completion: str,
     seed: int = 0,
+    base: str = "latin",
 ) -> List[Tuple[int, ...]]:
     """
     ABLATION of the Latin completion (see AGENTS.md latin_v2_*). Stages 1-2 are
     identical to `_build_targeted_latin_schedule` (identity, then the canonical
-    targeted top1<->runner swap + shift of the rest), so only stages 3..k differ:
+    targeted top1<->runner swap + shift of the rest), so only stages 3..k differ.
+    With base="swaponly" (latin_swaponly_v2_*), stages 1-2 are instead those of
+    `_build_targeted_swaponly_schedule` (top1<->runner swap, rest frozen):
       - "random": each later stage is a uniformly random permutation (seeded)
         not already in the schedule; revisiting a slot is allowed, so the full
         schedule is generally NOT a Latin square.
@@ -573,8 +576,13 @@ def _build_latin_v2_completion_schedule(
     """
     if k <= 1:
         return [tuple(range(k))]
-    base = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
-    schedule: List[Tuple[int, ...]] = [tuple(int(x) for x in p) for p in base[:2]]
+    if base == "latin":
+        base_sched = _build_targeted_latin_schedule(k, top1_idx, runner_idx)
+    elif base == "swaponly":
+        base_sched = _build_targeted_swaponly_schedule(k, top1_idx, runner_idx)
+    else:
+        raise ValueError(f"Unknown latin_v2 base: {base}")
+    schedule: List[Tuple[int, ...]] = [tuple(int(x) for x in p) for p in base_sched[:2]]
     all_perms = list(itertools.permutations(range(int(k))))
     rng = np.random.default_rng(int(seed))
 
@@ -3994,7 +4002,7 @@ def main():
                         empirical_mc_samples = max(1, int(getattr(args, "empirical_mc_samples", 64)))
                         empirical_cov_shrinkage = min(max(float(getattr(args, "empirical_cov_shrinkage", 0.1)), 0.0), 1.0)
                         empirical_transition_mode = str(getattr(args, "empirical_transition_mode", "latin")).strip().lower()
-                        if empirical_transition_mode not in {"latin", "latin_swaponly", "latin_swaponly_random", "latin_swaponly_worst", "latin_v2_random", "latin_v2_anti", "full_random", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
+                        if empirical_transition_mode not in {"latin", "latin_swaponly", "latin_swaponly_random", "latin_swaponly_worst", "latin_v2_random", "latin_v2_anti", "latin_swaponly_v2_random", "latin_swaponly_v2_anti", "full_random", "probe_cyclic", "cyclic_random", "cyclic_targeted", "cyclic_learned"}:
                             empirical_transition_mode = "latin"
                         empirical_skip_residual_on_cyclic = bool(getattr(args, "empirical_skip_residual_on_cyclic", False))
                         empirical_conf_thresholds = [
@@ -4383,7 +4391,7 @@ def main():
                                             partner_idx = int(sorted_idx[-2]) if len(sorted_idx) > 1 else (int(top1_idx) + 1) % int(k)
                                         stage_schedule = _build_targeted_swaponly_schedule(k, top1_idx, partner_idx)
                                         stage_shifts = None
-                                    elif empirical_transition_mode in {"latin_v2_random", "latin_v2_anti"}:
+                                    elif empirical_transition_mode in {"latin_v2_random", "latin_v2_anti", "latin_swaponly_v2_random", "latin_swaponly_v2_anti"}:
                                         # Latin-completion ablation: canonical latin stages 1-2,
                                         # stages 3..k replaced by a non-Latin completion.
                                         completion_seed = _stable_u32_seed(
@@ -4394,8 +4402,9 @@ def main():
                                             k,
                                             top1_idx,
                                             runner_idx,
-                                            completion="random" if empirical_transition_mode == "latin_v2_random" else "anti",
+                                            completion="random" if empirical_transition_mode.endswith("_v2_random") else "anti",
                                             seed=completion_seed,
+                                            base="swaponly" if empirical_transition_mode.startswith("latin_swaponly_v2_") else "latin",
                                         )
                                         stage_shifts = None
                                     elif empirical_transition_mode == "full_random":
