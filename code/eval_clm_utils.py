@@ -278,7 +278,7 @@ def parse_arguments():
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
         task = eval_args[0]
-        if task not in ['mmlu', 'arc', 'csqa', 'race'] + list(PAIRWISE_TASKS):
+        if task not in ['mmlu', 'arc', 'csqa', 'race', 'medmcqa'] + list(PAIRWISE_TASKS):
             raise ValueError(f"Unknown task: {task}")
 
         num_few_shot = int(eval_args[1])
@@ -384,6 +384,11 @@ def prepare_eval(args, eval_name):
     # prefix would render as "Question: Article: ...".
     question_prefix = '' if task == 'race' else 'Question: '
 
+    # MedMCQA has options whose literal text is "None"; pandas' default NA
+    # parsing would turn them into NaN and render "nan" in the prompt. Scoped to
+    # medmcqa so the canonical tasks keep their exact loading behaviour.
+    csv_na_kwargs = {'keep_default_na': False} if task == 'medmcqa' else {}
+
     # create_user_prompt
     def create_user_prompt(question: str, options: List[str]):
         if setting in ['noid']:
@@ -407,7 +412,7 @@ def prepare_eval(args, eval_name):
     # prepare_few_shot_samples
     # few_shot_seed: None이면 기존 동작(첫 N개). 정수면 해당 seed로 shuffle 후 사용 (n_runs 시 run별 다른 few-shot)
     def prepare_few_shot_samples(subject, few_shot_seed=None):
-        df = pd.read_csv(f'{data_path}/dev/{subject}_dev.csv', names=("Question", *option_ids_header, "Answer"), dtype=str)
+        df = pd.read_csv(f'{data_path}/dev/{subject}_dev.csv', names=("Question", *option_ids_header, "Answer"), dtype=str, **csv_na_kwargs)
         if setting in ['noid']:
             few_shot_samples = df.apply(lambda x:
                 create_user_prompt(x["Question"], [x[e] for e in option_ids_header])
@@ -429,7 +434,7 @@ def prepare_eval(args, eval_name):
 
     # prepare_eval_samples
     def prepare_eval_samples(subject):
-        df = pd.read_csv(open(f'{data_path}/test/{subject}_test.csv'), names=("Question", *option_ids_header, "Answer"), dtype=str)
+        df = pd.read_csv(open(f'{data_path}/test/{subject}_test.csv'), names=("Question", *option_ids_header, "Answer"), dtype=str, **csv_na_kwargs)
 
         if setting is not None and setting.startswith('move'):
             df = df.apply(lambda x: move_answer(x, moved_answer), axis=1)
