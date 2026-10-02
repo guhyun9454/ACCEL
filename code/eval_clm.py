@@ -664,6 +664,45 @@ def _select_best_relative_cyclic_sequence(
     }
 
 
+_EMPIRICAL_RESIDUAL_WEIGHTING = "uniform"
+_EMPIRICAL_RESIDUAL_IDENT = False
+_EMPIRICAL_RESIDUAL_IDENT_SHRINK = 1.0
+
+
+def _identify_question_residual(
+    stage_probs: np.ndarray,
+    slot_to_content_schedule: List[Tuple[int, ...]],
+    mu_hat: np.ndarray,
+    logit_clip: float = 1e-6,
+) -> np.ndarray:
+    """
+    LS-estimate this question's own residual eps(q) from its observed views.
+
+    Model (centered logits, slot space): y_t = b + A_t c, b = mu + eps(q),
+    A_t[slot, content] = 1 iff schedule[t][slot] == content. View differences
+    y_0 - y_t = (A_0 - A_t) c cancel b; c is solved on the zero-sum subspace
+    (pinv), then eps(q) = mean_t(y_t - A_t c) - mu_hat. Identified (rank k-1)
+    from 3 views under the production targeted-latin schedules.
+    """
+    arr = np.asarray(stage_probs, dtype=np.float64)
+    n_views, k = arr.shape
+    ys = np.log(np.clip(arr, logit_clip, None))
+    ys = ys - ys.mean(axis=1, keepdims=True)
+    As = []
+    for perm in slot_to_content_schedule[:n_views]:
+        A = np.zeros((k, k), dtype=np.float64)
+        for slot_idx, content_idx in enumerate(perm):
+            A[slot_idx, int(content_idx)] = 1.0
+        As.append(A)
+    M = np.vstack([As[0] - A for A in As[1:]])
+    rhs = np.concatenate([ys[0] - y for y in ys[1:]])
+    c = np.linalg.pinv(M) @ rhs
+    c -= c.mean()
+    b = np.mean([y - A @ c for y, A in zip(ys, As)], axis=0)
+    b -= b.mean()
+    return b - np.asarray(mu_hat, dtype=np.float64).reshape(-1)
+
+
 def _compute_empirical_stage_posteriors(
     stage_probs: np.ndarray,
     slot_to_content_schedule: List[Tuple[int, ...]],
@@ -689,21 +728,68 @@ def _compute_empirical_stage_posteriors(
     conf_by_stage: List[float] = []
 
     for stage_idx in range(len(slot_to_content_schedule)):
+        stage_residuals = residuals
+        if _EMPIRICAL_RESIDUAL_IDENT:
+            if stage_idx + 1 >= 3:
+                stage_residuals = (
+                    _EMPIRICAL_RESIDUAL_IDENT_SHRINK
+                    * _identify_question_residual(
+                        probs[: stage_idx + 1], slot_to_content_schedule[: stage_idx + 1], mu
+                    )
+                ).reshape(1, -1)
+            else:
+                stage_residuals = np.zeros((1, k), dtype=np.float64)
         per_residual = []
-        for residual in residuals:
+        per_view_dists = []
+        for residual in stage_residuals:
             scores = np.zeros((k,), dtype=np.float64)
             prior_factor = np.exp(-(mu + residual))
+            views = []
             for inner_idx in range(stage_idx + 1):
                 inv = inverse_assignments[inner_idx]
                 stage_row = probs[inner_idx]
-                scores += stage_row[inv] * prior_factor[inv]
+                v = stage_row[inv] * prior_factor[inv]
+                tv = float(np.sum(v))
+                views.append(v / tv if (np.isfinite(tv) and tv > eps) else np.ones((k,)) / float(k))
+                scores += v
             total = float(np.sum(scores))
             if not np.isfinite(total) or total <= eps:
                 post = np.ones((k,), dtype=np.float64) / float(k)
             else:
                 post = scores / total
             per_residual.append(post)
-        posterior = np.mean(np.asarray(per_residual, dtype=np.float64), axis=0)
+            per_view_dists.append(views)
+        arr = np.asarray(per_residual, dtype=np.float64)
+        n_res = arr.shape[0]
+        wmode = _EMPIRICAL_RESIDUAL_WEIGHTING
+        if wmode == "uniform" or n_res == 1:
+            posterior = np.mean(arr, axis=0)
+        else:
+            if wmode == "confidence":
+                w = arr.max(axis=1)
+            elif wmode == "agreement":
+                logw = np.zeros((n_res,), dtype=np.float64)
+                for r_i in range(n_res):
+                    for v in per_view_dists[r_i]:
+                        logw[r_i] += np.log(float(np.dot(v, arr[r_i])) + eps)
+                logw -= float(np.max(logw))
+                w = np.exp(logw)
+            elif wmode == "proximity":
+                obs = np.asarray(probs[0], dtype=np.float64)
+                obs = obs / (float(np.sum(obs)) + eps)
+                lo = np.log(obs + eps)
+                lo = lo - float(np.mean(lo))
+                d2 = np.sum((lo[None, :] - (mu[None, :] + residuals)) ** 2, axis=1)
+                var = float(np.mean(np.var(residuals, axis=0)))
+                w = np.exp(-(d2 - float(np.min(d2))) / (2.0 * max(var, eps)))
+            else:
+                w = np.ones((n_res,), dtype=np.float64)
+            sw = float(np.sum(w))
+            if not np.isfinite(sw) or sw <= eps:
+                w = np.ones((n_res,), dtype=np.float64) / float(n_res)
+            else:
+                w = w / sw
+            posterior = np.sum(w[:, None] * arr, axis=0)
         posterior = posterior / (float(np.sum(posterior)) + eps)
         posterior_by_stage.append(posterior)
         pred_idx_by_stage.append(int(np.argmax(posterior)))
@@ -2938,7 +3024,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
                         probs_bank, list(range(k)), k, alpha / 100.0, seed,
                         args.empirical_logit_delta,
                     )
-                if args.empirical_residual_model == "zero":
+                if args.empirical_residual_model in ("zero", "identify"):
                     residual_bank = np.zeros((1, k), dtype=np.float64)
                 if set(int(x) for x in prior_meta.get("prefix_ids", [])) != prefix_ids:
                     raise RuntimeError("adaptive prefix selection diverged from the PriDe estimator")
@@ -3113,6 +3199,13 @@ def main():
     hf_logging.set_verbosity_error()
 
     args = parse_arguments()
+    global _EMPIRICAL_RESIDUAL_WEIGHTING, _EMPIRICAL_RESIDUAL_IDENT, _EMPIRICAL_RESIDUAL_IDENT_SHRINK
+    _EMPIRICAL_RESIDUAL_WEIGHTING = str(
+        getattr(args, "empirical_residual_weighting", "uniform")).strip().lower()
+    _EMPIRICAL_RESIDUAL_IDENT = (
+        str(getattr(args, "empirical_residual_model", "")).strip().lower() == "identify"
+    )
+    _EMPIRICAL_RESIDUAL_IDENT_SHRINK = float(getattr(args, "empirical_ident_shrink", 1.0))
     if len(getattr(args, "eval_names", [])) == 0:
         return
 
@@ -3863,7 +3956,7 @@ def main():
                         if empirical_percentile_mode not in {"online", "fixed_prefix"}:
                             empirical_percentile_mode = "online"
                         empirical_residual_model = str(getattr(args, "empirical_residual_model", "logistic_normal")).strip().lower()
-                        if empirical_residual_model not in {"logistic_normal", "empirical", "zero"}:
+                        if empirical_residual_model not in {"logistic_normal", "empirical", "zero", "identify"}:
                             empirical_residual_model = "logistic_normal"
                         empirical_stage_schedule = str(getattr(args, "empirical_stage_schedule", "sqrt")).strip().lower()
                         if empirical_stage_schedule not in {"flat", "sqrt"}:
@@ -4173,8 +4266,10 @@ def main():
                                         logit_delta=empirical_logit_delta,
                                     )
                                     empirical_covariance = np.zeros((k, k), dtype=np.float64)
-                                if empirical_residual_model == "zero":
-                                    # eps=0 ablation: keep mu_hat, drop per-instance residuals entirely
+                                if empirical_residual_model in ("zero", "identify"):
+                                    # zero: eps=0 ablation. identify: bank unused; the
+                                    # per-question residual is estimated per stage inside
+                                    # _compute_empirical_stage_posteriors (mu-only before 3 views).
                                     empirical_residual_bank = np.zeros((1, k), dtype=np.float64)
                                 empirical_prefix_ids = set(int(x) for x in (empirical_meta.get("prefix_ids") or []))
                                 empirical_stage_cache_path = _empirical_stage_cache_path(
@@ -4473,6 +4568,7 @@ def main():
                                     "sweep_mode": empirical_sweep_mode,
                                     "percentile_mode": empirical_percentile_mode,
                                     "residual_model": empirical_residual_model,
+                                    "residual_weighting": _EMPIRICAL_RESIDUAL_WEIGHTING,
                                     "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
                                     "cov_shrinkage": float(empirical_cov_shrinkage),
                                     "transition_mode": empirical_transition_mode,
@@ -4548,6 +4644,7 @@ def main():
                                         "run_idx": int(run_idx),
                                         "alpha": float(pride_alpha),
                                         "residual_model": empirical_residual_model,
+                                        "residual_weighting": _EMPIRICAL_RESIDUAL_WEIGHTING,
                                         "mc_samples": int(empirical_mc_samples if empirical_residual_model == "logistic_normal" else empirical_residual_bank.shape[0]),
                                         "cov_shrinkage": float(empirical_cov_shrinkage),
                                         "transition_mode": empirical_transition_mode,
