@@ -283,7 +283,7 @@ def parse_arguments():
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
         task = eval_args[0]
-        if task not in ['mmlu', 'arc', 'csqa', 'race', 'medmcqa'] + list(PAIRWISE_TASKS):
+        if task not in ['mmlu', 'arc', 'csqa', 'race', 'medmcqa', 'mmlupro'] + list(PAIRWISE_TASKS):
             raise ValueError(f"Unknown task: {task}")
 
         num_few_shot = int(eval_args[1])
@@ -352,6 +352,10 @@ def prepare_eval(args, eval_name):
     if task in ['csqa']:
         option_ids = list('ABCDE')
         option_ids_header = list('ABCDE')
+    elif task == 'mmlupro':
+        # MMLU-Pro, 10-option items only (see data_mmlupro/process.py): k=10.
+        option_ids = list('ABCDEFGHIJ')
+        option_ids_header = list('ABCDEFGHIJ')
     elif task in PAIRWISE_TASKS:
         # Pairwise preference judging: two candidate answers, so k=2. The cyclic
         # rotation and the targeted Latin schedule both degrade correctly here
@@ -373,7 +377,11 @@ def prepare_eval(args, eval_name):
                        for f in os.listdir(f'{data_path}/test') if "_test.csv" in f])
 
     # sys_msg
-    if 'mmlu' in task:
+    if task == 'mmlupro':
+        # Single pooled file, so no per-subject "about {}" header (the 'mmlu'
+        # substring check below would otherwise catch this task).
+        sys_msg = 'The following are multiple choice questions.'
+    elif 'mmlu' in task:
         sys_msg = 'The following are multiple choice questions about {}.'
     elif task == 'race':
         sys_msg = 'The following are multiple choice reading comprehension questions about an article.'
@@ -389,10 +397,11 @@ def prepare_eval(args, eval_name):
     # prefix would render as "Question: Article: ...".
     question_prefix = '' if task == 'race' else 'Question: '
 
-    # MedMCQA has options whose literal text is "None"; pandas' default NA
-    # parsing would turn them into NaN and render "nan" in the prompt. Scoped to
-    # medmcqa so the canonical tasks keep their exact loading behaviour.
-    csv_na_kwargs = {'keep_default_na': False} if task == 'medmcqa' else {}
+    # MedMCQA and MMLU-Pro have options whose literal text is "None"-like;
+    # pandas' default NA parsing would turn them into NaN and render "nan" in the
+    # prompt. Scoped to these tasks so the canonical tasks keep their exact
+    # loading behaviour.
+    csv_na_kwargs = {'keep_default_na': False} if task in ('medmcqa', 'mmlupro') else {}
 
     # create_user_prompt
     def create_user_prompt(question: str, options: List[str]):
