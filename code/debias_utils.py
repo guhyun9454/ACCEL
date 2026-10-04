@@ -18,10 +18,17 @@ def argsort(l):
 def simple(observed, permuted_indices=None):
     observed = np.array(observed)
     observed = observed / (observed.sum(axis=1, keepdims=True) + 1e-10)
-    assert observed.shape in [(24, 4), (4, 4), (5, 5)], observed.shape
+    # Square (k, k) inputs are the k cyclic rotations for any k. Before
+    # 2026-10-04 only (4,4)/(5,5)/(24,4) were accepted; for k=2 and k=10 the
+    # assertion fired, the eval_clm callers swallowed it, and the prior silently
+    # fell back to uniform (no PriDe correction, empty ACCEL prefix).
+    assert observed.shape in [(24, 4)] or observed.shape[0] == observed.shape[1], observed.shape
 
     if permuted_indices is None:
-        if observed.shape[1] == 4:
+        if observed.shape[1] not in (4, 5):
+            k = observed.shape[1]
+            permuted_indices = [tuple((i + s) % k for i in range(k)) for s in range(k)]
+        elif observed.shape[1] == 4:
             permuted_indices = [
                 (0, 1, 2, 3),
                 (1, 2, 3, 0),
