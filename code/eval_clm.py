@@ -406,12 +406,19 @@ def _extract_question_from_user_prompt(user_prompt: str) -> str:
     marker = "\nOptions:\n"
     if user_prompt.startswith("Question: ") and marker in user_prompt:
         return user_prompt[len("Question: "): user_prompt.index(marker)]
+    # Passage-style tasks (RACE "Article:", LogiQA 2.0 "Passage:") render without the
+    # "Question: " prefix; strip the stale options block so escalation stages do not
+    # show two option lists (RACE fix 463484b, extended to "Passage:").
+    if marker in user_prompt:
+        return user_prompt[:user_prompt.index(marker)]
     return str(user_prompt)
 
 
 def _build_option_user_prompt(question: str, options: List[str], option_ids: List[str]) -> str:
+    _q = question.strip()
+    _prefix = "" if _q.startswith(("Article:", "Passage:")) else "Question: "
     return (
-        f"Question: {question.strip()}\nOptions:\n"
+        f"{_prefix}{_q}\nOptions:\n"
         + "\n".join(f"{option_id}. {answer}".strip() for option_id, answer in zip(option_ids, options))
         + "\nAnswer:"
     )
