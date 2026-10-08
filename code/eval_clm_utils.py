@@ -283,7 +283,7 @@ def parse_arguments():
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
         task = eval_args[0]
-        if task not in ['mmlu', 'arc', 'csqa', 'race', 'medmcqa', 'mmlupro', 'logiqa2'] + list(PAIRWISE_TASKS):
+        if task not in ['mmlu', 'arc', 'csqa', 'race', 'racem', 'raceall', 'medmcqa', 'mmlupro', 'logiqa2'] + list(PAIRWISE_TASKS):
             raise ValueError(f"Unknown task: {task}")
 
         num_few_shot = int(eval_args[1])
@@ -383,7 +383,7 @@ def prepare_eval(args, eval_name):
         sys_msg = 'The following are multiple choice questions.'
     elif 'mmlu' in task:
         sys_msg = 'The following are multiple choice questions about {}.'
-    elif task == 'race':
+    elif task in ('race', 'racem', 'raceall'):
         sys_msg = 'The following are multiple choice reading comprehension questions about an article.'
     elif task == 'logiqa2':
         sys_msg = 'The following are multiple choice logical reasoning questions about a passage.'
@@ -397,7 +397,7 @@ def prepare_eval(args, eval_name):
     # RACE folds the passage into the Question column and carries its own
     # "Article:/Question:" headings (see data_race/process.py), so the generic
     # prefix would render as "Question: Article: ...".
-    question_prefix = '' if task in ('race', 'logiqa2') else 'Question: '
+    question_prefix = '' if task in ('race', 'racem', 'raceall', 'logiqa2') else 'Question: '
 
     # MedMCQA and MMLU-Pro have options whose literal text is "None"-like;
     # pandas' default NA parsing would turn them into NaN and render "nan" in the
