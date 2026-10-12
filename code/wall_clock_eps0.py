@@ -270,7 +270,7 @@ def main():
                                                  cache_dir=a.cache_dir).eval()
     scorer = Scorer(model, toker, option_ids)
 
-    ev = SimpleNamespace(task=a.task, option_id_set=ids, skip_full=True, result_tag="wallclock_tmp",
+    ev = SimpleNamespace(task=a.task, model_name=os.path.basename(a.model), option_id_set=ids, skip_full=True, result_tag="wallclock_tmp",
                          inference_backend="local", num_few_shot=0, setting="full")
     subjects, _, prep_samples, _ = prepare_eval(ev, f"{a.task},0,full")
     if a.max_subjects:
