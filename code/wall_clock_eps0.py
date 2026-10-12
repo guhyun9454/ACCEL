@@ -15,8 +15,9 @@ Methods (per subject, stream order = production run `--run_idx`):
                   Latin-completing views while the stage confidence is below the online percentile threshold
 Modes:
   seq    one prompt per forward pass (= production scoring)
-  batch  up to --batch_size prompts per forward pass (left padding). ACCEL batches the questions of an arrival chunk
-         that reach the same stage; gate decisions are still taken in stream order, so routing is unchanged.
+  batch  up to --batch_size prompts per forward pass (left padding). ACCEL batches the questions of an arrival window
+         (--chunk questions, default = batch size) that reach the same stage; gate decisions are still taken in stream
+         order, so routing is unchanged. A larger window fills the later-stage batches at the price of latency.
 
 usage: python wall_clock_eps0.py --model <hf id> --task mmlu --mode seq --out <json> [--ref_dir <eps0 results dir>]
 """
@@ -102,7 +103,7 @@ def latin_posteriors(stage_probs, schedule, mu):
                                                mu_hat=mu, residual_bank=np.zeros((1, len(mu))))
 
 
-def run_subject(method, samples, metas, labels, scorer, option_ids, k, subject, run_idx, bs, m_partial):
+def run_subject(method, samples, metas, labels, scorer, option_ids, k, subject, run_idx, bs, m_partial, chunk=None):
     """Returns (preds, per-question cost in prompts, extra) for one subject in stream order."""
     N = len(samples)
     perm_list = _rotations(k)
@@ -180,7 +181,7 @@ def run_subject(method, samples, metas, labels, scorer, option_ids, k, subject, 
     extra_prefix_latin = len(lat)
 
     preds, cost = [None] * N, [0] * N
-    chunk = max(1, bs)
+    chunk = max(1, chunk or bs)                                         # arrival window (questions)
     for c0 in range(0, N, chunk):
         idxs = list(range(c0, min(N, c0 + chunk)))
         new = [i for i in idxs if i not in pset]
@@ -247,6 +248,9 @@ def main():
     ap.add_argument("--task", required=True, choices=sorted(TASK_IDS))
     ap.add_argument("--mode", choices=["seq", "batch"], required=True)
     ap.add_argument("--batch_size", type=int, default=16)
+    ap.add_argument("--chunk", type=int, default=0,
+                    help="ACCEL arrival window in questions (batch mode); 0 = batch_size. Same-stage prompts of the window "
+                         "are scored in batches of batch_size; gate decisions stay in stream order, so routing is unchanged")
     ap.add_argument("--run_idx", type=int, default=0)
     ap.add_argument("--betas", default="10,40,80")
     ap.add_argument("--partial_m", type=int, default=2)
@@ -287,7 +291,8 @@ def main():
     # warm-up (excluded from timing)
     scorer.score([tuple(data[0][1][0][0][0])] * max(2, bs), bs); sync()
 
-    out = {"model": a.model, "task": a.task, "mode": a.mode, "batch_size": bs, "run_idx": a.run_idx,
+    out = {"model": a.model, "task": a.task, "mode": a.mode, "batch_size": bs,
+           "chunk": (a.chunk or bs) if a.mode == "batch" else 1, "run_idx": a.run_idx,
            "n_items": sum(len(d[1]) for d in data), "n_subjects": len(data),
            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu", "methods": {}}
     ref = {}
@@ -298,7 +303,8 @@ def main():
         sync(); t0 = time.perf_counter()
         per_subj = []
         for s, smp, metas, labels in data:
-            preds, cost, extra = run_subject(meth, smp, metas, labels, scorer, option_ids, k, s, a.run_idx, bs, a.partial_m)
+            preds, cost, extra = run_subject(meth, smp, metas, labels, scorer, option_ids, k, s, a.run_idx, bs, a.partial_m,
+                                             chunk=(a.chunk or bs) if a.mode == "batch" else 1)
             per_subj.append((s, preds, cost, labels, extra))
         sync(); wall = time.perf_counter() - t0
         accs = [float(np.mean(np.asarray(p) == np.asarray(l))) for _, p, _, l, _ in per_subj]
