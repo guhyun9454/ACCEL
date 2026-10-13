@@ -11,6 +11,8 @@ Methods (per subject, stream order = production run `--run_idx`):
   pride           PriDe alpha=2%: k cyclic views on the random prefix, identity view elsewhere, corrected by the prior
   partial_cyclic  identity + (m-1) random non-identity cyclic views on every question (cost m)
   cyclic          all k cyclic views on every question (cost k)
+  pride_m<beta>   PriDe with its prefix ratio set so its cost equals ACCEL's cost at <beta> (alpha=(cost-1)/(k-1))
+  cycfrac_m<beta> full cyclic evaluation on a random fraction of questions, cost matched the same way
   accel_b<beta>   ACCEL: prefix -> k cyclic views (prior) + its Latin views; others: identity view, then targeted /
                   Latin-completing views while the stage confidence is below the online percentile threshold
 Modes:
@@ -45,6 +47,9 @@ from eval_clm_utils import prepare_eval  # noqa: E402
 from debias_utils import simple as debias_simple  # noqa: E402
 
 TASK_IDS = {"arc": "ABCD", "csqa": "ABCDE", "mmlu": "ABCD"}
+# ACCEL accounted cost (15-model mean, eps0 production) at beta 10/40/80, for the cost-matched baselines below
+ACCEL_COST = {"mmlu": {10: 1.2205, 40: 1.7064, 80: 2.8508}, "csqa": {10: 1.2027, 40: 1.7335, 80: 3.3213},
+              "arc": {10: 1.1828, 40: 1.6918, 80: 2.9483}}
 
 
 class Scorer:
@@ -116,6 +121,22 @@ def run_subject(method, samples, metas, labels, scorer, option_ids, k, subject, 
     prefix = [int(x) for x in np.random.default_rng(seed).choice(np.arange(N, dtype=np.int64), size=m, replace=False)]
     pset = set(prefix)
 
+    if method.startswith("cycfrac_m"):
+        f = (ACCEL_COST_TASK[method.split("_m")[1]] - 1.0) / (k - 1)
+        rng = np.random.default_rng(_stable_u32_seed(f"{subject}:cycfrac", run_idx))
+        chosen = set(int(x) for x in rng.choice(np.arange(N), size=int(round(N * f)), replace=False))
+        flat, own = [], []
+        for i in range(N):
+            vs = list(range(k)) if i in chosen else [ident]
+            flat += [cyc_prompts[i][v] for v in vs]; own.append(vs)
+        p = scorer.score(flat, bs)
+        preds, o = [], 0
+        for i in range(N):
+            rows = p[o:o + len(own[i])]; o += len(own[i])
+            agg = _aggregate_probs_over_permutations(rows, [perm_list[v] for v in own[i]], k)
+            preds.append(int(np.argmax(agg)))
+        return preds, [len(v) for v in own], {}
+
     if method == "base":
         p = scorer.score([cyc_prompts[i][ident] for i in range(N)], bs)
         return [int(np.argmax(r)) for r in p], [1] * N, {}
@@ -140,14 +161,23 @@ def run_subject(method, samples, metas, labels, scorer, option_ids, k, subject, 
     cyclic_indices = [perm_list.index(tuple((i + s) % k for i in range(k))) for s in range(k)]
     latin_prefix = method.startswith("accel") and prefix_mode == "latin"
     per_sample = [None] * N
-    if not latin_prefix:
+    if not latin_prefix and not method.startswith("pride_m"):
         # prefix: all k cyclic views (prior estimation), shared by pride and production accel
         pref_rows = scorer.score([cyc_prompts[i][v] for i in prefix for v in range(k)], bs)
         for j, i in enumerate(prefix):
             per_sample[i] = pref_rows[j * k:(j + 1) * k]
 
-    if method == "pride":
-        prior, meta = _estimate_pride_prior_random_prefix_mean(per_sample, cyclic_indices, k, 0.02, seed)
+    if method == "pride" or method.startswith("pride_m"):
+        ratio = 0.02 if method == "pride" else (ACCEL_COST_TASK[method.split("_m")[1]] - 1.0) / (k - 1)
+        if ratio != 0.02:                                               # larger prefix: score its cyclic views
+            mm = int(max(1, int(round(N * ratio))))
+            prefix = [int(x) for x in np.random.default_rng(seed).choice(np.arange(N, dtype=np.int64), size=mm, replace=False)]
+            pset = set(prefix)
+            per_sample = [None] * N
+            rows = scorer.score([cyc_prompts[i][v] for i in prefix for v in range(k)], bs)
+            for j, i in enumerate(prefix):
+                per_sample[i] = rows[j * k:(j + 1) * k]
+        prior, meta = _estimate_pride_prior_random_prefix_mean(per_sample, cyclic_indices, k, ratio, seed)
         assert sorted(meta["prefix_ids"]) == sorted(prefix)
         rest = [i for i in range(N) if i not in pset]
         p = scorer.score([cyc_prompts[i][ident] for i in rest], bs)
@@ -290,10 +320,15 @@ def main():
     a = ap.parse_args()
     bs = 1 if a.mode == "seq" else a.batch_size
     ids = TASK_IDS[a.task]; option_ids = list(ids); k = len(ids)
+    global ACCEL_COST_TASK
+    ACCEL_COST_TASK = {str(b): c for b, c in ACCEL_COST[a.task].items()}
     betas = [float(x) for x in a.betas.split(",") if x]
     methods = []
     for m in a.methods.split(","):
-        methods += [f"accel_b{b:g}" for b in betas] if m == "accel" else [m]
+        if m in ("accel", "pride_m", "cycfrac_m"):
+            methods += [f"{'accel_b' if m == 'accel' else m}{b:g}" for b in betas]
+        else:
+            methods.append(m)
 
     toker = AutoTokenizer.from_pretrained(a.model, add_bos_token=False, add_eos_token=False, cache_dir=a.cache_dir)
     use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
