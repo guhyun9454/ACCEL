@@ -42,6 +42,7 @@ from eval_clm import (  # noqa: E402
     _extract_question_from_user_prompt, _pride_correct_row, _rotations, _stable_u32_seed,
 )
 from eval_clm_utils import prepare_eval  # noqa: E402
+from debias_utils import simple as debias_simple  # noqa: E402
 
 TASK_IDS = {"arc": "ABCD", "csqa": "ABCDE", "mmlu": "ABCD"}
 
@@ -103,7 +104,8 @@ def latin_posteriors(stage_probs, schedule, mu):
                                                mu_hat=mu, residual_bank=np.zeros((1, len(mu))))
 
 
-def run_subject(method, samples, metas, labels, scorer, option_ids, k, subject, run_idx, bs, m_partial, chunk=None):
+def run_subject(method, samples, metas, labels, scorer, option_ids, k, subject, run_idx, bs, m_partial, chunk=None,
+                prefix_mode="production"):
     """Returns (preds, per-question cost in prompts, extra) for one subject in stream order."""
     N = len(samples)
     perm_list = _rotations(k)
@@ -135,12 +137,14 @@ def run_subject(method, samples, metas, labels, scorer, option_ids, k, subject, 
             preds.append(int(np.argmax(agg)))
         return preds, [len(v) for v in views], {}
 
-    # prefix: all k cyclic views (prior estimation), shared by pride and accel
-    pref_rows = scorer.score([cyc_prompts[i][v] for i in prefix for v in range(k)], bs)
-    per_sample = [None] * N
-    for j, i in enumerate(prefix):
-        per_sample[i] = pref_rows[j * k:(j + 1) * k]
     cyclic_indices = [perm_list.index(tuple((i + s) % k for i in range(k))) for s in range(k)]
+    latin_prefix = method.startswith("accel") and prefix_mode == "latin"
+    per_sample = [None] * N
+    if not latin_prefix:
+        # prefix: all k cyclic views (prior estimation), shared by pride and production accel
+        pref_rows = scorer.score([cyc_prompts[i][v] for i in prefix for v in range(k)], bs)
+        for j, i in enumerate(prefix):
+            per_sample[i] = pref_rows[j * k:(j + 1) * k]
 
     if method == "pride":
         prior, meta = _estimate_pride_prior_random_prefix_mean(per_sample, cyclic_indices, k, 0.02, seed)
@@ -154,8 +158,11 @@ def run_subject(method, samples, metas, labels, scorer, option_ids, k, subject, 
 
     # ACCEL
     beta = float(method.split("_b")[1])
-    _, mu, _, meta = _estimate_empirical_pride_bank(per_sample, cyclic_indices, k, 0.02, seed)
-    assert sorted(meta["prefix_ids"]) == sorted(prefix)
+    if latin_prefix:
+        mu = np.zeros(k)                      # prior unknown while the prefix runs: schedule from the uncorrected view 1
+    else:
+        _, mu, _, meta = _estimate_empirical_pride_bank(per_sample, cyclic_indices, k, 0.02, seed)
+        assert sorted(meta["prefix_ids"]) == sorted(prefix)
     q = max(0.0, min(1.0, beta / 100.0))
     hist = [[] for _ in range(k)]
     state = {}                                                          # i -> dict(probs, schedule, confs, preds)
@@ -172,13 +179,32 @@ def run_subject(method, samples, metas, labels, scorer, option_ids, k, subject, 
         post, pred, conf = latin_posteriors(st["probs"], st["sched"][:len(st["probs"])], mu)
         st["conf"].append(conf[-1]); st["pred"].append(pred[-1])
 
-    # prefix questions: identity row from the cyclic views, then every Latin view (forced to full depth)
-    stage1(prefix, [per_sample[i][ident] for i in prefix])
-    lat = [(i, t) for i in prefix for t in range(1, k)]
-    rows = scorer.score([view_prompt(metas[i], state[i]["sched"][t], option_ids) for i, t in lat], bs)
-    for (i, t), r in zip(lat, rows):
-        extend(i, r)
-    extra_prefix_latin = len(lat)
+    if latin_prefix:
+        # prefix questions: only their k Latin views; the prior is estimated from them with the same PriDe estimator
+        # (slot-wise mean log-probability over a balanced view set), then their posteriors are recomputed with it
+        stage1(prefix, scorer.score([cyc_prompts[i][ident] for i in prefix], bs))
+        lat = [(i, t) for i in prefix for t in range(1, k)]
+        rows = scorer.score([view_prompt(metas[i], state[i]["sched"][t], option_ids) for i, t in lat], bs)
+        for (i, t), r in zip(lat, rows):
+            state[i]["probs"].append(r)
+        pri = []
+        for i in prefix:
+            pr = np.asarray(debias_simple(np.asarray(state[i]["probs"]))[2], dtype=np.float64)
+            pri.append(pr / (pr.sum() + 1e-12))
+        lp = np.log(np.asarray(pri) + 1e-12)
+        mu = np.mean(lp - lp.mean(axis=1, keepdims=True), axis=0)
+        for i in prefix:
+            _, pred, conf = latin_posteriors(state[i]["probs"], state[i]["sched"], mu)
+            state[i]["conf"], state[i]["pred"] = list(conf), list(pred)
+        extra_prefix_latin = 0
+    else:
+        # prefix questions: identity row from the cyclic views, then every Latin view (forced to full depth)
+        stage1(prefix, [per_sample[i][ident] for i in prefix])
+        lat = [(i, t) for i in prefix for t in range(1, k)]
+        rows = scorer.score([view_prompt(metas[i], state[i]["sched"][t], option_ids) for i, t in lat], bs)
+        for (i, t), r in zip(lat, rows):
+            extend(i, r)
+        extra_prefix_latin = len(lat)
 
     preds, cost = [None] * N, [0] * N
     chunk = max(1, chunk or bs)                                         # arrival window (questions)
@@ -256,6 +282,9 @@ def main():
     ap.add_argument("--partial_m", type=int, default=2)
     ap.add_argument("--methods", default="base,pride,partial_cyclic,cyclic,accel")
     ap.add_argument("--ref_dir", default=None, help="eps0 production results dir (seq-mode gate)")
+    ap.add_argument("--prefix_mode", choices=["production", "latin"], default="production",
+                    help="ACCEL calibration prefix: production = k cyclic views for the prior + Latin views for the answer; "
+                         "latin = only the k Latin views, prior estimated from them (cost exactly k)")
     ap.add_argument("--max_subjects", type=int, default=0)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -292,7 +321,7 @@ def main():
     scorer.score([tuple(data[0][1][0][0][0])] * max(2, bs), bs); sync()
 
     out = {"model": a.model, "task": a.task, "mode": a.mode, "batch_size": bs,
-           "chunk": (a.chunk or bs) if a.mode == "batch" else 1, "run_idx": a.run_idx,
+           "chunk": (a.chunk or bs) if a.mode == "batch" else 1, "prefix_mode": a.prefix_mode, "run_idx": a.run_idx,
            "n_items": sum(len(d[1]) for d in data), "n_subjects": len(data),
            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu", "methods": {}}
     ref = {}
@@ -304,7 +333,7 @@ def main():
         per_subj = []
         for s, smp, metas, labels in data:
             preds, cost, extra = run_subject(meth, smp, metas, labels, scorer, option_ids, k, s, a.run_idx, bs, a.partial_m,
-                                             chunk=(a.chunk or bs) if a.mode == "batch" else 1)
+                                             chunk=(a.chunk or bs) if a.mode == "batch" else 1, prefix_mode=a.prefix_mode)
             per_subj.append((s, preds, cost, labels, extra))
         sync(); wall = time.perf_counter() - t0
         accs = [float(np.mean(np.asarray(p) == np.asarray(l))) for _, p, _, l, _ in per_subj]
