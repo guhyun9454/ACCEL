@@ -27,14 +27,14 @@ Note: this table reflects the `main` (upstream PriDe) view. The active `sm/table
 ## For AI Agents
 
 ### Testing
-- Canonical unit-test command (validated 2026-07-23, 39 tests, **no API keys needed** — fake-response tests): `python -m unittest tests.test_api_inference`. Use unittest, not pytest (pytest is not in `requirements.txt`).
+- Canonical unit-test command (39 fake-response tests, no API keys needed): `python -m unittest tests.test_api_inference`. Use unittest, not pytest (pytest is not in `requirements.txt`).
 - This local machine (Jetson) has no ready experiment env. Working recipe: `python -m venv --system-site-packages <tmp>` over the `torch-gpu` conda env (`~/miniconda3/envs/torch-gpu`), then `pip install tqdm pandas google-auth`. Real API/GPU runs belong on Seraph or a machine with keys.
 
 ### Running
-- Set `HF_MODELS` env var before any local run — it points at the on-disk model cache (Seraph: typically `/data/$USER/g/models` or similar; confirm with the user). The upstream README requires this.
-- Conda env name is **TBD** — see root `../../AGENTS.md` "To Build" list. Confirm with the user before invoking `conda activate`.
+- Set `HF_HOME` (and `HF_MODELS`, which the upstream scripts require) explicitly in every job; per-account weight locations on Seraph are in the `seraph` skill, ACCEL section.
+- No canonical conda env; per-account envs are listed in the `seraph` skill (ACCEL section) — confirm with the account owner before `conda activate`.
 - Multi-GPU launches go through `experiments/run_8gpu.sh` / `_grab_y1_8gpu.sh`. Single-GPU debug via `experiments/test_single_gpu.sh`.
-- For Korean-prompt experiments use `experiments/arc-csqa-ko*.sh`. Token-ID conventions (가나다라 vs ABCD) are encoded inside each script.
+- Korean-prompt scripts (`experiments/arc-csqa-ko*.sh`, token-ID conventions 가나다라 vs ABCD inside each) exist on `main` only, not on this branch.
 
 ### Modifying
 - Anything genuinely useful upstream (bug fix, broader feature) → commit on a topic branch and consider a PR; everything ACCEL-specific stays under `experiments/` so the upstream diff is small.
