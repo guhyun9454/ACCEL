@@ -103,6 +103,10 @@ def parse_arguments():
                         help='Provide exactly two option ID sets to compare (e.g., "ABCD abcd")')
     parser.add_argument("--test", action="store_true",
                         help='Test mode: evaluate only 100 samples instead of all samples')
+    parser.add_argument("--max_eval_samples", type=int, default=None,
+                        help='Evaluate only a random subset of this many samples per subject/run (small test-set '
+                             'robustness). The subset follows the per-run stream shuffle, so each run draws a '
+                             'different subset; the prefix prior and online thresholds are estimated from the subset only.')
 
     # W&B logging flags
     parser.add_argument("--wandb", action="store_true",

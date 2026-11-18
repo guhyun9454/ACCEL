@@ -3449,6 +3449,8 @@ def main():
                 eval_fn = prepare_eval_fn(model, toker, few_shot_samples)
                 if api_backend and bool(getattr(args, "api_probe_only", False)):
                     max_samples = int(getattr(args, "api_probe_samples", 10))
+                elif getattr(args, "max_eval_samples", None) is not None:
+                    max_samples = int(args.max_eval_samples)
                 else:
                     max_samples = 100 if bool(getattr(args, 'test', False)) else None
 
