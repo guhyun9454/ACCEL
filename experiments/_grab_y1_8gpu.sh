@@ -10,13 +10,14 @@ export HF_TOKEN=$(cat /ceph_data/briankim0809/hf_cache/token 2>/dev/null)
 
 echo "=== [$(date)] 다운로드 시작 ==="
 
-# 병렬 다운로드
-huggingface-cli download meta-llama/Llama-3.1-70B-Instruct &
-huggingface-cli download Qwen/Qwen2.5-72B-Instruct &
-huggingface-cli download Qwen/Qwen2.5-32B-Instruct &
-huggingface-cli download google/gemma-4-31B-it &
-huggingface-cli download Qwen/Qwen3.6-27B &
-huggingface-cli download meta-llama/Llama-4-Scout-17B-16E-Instruct &
+# 병렬 다운로드 (중복 비-HF 가중치 형식 consolidated*, original/*.pth 제외 — transformers는 안 읽음)
+EXCLUDE=(--exclude "consolidated*" "original/*" "*.pth")
+huggingface-cli download meta-llama/Llama-3.1-70B-Instruct "${EXCLUDE[@]}" &
+huggingface-cli download Qwen/Qwen2.5-72B-Instruct "${EXCLUDE[@]}" &
+huggingface-cli download Qwen/Qwen2.5-32B-Instruct "${EXCLUDE[@]}" &
+huggingface-cli download google/gemma-4-31B-it "${EXCLUDE[@]}" &
+huggingface-cli download Qwen/Qwen3.6-27B "${EXCLUDE[@]}" &
+huggingface-cli download meta-llama/Llama-4-Scout-17B-16E-Instruct "${EXCLUDE[@]}" &
 wait
 
 echo "=== [$(date)] 다운로드 완료 — 8GPU 테스트 시작 ==="

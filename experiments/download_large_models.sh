@@ -2,6 +2,7 @@
 # Run from moana login node as briankim0809.
 # Submits 5 parallel download jobs (one per model, one per y-node).
 # HF token must already be configured: huggingface-cli login
+# Downloads skip duplicate non-HF weight formats (consolidated*, original/*.pth); transformers never reads them.
 
 REPO=/ceph_data/briankim0809/projects/LLM-MCQ-Bias
 CONDA_SH=/ceph_data/briankim0809/anaconda3/etc/profile.d/conda.sh
@@ -33,7 +34,7 @@ for i in 0 1 2 3 4; do
 export HF_HOME=$CEPH_HF && \
 export HUGGINGFACE_HUB_CACHE=$CEPH_HF && \
 export TRANSFORMERS_CACHE=$CEPH_HF && \
-huggingface-cli download $MODEL" \
+huggingface-cli download $MODEL --exclude 'consolidated*' 'original/*' '*.pth'" \
         | awk '{print $4}')
 
     echo "[$JOB_ID] $JNAME → $NODE : $MODEL"

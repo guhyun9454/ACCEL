@@ -8,5 +8,6 @@ export HUGGINGFACE_HUB_CACHE=/ceph_data/briankim0809/hf_cache
 export TRANSFORMERS_CACHE=/ceph_data/briankim0809/hf_cache
 export HF_TOKEN=$(cat /ceph_data/briankim0809/hf_cache/token 2>/dev/null)
 echo "Downloading $MODEL ..."
-huggingface-cli download "$MODEL"
+# Skip duplicate non-HF weight formats (Mistral consolidated*, Llama original/*.pth); transformers never reads them.
+huggingface-cli download "$MODEL" --exclude "consolidated*" "original/*" "*.pth"
 echo "Done: $MODEL"
