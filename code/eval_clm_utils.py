@@ -618,8 +618,8 @@ def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_id
     # NOTE: 일부 Seq2Seq 토크나이저(T5 등)는 기본적으로 EOS 같은 special token을 붙여서
     # `input_ids[-1]`가 항상 EOS가 되는 문제가 있음. 반드시 special token 없이 비교/추출한다.
     bpe_has_space_prefix = (
-        toker(": A", add_special_tokens=False).input_ids[-1]
-        != toker(":A", add_special_tokens=False).input_ids[-1]
+        toker(f": {option_ids[0]}", add_special_tokens=False).input_ids[-1]
+        != toker(f":{option_ids[0]}", add_special_tokens=False).input_ids[-1]
     )
 
     def eval_fn(sample, rng: random.Random):
@@ -675,8 +675,8 @@ def prepare_eval_fn_base(model, toker, few_shot_samples, num_few_shot, option_id
 def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot, option_ids):
     toker.padding_side = 'right'
     bpe_has_space_prefix = (
-        toker(": A", add_special_tokens=False).input_ids[-1]
-        != toker(":A", add_special_tokens=False).input_ids[-1]
+        toker(f": {option_ids[0]}", add_special_tokens=False).input_ids[-1]
+        != toker(f":{option_ids[0]}", add_special_tokens=False).input_ids[-1]
     )
 
     def eval_fn(sample, rng: random.Random):
@@ -736,8 +736,8 @@ def prepare_eval_fn_noid(model, toker, few_shot_samples, num_few_shot, option_id
 def prepare_eval_fn_perm(model, toker, few_shot_samples, num_few_shot, option_ids):
     toker.padding_side = 'left'
     bpe_has_space_prefix = (
-        toker(": A", add_special_tokens=False).input_ids[-1]
-        != toker(":A", add_special_tokens=False).input_ids[-1]
+        toker(f": {option_ids[0]}", add_special_tokens=False).input_ids[-1]
+        != toker(f":{option_ids[0]}", add_special_tokens=False).input_ids[-1]
     )
 
     def eval_fn(sample, rng: random.Random):
