@@ -39,6 +39,28 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "cached_input_usd_per_mtok": 0.50,
         "output_usd_per_mtok": 8.00,
     },
+    # ARR Oct #12943 G1 (2026-11-25): pinned gpt-4o snapshots; both return
+    # first-token top-20 logprobs on Chat Completions. List prices per 1M tokens.
+    "openai:gpt-4o-2024-08-06": {
+        "provider": "openai",
+        "model": "gpt-4o-2024-08-06",
+        "api_key_env": "OPENAI_API_KEY",
+        "base_url": None,
+        "input_usd_per_mtok": 2.50,
+        "cached_input_usd_per_mtok": 1.25,
+        "output_usd_per_mtok": 10.00,
+        "pricing_snapshot_date": "2026-11-25",
+    },
+    "openai:gpt-4o-mini-2024-07-18": {
+        "provider": "openai",
+        "model": "gpt-4o-mini-2024-07-18",
+        "api_key_env": "OPENAI_API_KEY",
+        "base_url": None,
+        "input_usd_per_mtok": 0.15,
+        "cached_input_usd_per_mtok": 0.075,
+        "output_usd_per_mtok": 0.60,
+        "pricing_snapshot_date": "2026-11-25",
+    },
     "openai:gpt-5.6-luna": {
         "provider": "openai",
         "model": "gpt-5.6-luna",
@@ -206,6 +228,7 @@ class LabelProbabilityResponse:
     top_k_mass: float = 0.0
     tail_mass: float = 1.0
     context: Dict[str, Any] = field(default_factory=dict)
+    filled_labels: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         out = asdict(self)
@@ -270,7 +293,12 @@ def _canonical_label(token: Any, labels: Sequence[str]) -> Optional[str]:
 
 
 def normalize_label_logprobs(
-    top_entries: Iterable[Any], labels: Sequence[str], *, exact_label_tokens: bool = False
+    top_entries: Iterable[Any],
+    labels: Sequence[str],
+    *,
+    exact_label_tokens: bool = False,
+    missing_label_fill: str = "none",
+    filled_out: Optional[List[str]] = None,
 ) -> tuple[List[float], Dict[str, float], List[Dict[str, Any]]]:
     """Convert first-token top candidates into a strict label distribution.
 
@@ -309,6 +337,16 @@ def normalize_label_logprobs(
             masses[label] += probability
 
     missing = [label for label in labels if not (masses[label] > 0.0)]
+    if missing and str(missing_label_fill) == "topk_floor" and len(missing) < len(labels) and sanitized:
+        # A label absent from the returned top-k has first-token probability at most
+        # that of the k-th returned token. Opt-in: give each missing label this upper
+        # bound (recorded per response) instead of aborting the whole run.
+        floor = min(row["prob"] for row in sanitized)
+        for label in missing:
+            masses[label] = floor
+        if filled_out is not None:
+            filled_out.extend(missing)
+        missing = []
     if missing:
         raise LabelCoverageError(missing, sanitized)
 
@@ -356,6 +394,7 @@ def normalize_openai_compatible_response(
     requested_model: str,
     labels: Sequence[str],
     exact_label_tokens: bool = False,
+    missing_label_fill: str = "none",
 ) -> LabelProbabilityResponse:
     choice = _first(_get(response, "choices", []))
     logprobs = _get(choice, "logprobs", None)
@@ -375,8 +414,10 @@ def normalize_openai_compatible_response(
             top_entries = legacy_top
     if not top_entries:
         raise APIInferenceError("response does not contain first-token top logprobs")
+    filled: List[str] = []
     probs, label_lps, sanitized = normalize_label_logprobs(
-        top_entries, labels, exact_label_tokens=exact_label_tokens
+        top_entries, labels, exact_label_tokens=exact_label_tokens,
+        missing_label_fill=missing_label_fill, filled_out=filled,
     )
     top_k_mass, tail_mass = _top_probability_mass(sanitized)
     emitted_token = str(_get(first_token, "token", "") or "")
@@ -394,6 +435,7 @@ def normalize_openai_compatible_response(
         first_token=emitted_token,
         top_k_mass=top_k_mass,
         tail_mass=tail_mass,
+        filled_labels=filled,
     )
 
 
@@ -503,6 +545,8 @@ class CommercialAPIClient:
         equal_label_bias: float = 100.0,
         token_encoder: Any = None,
         transport: Any = None,
+        hash_exclude_context_keys: Sequence[str] = (),
+        missing_label_fill: str = "none",
     ) -> None:
         self.provider = str(provider).strip().lower()
         self.model = str(model).strip()
@@ -551,6 +595,12 @@ class CommercialAPIClient:
         self._network_attempts = 0
         self._returned_models: Dict[str, int] = {}
         self._context: Dict[str, Any] = {}
+        # Context keys left out of the request hash (e.g. run_idx), so identical
+        # prompts are answered once and replayed for every stream order.
+        self.hash_exclude_context_keys = frozenset(str(k) for k in hash_exclude_context_keys)
+        self.missing_label_fill = str(missing_label_fill or "none")
+        if self.missing_label_fill not in {"none", "topk_floor"}:
+            raise ValueError(f"unsupported missing_label_fill: {missing_label_fill}")
 
     @property
     def pricing(self) -> Dict[str, Any]:
@@ -597,7 +647,10 @@ class CommercialAPIClient:
             "temperature": self.registry.get("temperature", 0.0),
             "max_output_tokens": max_output_tokens,
             "top_logprobs": top_logprobs,
-            "context": dict(self._context),
+            "context": {
+                k: v for k, v in self._context.items()
+                if k not in self.hash_exclude_context_keys
+            },
         }
         if self.scoring_mode == "equal_label_bias":
             payload["scoring_mode"] = self.scoring_mode
@@ -939,6 +992,7 @@ class CommercialAPIClient:
                         requested_model=self.model,
                         labels=labels,
                         exact_label_tokens=(self.scoring_mode == "equal_label_bias"),
+                        missing_label_fill=self.missing_label_fill,
                     )
                 break
             except APIBudgetExceeded:
@@ -979,6 +1033,20 @@ class CommercialAPIClient:
         normalized.retry_count = retry_count
         normalized.request_hash = request_hash
         normalized.context = dict(self._context)
+        if normalized.filled_labels:
+            self._append_jsonl(
+                "diagnostics.jsonl",
+                {
+                    "type": "label_floor_fill",
+                    "request_hash": request_hash,
+                    "requested_model": self.model,
+                    "returned_model": normalized.returned_model,
+                    "context": dict(self._context),
+                    "filled_labels": list(normalized.filled_labels),
+                    "top_tokens": normalized.top_tokens,
+                    "label_probs": normalized.label_probs,
+                },
+            )
         with self._lock:
             self._write_json_atomic(cache_path, normalized.to_dict())
             self.logical_meter.add(normalized, cache_hit=False)

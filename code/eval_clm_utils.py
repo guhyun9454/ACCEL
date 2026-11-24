@@ -80,6 +80,10 @@ def parse_arguments():
                         help="Required API safety guard unless --api_max_cost_usd is supplied.")
     parser.add_argument("--api_force_requests", action="store_true",
                         help="Bypass durable API response cache. --force alone never reissues paid calls.")
+    parser.add_argument("--api_share_cache_across_runs", action="store_true",
+                        help="Leave run_idx out of the API request hash so identical prompts are requested once and replayed for every --n_runs stream order (runs then differ only in order/prefix, not in API noise).")
+    parser.add_argument("--api_missing_label_fill", type=str, default="none", choices=["none", "topk_floor"],
+                        help="none (default): a label missing from the top-k aborts the run. topk_floor: give each missing label the k-th returned token's probability (its upper bound), logged as label_floor_fill in diagnostics.jsonl.")
     parser.add_argument("--api_timeout_seconds", type=float, default=60.0)
     parser.add_argument("--api_max_retries", type=int, default=6)
     parser.add_argument("--api_concurrency", type=int, default=4,

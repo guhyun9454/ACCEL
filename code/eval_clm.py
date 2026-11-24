@@ -3422,6 +3422,10 @@ def main():
             output_usd_per_mtok=args.api_output_usd_per_mtok,
             scoring_mode=args.api_scoring_mode,
             equal_label_bias=args.api_equal_label_bias,
+            hash_exclude_context_keys=(
+                ("run_idx",) if bool(getattr(args, "api_share_cache_across_runs", False)) else ()
+            ),
+            missing_label_fill=str(getattr(args, "api_missing_label_fill", "none")),
         )
         toker = None
         logger.info(

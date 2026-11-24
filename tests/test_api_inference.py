@@ -246,6 +246,31 @@ class LabelNormalizationTest(unittest.TestCase):
             normalize_label_logprobs(_top_entries(("A", "B", "C")), list("ABCD"))
         self.assertEqual(ctx.exception.missing_labels, ["D"])
 
+    def test_topk_floor_fill_bounds_missing_label(self):
+        entries = _top_entries(("A", "B", "C")) + [{"token": "Option", "logprob": -9.0}]
+        filled = []
+        probs, label_lps, _ = normalize_label_logprobs(
+            entries, list("ABCD"), missing_label_fill="topk_floor", filled_out=filled
+        )
+        self.assertEqual(filled, ["D"])
+        self.assertAlmostEqual(label_lps["D"], -9.0)
+        self.assertAlmostEqual(sum(probs), 1.0)
+
+    def test_hash_excludes_run_idx_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = CommercialAPIClient(provider="openai", model="gpt-4o-mini-2024-07-18", cache_dir=tmp,
+                                         max_requests=1, hash_exclude_context_keys=("run_idx",))
+            plain = CommercialAPIClient(provider="openai", model="gpt-4o-mini-2024-07-18", cache_dir=tmp,
+                                        max_requests=1)
+            msgs = [{"role": "user", "content": "q"}]
+            hashes = {"shared": set(), "plain": set()}
+            for run_idx in (0, 1):
+                for name, client in (("shared", shared), ("plain", plain)):
+                    client.set_context(task="csqa", run_idx=run_idx)
+                    hashes[name].add(client._request_hash(client._request_payload(msgs, list("ABCDE"))))
+            self.assertEqual(len(hashes["shared"]), 1)
+            self.assertEqual(len(hashes["plain"]), 2)
+
     def test_exact_label_mode_rejects_whitespace_variant(self):
         with self.assertRaises(LabelCoverageError) as ctx:
             normalize_label_logprobs(
