@@ -939,7 +939,9 @@ class CommercialAPIClient:
             "messages": [dict(m) for m in messages],
             "n": int(n),
             "temperature": self.sample_temperature,
-            "max_completion_tokens": int(self.registry.get("max_completion_tokens", 8)),
+            # A sampled completion may continue after the label ("B. library ..."); a too-small
+            # budget makes luna reject the whole request (400 "max_tokens ... reached").
+            "max_completion_tokens": int(self.registry.get("sample_max_completion_tokens", 32)),
         }
         reasoning_effort = self.registry.get("reasoning_effort")
         if reasoning_effort is not None:
