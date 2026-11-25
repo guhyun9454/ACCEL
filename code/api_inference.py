@@ -14,6 +14,7 @@ commercial API dependencies.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
@@ -948,41 +949,46 @@ class CommercialAPIClient:
             kwargs["reasoning_effort"] = str(reasoning_effort)
         return client.chat.completions.create(**kwargs)
 
+    def _sample_chunk(self, messages: Sequence[Mapping[str, str]], n: int) -> Tuple[Any, int]:
+        retries = 0
+        while True:
+            try:
+                self._reserve_network_attempt()
+                return self._call_provider_samples(messages, n), retries
+            except APIBudgetExceeded:
+                raise
+            except Exception as exc:
+                if retries >= self.max_retries or not self._retryable(exc):
+                    raise APIInferenceError(f"API sampling request failed after {retries} retries: {exc}") from exc
+                time.sleep(min(30.0, 0.75 * (2 ** retries)) + random.random() * 0.25)
+                retries += 1
+
     def _sample_labels(
         self, messages: Sequence[Mapping[str, str]], labels: Sequence[str]
     ) -> Tuple[LabelProbabilityResponse, int]:
-        """sample_n completions in requests of at most max_n; counts -> smoothed distribution."""
+        """sample_n completions in requests of at most max_n, issued in parallel (the Latin-stage
+        loop of eval_clm calls one prompt at a time); counts -> smoothed distribution."""
         max_n = int(self.registry.get("max_n", 8))
+        sizes = [max_n] * (self.sample_n // max_n) + ([self.sample_n % max_n] if self.sample_n % max_n else [])
+        with ThreadPoolExecutor(max_workers=len(sizes)) as pool:
+            results = list(pool.map(lambda n: self._sample_chunk(messages, n), sizes))
         counts = [0] * len(labels)
         invalid: List[str] = []
         usage = TokenUsage()
         returned_model, response_id, retries, drawn = self.model, "", 0, 0
-        while drawn < self.sample_n:
-            n = min(max_n, self.sample_n - drawn)
-            while True:
-                try:
-                    self._reserve_network_attempt()
-                    raw = self._call_provider_samples(messages, n)
-                    break
-                except APIBudgetExceeded:
-                    raise
-                except Exception as exc:
-                    if retries >= self.max_retries or not self._retryable(exc):
-                        raise APIInferenceError(f"API sampling request failed after {retries} retries: {exc}") from exc
-                    time.sleep(min(30.0, 0.75 * (2 ** retries)) + random.random() * 0.25)
-                    retries += 1
+        for raw, r in results:
+            retries += r
             usage.add(_openai_usage(raw))
             returned_model = str(_get(raw, "model", returned_model) or returned_model)
             response_id = response_id or str(_get(raw, "id", "") or "")
-            choices = list(_get(raw, "choices", []) or [])
-            for choice in choices:
+            for choice in list(_get(raw, "choices", []) or []):
                 text = _get(_get(choice, "message", None), "content", "")
                 lab = parse_sampled_label(text, labels)
                 if lab is None:
                     invalid.append(str(text or "")[:40])
                 else:
                     counts[list(labels).index(lab)] += 1
-            drawn += max(1, len(choices))
+                drawn += 1
         probs = sampled_label_probs(counts, self.sample_pseudocount)
         n_valid = sum(counts)
         modal = labels[int(max(range(len(labels)), key=lambda i: counts[i]))] if n_valid else ""

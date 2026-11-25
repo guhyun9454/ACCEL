@@ -800,11 +800,11 @@ class SampleScoringModeTest(unittest.TestCase):
                                     sample_n=20, transport=transport, max_requests=100)
             msgs, labels = [{"role": "user", "content": "q"}], ["A", "B", "C", "D"]
             r = c.complete_labels(msgs, labels)
-            self.assertEqual(calls, [8, 8, 4])
+            self.assertEqual(sorted(calls), [4, 8, 8])
             self.assertEqual({t["token"]: t["count"] for t in r.top_tokens}, {"A": 0, "B": 17, "C": 3, "D": 0})
             self.assertAlmostEqual(sum(r.label_probs), 1.0, places=12)
             self.assertEqual((r.first_token, r.tail_mass), ("B", 0.0))
             self.assertEqual((r.usage.input_tokens, r.usage.output_tokens), (120, 80))
             r2 = c.complete_labels(msgs, labels)
             self.assertTrue(r2.cache_hit)
-            self.assertEqual(calls, [8, 8, 4])
+            self.assertEqual(len(calls), 3)
