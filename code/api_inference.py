@@ -21,9 +21,10 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 import threading
 import time
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 PRICE_SNAPSHOT_DATE = "2026-07-14"
@@ -66,10 +67,12 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "model": "gpt-5.6-luna",
         "api_key_env": "OPENAI_API_KEY",
         "base_url": None,
-        "input_usd_per_mtok": 1.00,
-        "cached_input_usd_per_mtok": 0.10,
-        "output_usd_per_mtok": 6.00,
-        "pricing_snapshot_date": "2026-07-21",
+        # Price page re-read 2026-11-25 (developers.openai.com/api/docs/pricing, Standard, short
+        # context); the 2026-07-21 snapshot was $1.00 / $0.10 / $6.00.
+        "input_usd_per_mtok": 0.20,
+        "cached_input_usd_per_mtok": 0.02,
+        "output_usd_per_mtok": 1.20,
+        "pricing_snapshot_date": "2026-11-25",
         # Luna accepts Chat Completions logprobs, but its live endpoint caps
         # top_logprobs at 5. Disable reasoning for one-token MCQ scoring and
         # leave enough completion budget for the visible label token.
@@ -77,6 +80,24 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "max_completion_tokens": 8,
         "reasoning_effort": "none",
         "temperature": None,
+        "max_n": 8,
+    },
+    # ARR Oct #12943 G1b (2026-11-25): logprobs need reasoning_effort "none" and are capped at
+    # top-5 with low-probability entries dropped, so this model is used with scoring_mode="sample".
+    "openai:gpt-6-luna": {
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "api_key_env": "OPENAI_API_KEY",
+        "base_url": None,
+        "input_usd_per_mtok": 0.10,
+        "cached_input_usd_per_mtok": 0.01,
+        "output_usd_per_mtok": 0.50,
+        "pricing_snapshot_date": "2026-11-25",
+        "top_logprobs": 5,
+        "max_completion_tokens": 8,
+        "reasoning_effort": "none",
+        "temperature": None,
+        "max_n": 8,
     },
     "gemini:gemini-2.5-flash-lite": {
         "provider": "gemini",
@@ -290,6 +311,33 @@ def _canonical_label(token: Any, labels: Sequence[str]) -> Optional[str]:
         if text == str(label) or text.upper() == str(label).upper():
             return str(label)
     return None
+
+
+def parse_sampled_label(text: Any, labels: Sequence[str]) -> Optional[str]:
+    """Option label of one sampled completion: the first alphanumeric token that is a label
+    ("B", "B. library", "**B**", "Answer: B" -> "B"); exact case first, then case-insensitive
+    when unambiguous. None when no token is a label."""
+    tokens = re.findall(r"[A-Za-z0-9]+", str(text or ""))
+    exact = {str(x): str(x) for x in labels}
+    folded: Dict[str, List[str]] = {}
+    for x in labels:
+        folded.setdefault(str(x).upper(), []).append(str(x))
+    for tok in tokens:
+        if tok in exact:
+            return exact[tok]
+        hit = folded.get(tok.upper())
+        if hit and len(hit) == 1:
+            return hit[0]
+    return None
+
+
+def sampled_label_probs(counts: Sequence[int], pseudocount: float) -> List[float]:
+    """Label distribution from sample counts with an additive pseudocount per label (keeps every
+    label positive so log-space priors stay finite)."""
+    total = float(sum(counts)) + pseudocount * len(counts)
+    if total <= 0:
+        return [1.0 / len(counts)] * len(counts)
+    return [(float(c) + pseudocount) / total for c in counts]
 
 
 def normalize_label_logprobs(
@@ -547,6 +595,9 @@ class CommercialAPIClient:
         transport: Any = None,
         hash_exclude_context_keys: Sequence[str] = (),
         missing_label_fill: str = "none",
+        sample_n: int = 100,
+        sample_temperature: float = 1.0,
+        sample_pseudocount: float = 0.5,
     ) -> None:
         self.provider = str(provider).strip().lower()
         self.model = str(model).strip()
@@ -563,7 +614,7 @@ class CommercialAPIClient:
         self.max_requests = None if max_requests is None else int(max_requests)
         self.force_requests = bool(force_requests)
         self.scoring_mode = str(scoring_mode or "topk_strict").strip().lower()
-        if self.scoring_mode not in {"topk_strict", "equal_label_bias"}:
+        if self.scoring_mode not in {"topk_strict", "equal_label_bias", "sample"}:
             raise ValueError(f"unsupported API scoring mode: {scoring_mode}")
         self.equal_label_bias = float(equal_label_bias)
         if self.scoring_mode == "equal_label_bias":
@@ -601,6 +652,16 @@ class CommercialAPIClient:
         self.missing_label_fill = str(missing_label_fill or "none")
         if self.missing_label_fill not in {"none", "topk_floor"}:
             raise ValueError(f"unsupported missing_label_fill: {missing_label_fill}")
+        # scoring_mode="sample": label distribution from sample_n sampled completions per prompt
+        # (n <= registry max_n per request), for models without usable top-k logprobs.
+        self.sample_n = int(sample_n)
+        self.sample_temperature = float(sample_temperature)
+        self.sample_pseudocount = float(sample_pseudocount)
+        if self.scoring_mode == "sample":
+            if self.provider != "openai":
+                raise ValueError("scoring_mode=sample currently supports only the OpenAI provider")
+            if self.sample_n < 1 or self.sample_pseudocount < 0:
+                raise ValueError("sample_n must be >= 1 and sample_pseudocount >= 0")
 
     @property
     def pricing(self) -> Dict[str, Any]:
@@ -656,6 +717,12 @@ class CommercialAPIClient:
             payload["scoring_mode"] = self.scoring_mode
             payload["equal_label_bias"] = self.equal_label_bias
             payload["logit_bias"] = self._label_logit_bias(labels)
+        if self.scoring_mode == "sample":
+            payload["scoring_mode"] = "sample"
+            payload["sample_n"] = self.sample_n
+            payload["sample_temperature"] = self.sample_temperature
+            payload["sample_pseudocount"] = self.sample_pseudocount
+            payload.pop("top_logprobs", None)
         return payload
 
     def _label_token_ids(self, labels: Sequence[str]) -> Dict[str, int]:
@@ -860,6 +927,79 @@ class CommercialAPIClient:
             kwargs["extra_body"] = dict(extra_body)
         return client.chat.completions.create(**kwargs)
 
+    def _call_provider_samples(self, messages: Sequence[Mapping[str, str]], n: int) -> Any:
+        if self._transport is not None:
+            return self._transport(
+                provider=self.provider, model=self.model, messages=[dict(m) for m in messages],
+                scoring_mode="sample", n=int(n), temperature=self.sample_temperature,
+            )
+        client = self._ensure_sdk_client()
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": [dict(m) for m in messages],
+            "n": int(n),
+            "temperature": self.sample_temperature,
+            "max_completion_tokens": int(self.registry.get("max_completion_tokens", 8)),
+        }
+        reasoning_effort = self.registry.get("reasoning_effort")
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = str(reasoning_effort)
+        return client.chat.completions.create(**kwargs)
+
+    def _sample_labels(
+        self, messages: Sequence[Mapping[str, str]], labels: Sequence[str]
+    ) -> Tuple[LabelProbabilityResponse, int]:
+        """sample_n completions in requests of at most max_n; counts -> smoothed distribution."""
+        max_n = int(self.registry.get("max_n", 8))
+        counts = [0] * len(labels)
+        invalid: List[str] = []
+        usage = TokenUsage()
+        returned_model, response_id, retries, drawn = self.model, "", 0, 0
+        while drawn < self.sample_n:
+            n = min(max_n, self.sample_n - drawn)
+            while True:
+                try:
+                    self._reserve_network_attempt()
+                    raw = self._call_provider_samples(messages, n)
+                    break
+                except APIBudgetExceeded:
+                    raise
+                except Exception as exc:
+                    if retries >= self.max_retries or not self._retryable(exc):
+                        raise APIInferenceError(f"API sampling request failed after {retries} retries: {exc}") from exc
+                    time.sleep(min(30.0, 0.75 * (2 ** retries)) + random.random() * 0.25)
+                    retries += 1
+            usage.add(_openai_usage(raw))
+            returned_model = str(_get(raw, "model", returned_model) or returned_model)
+            response_id = response_id or str(_get(raw, "id", "") or "")
+            choices = list(_get(raw, "choices", []) or [])
+            for choice in choices:
+                text = _get(_get(choice, "message", None), "content", "")
+                lab = parse_sampled_label(text, labels)
+                if lab is None:
+                    invalid.append(str(text or "")[:40])
+                else:
+                    counts[list(labels).index(lab)] += 1
+            drawn += max(1, len(choices))
+        probs = sampled_label_probs(counts, self.sample_pseudocount)
+        n_valid = sum(counts)
+        modal = labels[int(max(range(len(labels)), key=lambda i: counts[i]))] if n_valid else ""
+        response = LabelProbabilityResponse(
+            label_probs=probs,
+            label_logprobs={str(l): float(math.log(p)) for l, p in zip(labels, probs)},
+            top_tokens=[{"token": str(l), "count": int(c)} for l, c in zip(labels, counts)]
+            + ([{"token": "<invalid>", "count": len(invalid), "examples": invalid[:5]}] if invalid else []),
+            usage=usage,
+            requested_model=self.model,
+            returned_model=returned_model,
+            provider=self.provider,
+            response_id=response_id,
+            first_token=modal,
+            top_k_mass=n_valid / float(max(1, drawn)),
+            tail_mass=len(invalid) / float(max(1, drawn)),
+        )
+        return response, retries
+
     @staticmethod
     def _retryable(exc: Exception) -> bool:
         status = getattr(exc, "status_code", None)
@@ -973,7 +1113,7 @@ class CommercialAPIClient:
 
         started = time.perf_counter()
         retry_count = 0
-        while True:
+        while self.scoring_mode != "sample":
             raw = None
             try:
                 self._reserve_network_attempt()
@@ -1026,6 +1166,14 @@ class CommercialAPIClient:
                 delay = min(30.0, 0.75 * (2 ** retry_count)) + random.random() * 0.25
                 retry_count += 1
                 time.sleep(delay)
+        if self.scoring_mode == "sample":
+            normalized, retry_count = self._sample_labels(messages, labels)
+            if normalized.tail_mass > 0:
+                self._append_jsonl(
+                    "diagnostics.jsonl",
+                    {"type": "sample_invalid", "request_hash": request_hash, "context": dict(self._context),
+                     "invalid_share": normalized.tail_mass, "top_tokens": normalized.top_tokens},
+                )
 
         normalized.latency_ms = (time.perf_counter() - started) * 1000.0
         normalized.cost_usd = self._cost(normalized.usage)

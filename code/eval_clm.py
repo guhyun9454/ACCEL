@@ -3426,6 +3426,9 @@ def main():
                 ("run_idx",) if bool(getattr(args, "api_share_cache_across_runs", False)) else ()
             ),
             missing_label_fill=str(getattr(args, "api_missing_label_fill", "none")),
+            sample_n=int(getattr(args, "api_sample_n", 100)),
+            sample_temperature=float(getattr(args, "api_sample_temperature", 1.0)),
+            sample_pseudocount=float(getattr(args, "api_sample_pseudocount", 0.5)),
         )
         toker = None
         logger.info(

@@ -62,8 +62,14 @@ def parse_arguments():
                         choices=["baseline", "label_only"],
                         help="API-only prompt policy. baseline preserves the original PriDe prompt; label_only adds a strict one-label instruction.")
     parser.add_argument("--api_scoring_mode", type=str, default="topk_strict",
-                        choices=["topk_strict", "equal_label_bias"],
-                        help="API label scoring policy. equal_label_bias adds the same positive logit bias to each exact canonical label token and is reported as a separate constrained protocol.")
+                        choices=["topk_strict", "equal_label_bias", "sample"],
+                        help="API label scoring policy. equal_label_bias adds the same positive logit bias to each exact canonical label token and is reported as a separate constrained protocol. sample: label distribution from --api_sample_n sampled completions per prompt (for models without usable top-k logprobs).")
+    parser.add_argument("--api_sample_n", type=int, default=100,
+                        help="scoring_mode=sample: completions sampled per prompt (requests of at most the model's max_n).")
+    parser.add_argument("--api_sample_temperature", type=float, default=1.0,
+                        help="scoring_mode=sample: sampling temperature.")
+    parser.add_argument("--api_sample_pseudocount", type=float, default=0.5,
+                        help="scoring_mode=sample: additive count per label before normalising (0.5 = Jeffreys).")
     parser.add_argument("--api_equal_label_bias", type=float, default=100.0,
                         help="Common logit bias for every canonical label token in equal_label_bias mode (0, 100].")
     parser.add_argument("--api_adaptive_percentile", type=float, default=None,

@@ -440,10 +440,11 @@ class ClientBehaviorTest(unittest.TestCase):
             self.assertEqual(payload["top_logprobs"], 5)
             self.assertEqual(payload["max_output_tokens"], 8)
             self.assertIsNone(payload["temperature"])
-            self.assertEqual(client.pricing["snapshot_date"], "2026-07-21")
-            self.assertEqual(client.pricing["input_usd_per_mtok"], 1.0)
-            self.assertEqual(client.pricing["cached_input_usd_per_mtok"], 0.1)
-            self.assertEqual(client.pricing["output_usd_per_mtok"], 6.0)
+            # price page re-read 2026-11-25 (was 1.00 / 0.10 / 6.00 on 2026-07-21)
+            self.assertEqual(client.pricing["snapshot_date"], "2026-11-25")
+            self.assertEqual(client.pricing["input_usd_per_mtok"], 0.2)
+            self.assertEqual(client.pricing["cached_input_usd_per_mtok"], 0.02)
+            self.assertEqual(client.pricing["output_usd_per_mtok"], 1.2)
 
     def test_vertex_registry_uses_adc_and_gemini_output_metering(self):
         with tempfile.TemporaryDirectory() as td:
@@ -754,3 +755,56 @@ class AdaptiveRouterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+# --- scoring_mode="sample" (ARR Oct G1b) ---------------------------------------------------------
+
+class SampleScoringModeTest(unittest.TestCase):
+    def test_parse_sampled_label_variants(self):
+        from api_inference import parse_sampled_label
+        labels = ["A", "B", "C", "D", "E"]
+        self.assertEqual(parse_sampled_label("B", labels), "B")
+        self.assertEqual(parse_sampled_label("B. library", labels), "B")
+        self.assertEqual(parse_sampled_label("**C**", labels), "C")
+        self.assertEqual(parse_sampled_label("Answer: D", labels), "D")
+        self.assertIsNone(parse_sampled_label("", labels))
+        self.assertIsNone(parse_sampled_label("none of these", labels))
+        self.assertEqual(parse_sampled_label("b", labels), "B")
+        self.assertEqual(parse_sampled_label("a", ["a", "b", "c", "d"]), "a")
+        self.assertEqual(parse_sampled_label("2", ["1", "2", "3", "4"]), "2")
+
+    def test_sampled_label_probs_pseudocount(self):
+        from api_inference import sampled_label_probs
+        p = sampled_label_probs([98, 2, 0, 0], 0.5)
+        self.assertAlmostEqual(sum(p), 1.0, places=12)
+        self.assertGreater(min(p), 0)
+        self.assertAlmostEqual(p[0], 98.5 / 102.0, places=12)
+        self.assertEqual(sampled_label_probs([0, 0, 0], 0.0), [1 / 3] * 3)
+
+    def test_sample_mode_end_to_end_with_fake_transport(self):
+        calls = []
+
+        def transport(**kw):
+            calls.append(kw["n"])
+            outs = ["B"] * (kw["n"] - 1) + ["C. meadow"]
+            return SimpleNamespace(
+                model="gpt-6-luna", id="x",
+                choices=[SimpleNamespace(message=SimpleNamespace(content=o)) for o in outs],
+                usage=SimpleNamespace(prompt_tokens=40, completion_tokens=4 * kw["n"], prompt_tokens_details=None,
+                                      completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
+                                      total_tokens=40 + 4 * kw["n"]))
+
+        with tempfile.TemporaryDirectory() as d:
+            c = CommercialAPIClient(provider="openai", model="gpt-6-luna", cache_dir=d, scoring_mode="sample",
+                                    sample_n=20, transport=transport, max_requests=100)
+            msgs, labels = [{"role": "user", "content": "q"}], ["A", "B", "C", "D"]
+            r = c.complete_labels(msgs, labels)
+            self.assertEqual(calls, [8, 8, 4])
+            self.assertEqual({t["token"]: t["count"] for t in r.top_tokens}, {"A": 0, "B": 17, "C": 3, "D": 0})
+            self.assertAlmostEqual(sum(r.label_probs), 1.0, places=12)
+            self.assertEqual((r.first_token, r.tail_mass), ("B", 0.0))
+            self.assertEqual((r.usage.input_tokens, r.usage.output_tokens), (120, 80))
+            r2 = c.complete_labels(msgs, labels)
+            self.assertTrue(r2.cache_hit)
+            self.assertEqual(calls, [8, 8, 4])
