@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 PAIRWISE_TASKS = ('rewardbench', 'mtbench', 'prefbench')
 # X-CSQA (multilingual CommonsenseQA, 5 options), one task per language; data_xcsqa/process.py.
 XCSQA_TASKS = ('xcsqa_en', 'xcsqa_zh', 'xcsqa_de', 'xcsqa_ar', 'xcsqa_hi')
+# MMMLU (MMLU test human-translated by OpenAI), one task per language; data_mmmlu/process.py. The 'mmlu'
+# substring keeps MMLU's per-subject system message.
+MMMLU_TASKS = ('mmmlu_zh', 'mmmlu_de', 'mmmlu_ar', 'mmmlu_hi')
 
 
 def parse_arguments():
@@ -285,7 +288,7 @@ def parse_arguments():
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
         task = eval_args[0]
-        if task not in ['mmlu', 'arc', 'csqa', 'race', 'racem', 'raceall', 'medmcqa', 'mmlupro', 'logiqa2'] + list(PAIRWISE_TASKS) + list(XCSQA_TASKS):
+        if task not in ['mmlu', 'arc', 'csqa', 'race', 'racem', 'raceall', 'medmcqa', 'mmlupro', 'logiqa2'] + list(PAIRWISE_TASKS) + list(XCSQA_TASKS) + list(MMMLU_TASKS):
             raise ValueError(f"Unknown task: {task}")
 
         num_few_shot = int(eval_args[1])

@@ -31,6 +31,7 @@ from eval_clm_utils import (
     prepare_eval,
     select_api_probe_subjects,
     XCSQA_TASKS,
+    MMMLU_TASKS,
 )
 from eval_clm_online import (
     _recall_std,
@@ -3493,7 +3494,7 @@ def main():
             1 if api_backend and bool(getattr(args, "api_probe_only", False))
             else max(1, int(getattr(args, "n_runs", 1)))
         )
-        skip_per_subject_plots = (args.task == "mmlu" and len(subjects) > 1)
+        skip_per_subject_plots = ((args.task == "mmlu" or args.task in MMMLU_TASKS) and len(subjects) > 1)
 
         # 논문 테이블용 Base T/F 기준 트랜지션 기록 (Cyclic & Full)
         transition_records_cyclic: List[dict] = []
