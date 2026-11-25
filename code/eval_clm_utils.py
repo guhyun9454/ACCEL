@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 # k=2. Their data is built by code/data_<task>/process.py on top of
 # code/pairwise_data_utils.py.
 PAIRWISE_TASKS = ('rewardbench', 'mtbench', 'prefbench')
+# X-CSQA (multilingual CommonsenseQA, 5 options), one task per language; data_xcsqa/process.py.
+XCSQA_TASKS = ('xcsqa_en', 'xcsqa_zh', 'xcsqa_de', 'xcsqa_ar', 'xcsqa_hi')
 
 
 def parse_arguments():
@@ -283,7 +285,7 @@ def parse_arguments():
     for eval_name in args.eval_names:
         eval_args = eval_name.split(',')
         task = eval_args[0]
-        if task not in ['mmlu', 'arc', 'csqa', 'race', 'racem', 'raceall', 'medmcqa', 'mmlupro', 'logiqa2'] + list(PAIRWISE_TASKS):
+        if task not in ['mmlu', 'arc', 'csqa', 'race', 'racem', 'raceall', 'medmcqa', 'mmlupro', 'logiqa2'] + list(PAIRWISE_TASKS) + list(XCSQA_TASKS):
             raise ValueError(f"Unknown task: {task}")
 
         num_few_shot = int(eval_args[1])
@@ -349,7 +351,7 @@ def prepare_eval(args, eval_name):
 
     option_ids = list('ABCD')
     option_ids_header = list('ABCD')
-    if task in ['csqa']:
+    if task in ['csqa'] or task in XCSQA_TASKS:
         option_ids = list('ABCDE')
         option_ids_header = list('ABCDE')
     elif task == 'mmlupro':

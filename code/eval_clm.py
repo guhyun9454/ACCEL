@@ -30,6 +30,7 @@ from eval_clm_utils import (
     parse_arguments,
     prepare_eval,
     select_api_probe_subjects,
+    XCSQA_TASKS,
 )
 from eval_clm_online import (
     _recall_std,
@@ -2962,7 +2963,7 @@ def _run_api_adaptive(args, model, wandb_ok=False, wandb_run=None):
         if args.setting not in {"full", "cyclic", "perm"}:
             raise ValueError("adaptive API requires a permutation setting; use --eval_names task,shots,full")
         subjects = select_api_probe_subjects(args, subjects)
-        option_ids = list(args.option_id_set or ("ABCDE" if args.task == "csqa" else "ABCD"))
+        option_ids = list(args.option_id_set or ("ABCDE" if args.task == "csqa" or args.task in XCSQA_TASKS else "ABCD"))
         k = len(option_ids)
         cyclic_schedule = _rotations(k)
         run_rows, trajectories = [], []
