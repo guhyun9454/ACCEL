@@ -34,7 +34,9 @@ logger = logging.getLogger(__name__)
 # code/pairwise_data_utils.py.
 PAIRWISE_TASKS = ('rewardbench', 'mtbench', 'prefbench')
 # X-CSQA (multilingual CommonsenseQA, 5 options), one task per language; data_xcsqa/process.py.
-XCSQA_TASKS = ('xcsqa_en', 'xcsqa_zh', 'xcsqa_de', 'xcsqa_ar', 'xcsqa_hi')
+XCSQA_TASKS = ('xcsqa_en', 'xcsqa_zh', 'xcsqa_de', 'xcsqa_ar', 'xcsqa_hi',
+               'xcsqa_es', 'xcsqa_fr', 'xcsqa_it', 'xcsqa_ja', 'xcsqa_nl', 'xcsqa_pl', 'xcsqa_pt', 'xcsqa_ru',
+               'xcsqa_vi', 'xcsqa_sw', 'xcsqa_ur')
 # MMMLU (MMLU test human-translated by OpenAI), one task per language; data_mmmlu/process.py. The 'mmlu'
 # substring keeps MMLU's per-subject system message.
 MMMLU_TASKS = ('mmmlu_zh', 'mmmlu_de', 'mmmlu_ar', 'mmmlu_hi')
